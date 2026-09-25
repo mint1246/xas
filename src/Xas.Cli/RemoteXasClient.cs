@@ -103,6 +103,7 @@ public sealed class RemoteXasClient : IXasClient, IDisposable
 
     public async Task<int> RunShellAsync(ShellRequest request, string? deviceId, CancellationToken cancellationToken)
     {
+        using var outputCodePage = TerminalMode.EnterUtf8Output();
         var configured = Resolve(deviceId) ?? throw new XasClientException("No matching configured device.");
         var info = await GetDeviceInfoAsync(configured.DeviceId, cancellationToken).ConfigureAwait(false);
         configured = Resolve(configured.DeviceId) ?? configured;

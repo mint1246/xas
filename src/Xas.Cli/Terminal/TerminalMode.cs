@@ -13,23 +13,29 @@ public sealed class TerminalMode : IDisposable
     private const uint EnableEchoInput = 0x0004;
     private const uint EnableVirtualTerminalInput = 0x0200;
     private const uint EnableVirtualTerminalProcessing = 0x0004;
+    private const uint Utf8CodePage = 65001;
 
     private readonly IntPtr _inputHandle;
     private readonly IntPtr _outputHandle;
     private readonly uint _oldInputMode;
     private readonly uint _oldOutputMode;
+    private readonly uint _oldInputCodePage;
+    private readonly uint _oldOutputCodePage;
     private readonly string? _unixSavedMode;
     private bool _disposed;
 
     public int Columns { get; }
     public int Rows { get; }
 
-    private TerminalMode(IntPtr inputHandle, IntPtr outputHandle, uint oldInputMode, uint oldOutputMode)
+    private TerminalMode(IntPtr inputHandle, IntPtr outputHandle, uint oldInputMode, uint oldOutputMode,
+        uint oldInputCodePage, uint oldOutputCodePage)
     {
         _inputHandle = inputHandle;
         _outputHandle = outputHandle;
         _oldInputMode = oldInputMode;
         _oldOutputMode = oldOutputMode;
+        _oldInputCodePage = oldInputCodePage;
+        _oldOutputCodePage = oldOutputCodePage;
         Columns = Console.WindowWidth;
         Rows = Console.WindowHeight;
     }
@@ -54,6 +60,10 @@ public sealed class TerminalMode : IDisposable
             throw new InvalidOperationException("The process does not have usable console handles.");
         if (!GetConsoleMode(input, out var inputMode) || !GetConsoleMode(output, out var outputMode))
             throw new InvalidOperationException("Raw terminal mode requires an attached Windows console.");
+        var inputCodePage = GetConsoleCP();
+        var outputCodePage = GetConsoleOutputCP();
+        if (inputCodePage == 0 || outputCodePage == 0)
+            throw new InvalidOperationException("Could not read the Windows console code pages.");
 
         var rawInput = (inputMode & ~(EnableProcessedInput | EnableLineInput | EnableEchoInput)) | EnableVirtualTerminalInput;
         var vtOutput = outputMode | EnableVirtualTerminalProcessing;
@@ -64,13 +74,25 @@ public sealed class TerminalMode : IDisposable
             SetConsoleMode(input, inputMode);
             throw new InvalidOperationException("Could not enable VT output mode.");
         }
+        // The shell stream contains UTF-8 bytes. WriteFile/ReadFile on a Windows
+        // console interpret those bytes using its active code pages.
+        if (!SetConsoleCP(Utf8CodePage) || !SetConsoleOutputCP(Utf8CodePage))
+        {
+            SetConsoleOutputCP(outputCodePage);
+            SetConsoleCP(inputCodePage);
+            SetConsoleMode(output, outputMode);
+            SetConsoleMode(input, inputMode);
+            throw new InvalidOperationException("Could not enable UTF-8 console input and output.");
+        }
 
         try
         {
-            return new TerminalMode(input, output, inputMode, outputMode);
+            return new TerminalMode(input, output, inputMode, outputMode, inputCodePage, outputCodePage);
         }
         catch
         {
+            SetConsoleOutputCP(outputCodePage);
+            SetConsoleCP(inputCodePage);
             SetConsoleMode(output, outputMode);
             SetConsoleMode(input, inputMode);
             throw;
@@ -86,10 +108,12 @@ public sealed class TerminalMode : IDisposable
             RunStty(_unixSavedMode);
             return;
         }
+        var outputCodePageRestored = SetConsoleOutputCP(_oldOutputCodePage);
+        var inputCodePageRestored = SetConsoleCP(_oldInputCodePage);
         var outputRestored = SetConsoleMode(_outputHandle, _oldOutputMode);
         var inputRestored = SetConsoleMode(_inputHandle, _oldInputMode);
-        if (!outputRestored || !inputRestored)
-            throw new InvalidOperationException("Could not restore the original console modes.");
+        if (!outputCodePageRestored || !inputCodePageRestored || !outputRestored || !inputRestored)
+            throw new InvalidOperationException("Could not restore the original console settings.");
     }
 
     public static (ushort Columns, ushort Rows) CurrentSize()
@@ -102,6 +126,34 @@ public sealed class TerminalMode : IDisposable
             return (checked((ushort)columns), checked((ushort)rows));
         }
         throw new PlatformNotSupportedException("Terminal size is supported on Windows and Linux.");
+    }
+
+    /// <summary>Use UTF-8 for raw command output written to an attached Windows console.</summary>
+    public static IDisposable EnterUtf8Output()
+    {
+        if (!OperatingSystem.IsWindows() || Console.IsOutputRedirected) return NoopScope.Instance;
+        var output = GetStdHandle(StdOutputHandle);
+        if (output == IntPtr.Zero || output == new IntPtr(-1) || !GetConsoleMode(output, out _))
+            return NoopScope.Instance;
+        var oldCodePage = GetConsoleOutputCP();
+        if (oldCodePage == 0 || !SetConsoleOutputCP(Utf8CodePage))
+            throw new InvalidOperationException("Could not enable UTF-8 console output.");
+        return new OutputCodePageScope(oldCodePage);
+    }
+
+    private sealed class OutputCodePageScope(uint oldCodePage) : IDisposable
+    {
+        public void Dispose()
+        {
+            if (!SetConsoleOutputCP(oldCodePage))
+                throw new InvalidOperationException("Could not restore the original console output code page.");
+        }
+    }
+
+    private sealed class NoopScope : IDisposable
+    {
+        public static readonly NoopScope Instance = new();
+        public void Dispose() { }
     }
 
     private static TerminalMode EnterLinux()
@@ -167,4 +219,14 @@ public sealed class TerminalMode : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetConsoleMode(IntPtr hConsoleHandle, uint dwMode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetConsoleCP();
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint GetConsoleOutputCP();
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleCP(uint wCodePageID);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetConsoleOutputCP(uint wCodePageID);
 }
