@@ -7,7 +7,7 @@ This is a UMDF 2 Indirect Display Driver (IddCx) for creating one Windows monito
 - Windows 11 24H2 or later and a supported x64 Windows installation (the project uses the current UMDF 2.25 toolset; IddCx API level is 1.4).
 - Visual Studio 2022 with C++ desktop tools and the Windows 11 WDK (integrated WDK/MSBuild driver targets).
 - Test signing enabled for local development, followed by reboot. Production deployment requires a Microsoft-signed package.
-- Microsoft `devcon.exe` from the WDK to create the root-enumerated software device, then `pnputil /add-driver XasVirtualDisplay.inf /install` (elevated).
+- Microsoft `devcon.exe` from the WDK to create the root-enumerated software device (elevated). The INF binds the UMDF driver to the IndirectKmd display filter.
 
 Build `XasVirtualDisplay.vcxproj` in Visual Studio, then from an elevated Developer PowerShell create the device with `devcon install XasVirtualDisplay.inf Root\XASVirtualDisplay`. Remove it with `devcon remove Root\XASVirtualDisplay`.
 

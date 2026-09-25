@@ -3,42 +3,48 @@
 Signature="$WINDOWS NT$"
 Class=Display
 ClassGuid={4d36e968-e325-11ce-bfc1-08002be10318}
+ClassVer=2.0
 Provider=%ProviderName%
 DriverVer=09/25/2026,1.0.0.0
 CatalogFile=XasVirtualDisplay.cat
 PnpLockdown=1
 
 [Manufacturer]
-%ProviderName%=Models,NTamd64.10.0...19041
+%ProviderName%=Models,NTamd64.10.0...22000
 
-[Models.NTamd64.10.0...19041]
+[Models.NTamd64.10.0...22000]
 %DeviceDesc%=Device_Install,Root\XASVirtualDisplay
 
 [Device_Install.NT]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT
 CopyFiles=DriverCopy
 
+[Device_Install.NT.hw]
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.HW
+AddReg=DeviceHardwareSettings
+
+[DeviceHardwareSettings]
+HKR,,"UpperFilters",%REG_MULTI_SZ%,"IndirectKmd"
+HKR,"WUDF","DeviceGroupId",%REG_SZ%,"XasVirtualDisplayGroup"
+
 [Device_Install.NT.Services]
-AddService=WUDFRd,0x000001fa,WUDFRD_ServiceInstall
+Include=WUDFRD.inf
+Needs=WUDFRD.NT.Services
 
 [Device_Install.NT.Wdf]
 UmdfService=XasVirtualDisplay,XasVirtualDisplay_ServiceInstall
 UmdfServiceOrder=XasVirtualDisplay
-UmdfExtensions=IddCx0104
+UmdfKernelModeClientPolicy=AllowKernelModeClients
 
 [XasVirtualDisplay_ServiceInstall]
-UmdfLibraryVersion=2.15
-ServiceBinary=%13%\XasVirtualDisplay.dll
+UmdfLibraryVersion=2.25
+ServiceBinary=%12%\UMDF\XasVirtualDisplay.dll
 UmdfExtensions=IddCx0104
 
-[WUDFRD_ServiceInstall]
-DisplayName=%WudfRdDisplayName%
-ServiceType=1
-StartType=3
-ErrorControl=1
-ServiceBinary=%12%\WUDFRd.sys
-
 [DestinationDirs]
-DriverCopy=13
+DriverCopy=12,UMDF
 
 [DriverCopy]
 XasVirtualDisplay.dll
@@ -52,5 +58,6 @@ XasVirtualDisplay.dll=1
 [Strings]
 ProviderName="XAS"
 DeviceDesc="XAS Virtual Linux Display"
-WudfRdDisplayName="Windows Driver Foundation - User-mode Driver Framework Reflector"
 DiskName="XAS Virtual Display Driver"
+REG_MULTI_SZ=0x00010000
+REG_SZ=0x00000000
