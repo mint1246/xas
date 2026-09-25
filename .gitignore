@@ -5,3 +5,4 @@ artifacts/
 *.user
 .nuget-user/
 .nuget-appdata/
+native/linux-pty/xas-linux-pty

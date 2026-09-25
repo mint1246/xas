@@ -74,6 +74,22 @@ public sealed class LocalConfiguration
         lock (_gate) { _settings = _settings with { DefaultDeviceId = peer.DeviceId }; Save(); }
     }
 
+    public bool RemovePeer(string deviceId)
+    {
+        lock (_gate)
+        {
+            var peers = _settings.Peers.Where(p => p.DeviceId != deviceId).ToArray();
+            if (peers.Length == _settings.Peers.Length) return false;
+            _settings = _settings with
+            {
+                Peers = peers,
+                DefaultDeviceId = _settings.DefaultDeviceId == deviceId ? null : _settings.DefaultDeviceId
+            };
+            Save();
+            return true;
+        }
+    }
+
     private void Save()
     {
         var temp = _path + ".tmp";

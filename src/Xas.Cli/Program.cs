@@ -66,6 +66,10 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
                     return await RunCommandAsync(args, targetDevice, cancellationToken);
                 case "exec":
                     return await RunExecutableAsync(args, targetDevice, cancellationToken);
+                case "--sudo":
+                case "--admin":
+                    error.WriteLine("Privileged remote shells are unavailable: no platform privilege broker is installed.");
+                    return 3;
                 case "-h":
                 case "--help":
                 case "help":
@@ -181,6 +185,8 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         writer.WriteLine("  pair <id> <fp> <host> [port] [name]  Approve a peer locally");
         writer.WriteLine("  peers                   List locally approved peers");
         writer.WriteLine("  allow|deny <id> <capability>        Set local peer permission");
+        writer.WriteLine("  revoke <id>             Remove local trust, permissions, and endpoint");
+        writer.WriteLine("  endpoint <id> <host> [port]         Update a paired peer address");
     }
 }
 

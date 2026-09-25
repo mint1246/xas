@@ -2,7 +2,9 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using Xas.Cli;
 using Xas.Core;
+using Xas.Core.Configuration;
 using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Core.Services;
@@ -45,7 +47,7 @@ public static class IntegrationTests
                 var device = JsonSerializer.Deserialize<DeviceInfo>(info.Payload);
                 Assert(device?.DeviceId == serverIdentity.DeviceId, "Info returned the wrong device.");
                 if (device is null) throw new Exception("Info response was empty.");
-                Assert(device.Capabilities.Any(c => c.Capability == Capability.Shell), "Shell capability was not advertised.");
+                Assert(device.Capabilities.Any(c => c.Capability == Capability.Shell && c.Version >= 2), "Streaming shell capability was not advertised.");
 
                 var shellRequest = new ShellRequest(ShellMode.Exec, null, "dotnet",
                     [typeof(IntegrationTests).Assembly.Location, "--echo-args", "hello world"]);
@@ -53,6 +55,27 @@ public static class IntegrationTests
                 var result = ShellWire.DecodeResult(reply.Payload);
                 Assert(result.ExitCode == 0 && Encoding.UTF8.GetString(result.StandardOutput) == "hello world",
                     "The remote argv shell path failed.");
+
+                var config = new LocalConfiguration(Path.Combine(root, "client-config"));
+                config.UpsertPeer(new ConfiguredPeer(serverIdentity.DeviceId, "server", "127.0.0.1", port));
+                config.SetDefault(serverIdentity.DeviceId);
+                using var output = new MemoryStream();
+                using var error = new MemoryStream();
+                using var cliClient = new RemoteXasClient(config, clientIdentity, clientTrust, output, error);
+                var largeRequest = new ShellRequest(ShellMode.Exec, null, "dotnet",
+                    [typeof(IntegrationTests).Assembly.Location, "--echo-output", "1500000"]);
+                var largeExit = await cliClient.RunShellAsync(largeRequest, null, CancellationToken.None);
+                Assert(largeExit == 0 && output.Length == 1_500_000 && error.Length == 0,
+                    "The CLI client did not receive the full binary output stream.");
+
+                output.SetLength(0);
+                using var pipedInput = new MemoryStream(Encoding.UTF8.GetBytes("piped input\n"));
+                using var pipedClient = new RemoteXasClient(config, clientIdentity, clientTrust, output, error, pipedInput);
+                var inputRequest = new ShellRequest(ShellMode.Exec, null, "dotnet",
+                    [typeof(IntegrationTests).Assembly.Location, "--echo-stdin"]);
+                var inputExit = await pipedClient.RunShellAsync(inputRequest, null, CancellationToken.None);
+                Assert(inputExit == 0 && Encoding.UTF8.GetString(output.ToArray()) == "piped input\n",
+                    "The CLI client did not forward binary standard input.");
 
                 permissions.SetAllowed(clientIdentity.DeviceId, Capability.Shell, false);
                 try

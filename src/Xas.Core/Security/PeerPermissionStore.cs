@@ -20,23 +20,33 @@ public sealed class PeerPermissionStore
 
     public bool IsAllowed(string peerId, Capability capability)
     {
-        lock (_gate) return _grants.TryGetValue(peerId, out var set) && set.Contains(capability);
+        lock (_gate) { Refresh(); return _grants.TryGetValue(peerId, out var set) && set.Contains(capability); }
     }
 
     public IReadOnlySet<Capability> GetAllowed(string peerId)
     {
-        lock (_gate) return _grants.TryGetValue(peerId, out var set) ? set.ToHashSet() : new HashSet<Capability>();
+        lock (_gate) { Refresh(); return _grants.TryGetValue(peerId, out var set) ? set.ToHashSet() : new HashSet<Capability>(); }
     }
 
     public void SetAllowed(string peerId, Capability capability, bool allowed)
     {
         lock (_gate)
         {
+            Refresh();
             if (!_grants.TryGetValue(peerId, out var set)) _grants[peerId] = set = [];
             if (allowed) set.Add(capability); else set.Remove(capability);
             Save();
         }
     }
+
+    public void RemovePeer(string peerId)
+    {
+        lock (_gate) { Refresh(); if (_grants.Remove(peerId)) Save(); }
+    }
+
+    private void Refresh() => _grants = File.Exists(_path)
+        ? JsonSerializer.Deserialize<Dictionary<string, HashSet<Capability>>>(File.ReadAllBytes(_path)) ?? new()
+        : new();
 
     private void Save()
     {

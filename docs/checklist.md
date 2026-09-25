@@ -5,18 +5,25 @@
 - [x] Inspect repository, Git state, and installed SDK.
 - [x] Establish shared contracts and solution structure.
 - [x] Verify key platform choices against current upstream documentation.
+- [x] Persistent device identity, manual two-sided pairing, pinned mutual TLS, and local shell grants.
+- [x] Bounded binary framing, request IDs, concurrent requests, cancellation, and binary stream messages.
+- [x] LAN discovery announcements and peer tracking.
+- [x] One-shot shell `-c` and argv `exec`, exit status, streamed stdout/stderr, and bounded piped stdin.
+- [x] Windows ConPTY backend with local terminal/resize/exit test.
+- [x] Linux PTY helper source and managed bridge compile on Windows; Linux runtime test pending.
+- [x] Authenticated endpoint refresh from LAN discovery after a stale address fails.
+- [x] Combined loopback tests and first working Git commit.
 
 ## In progress
 
-- [ ] Persistent identity, explicit pairing, and local peer grants.
-- [ ] Authenticated TLS transport and bounded multiplexed protocol.
-- [ ] Discovery and reconnect.
-- [ ] One-shot remote shell and `xas` CLI.
-- [ ] Automated integration tests and working phase 1 commit.
+- [ ] Wire interactive shell sessions through the authenticated protocol and CLI.
+- [ ] Compile and run the Linux PTY helper on Linux, then connect interactive sessions to the CLI.
+- [ ] Reconnect long-lived sessions after sleep/network changes.
+- [ ] Complete capability negotiation for all services and per-peer grants.
 
 ## Pending
 
-- [ ] Real Linux PTY and Windows ConPTY interactive shells.
+- [ ] Fully networked Linux PTY and Windows ConPTY interactive shells.
 - [ ] Linux sudo and Windows elevated-user service broker.
 - [ ] Windows input capture, Linux portal/libei injection, and disconnect safety.
 - [ ] Windows IddCx virtual display.

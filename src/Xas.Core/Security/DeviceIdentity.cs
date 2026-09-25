@@ -123,7 +123,7 @@ public sealed class PeerTrustStore
         _peers = Load(_path);
     }
 
-    public IReadOnlyList<TrustedPeer> List() { lock (_gate) return _peers.Values.OrderBy(p => p.DeviceId).ToArray(); }
+    public IReadOnlyList<TrustedPeer> List() { lock (_gate) { Refresh(); return _peers.Values.OrderBy(p => p.DeviceId).ToArray(); } }
 
     public void Approve(string deviceId, string fingerprint, string displayName)
     {
@@ -134,6 +134,7 @@ public sealed class PeerTrustStore
             throw new ArgumentException("Device ID does not match the approved public-key fingerprint.", nameof(deviceId));
         lock (_gate)
         {
+            Refresh();
             _peers[deviceId] = new TrustedPeer(deviceId, normalized, displayName, DateTimeOffset.UtcNow);
             Save();
         }
@@ -141,7 +142,7 @@ public sealed class PeerTrustStore
 
     public bool Revoke(string deviceId)
     {
-        lock (_gate) { var removed = _peers.Remove(deviceId); if (removed) Save(); return removed; }
+        lock (_gate) { Refresh(); var removed = _peers.Remove(deviceId); if (removed) Save(); return removed; }
     }
 
     public bool IsTrusted(X509Certificate? certificate)
@@ -152,7 +153,7 @@ public sealed class PeerTrustStore
         if (now < cert.NotBefore.ToUniversalTime() || now > cert.NotAfter.ToUniversalTime()) return false;
         var fp = Convert.ToHexString(SHA256.HashData(cert.PublicKey.ExportSubjectPublicKeyInfo()));
         var id = "xas-" + fp[..32].ToLowerInvariant();
-        lock (_gate) return _peers.TryGetValue(id, out var peer) && CryptographicOperations.FixedTimeEquals(Convert.FromHexString(peer.Fingerprint), Convert.FromHexString(fp));
+        lock (_gate) { Refresh(); return _peers.TryGetValue(id, out var peer) && CryptographicOperations.FixedTimeEquals(Convert.FromHexString(peer.Fingerprint), Convert.FromHexString(fp)); }
     }
 
     /// <summary>Use for SslClientAuthenticationOptions.RemoteCertificateValidationCallback.</summary>
@@ -171,6 +172,8 @@ public sealed class PeerTrustStore
         try { return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, TrustedPeer>>(File.ReadAllBytes(path)) ?? new(StringComparer.Ordinal); }
         catch (System.Text.Json.JsonException ex) { throw new InvalidDataException("The peer trust store is invalid; refusing to trust peers.", ex); }
     }
+
+    private void Refresh() => _peers = Load(_path);
 
     private void Save()
     {

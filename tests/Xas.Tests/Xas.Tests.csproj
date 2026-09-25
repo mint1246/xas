@@ -5,5 +5,5 @@
     <ProjectReference Include="../../src/Xas.Daemon/Xas.Daemon.csproj" />
     <ProjectReference Include="../../src/Xas.Cli/Xas.Cli.csproj" />
   </ItemGroup>
-  <ItemGroup><Compile Include="../Protocol/**/*.cs" /><Compile Include="../Security/**/*.cs" /><Compile Include="../Discovery/**/*.cs" /><Compile Include="../Shell/**/*.cs" /><Compile Include="../Transport/**/*.cs" /><Compile Include="../Cli/**/*.cs" /><Compile Include="../Integration/**/*.cs" /></ItemGroup>
+  <ItemGroup><Compile Include="../Protocol/**/*.cs" /><Compile Include="../Security/**/*.cs" /><Compile Include="../Discovery/**/*.cs" /><Compile Include="../Shell/**/*.cs" /><Compile Include="../Transport/**/*.cs" /><Compile Include="../Cli/**/*.cs" /><Compile Include="../Integration/**/*.cs" /><Compile Include="../ConPty/**/*.cs" /><Compile Include="../Pty/**/*.cs" /></ItemGroup>
 </Project>

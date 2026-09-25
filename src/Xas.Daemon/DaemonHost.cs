@@ -47,7 +47,7 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
                 TimeSpan.FromSeconds(10), cancellationToken);
             await using var frames = new BinaryFrameConnection(tls.Stream, leaveOpen: true);
             await using var peer = new MultiplexedProtocolPeer(frames,
-                (message, ct) => _dispatcher.HandleAsync(tls.PeerDeviceId, message, ct));
+                (message, ct) => _dispatcher.HandleAsync(tls.PeerDeviceId, message, frames.SendAsync, ct));
             await peer.Completion;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }

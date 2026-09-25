@@ -57,6 +57,24 @@ internal static class LocalSetupCommands
                 foreach (var p in new PeerTrustStore(AppPaths.TrustDirectory).List())
                     Console.WriteLine($"{p.DeviceId}\t{p.DisplayName}\t{p.ApprovedAtUtc:O}");
                 return 0;
+            case "revoke":
+                if (args.Length != 2) return Usage("Usage: xas revoke <device-id>");
+                var config = new LocalConfiguration();
+                var revoked = config.Resolve(args[1]) ?? throw new InvalidOperationException("No matching paired device.");
+                var removed = new PeerTrustStore(AppPaths.TrustDirectory).Revoke(revoked.DeviceId);
+                new PeerPermissionStore(AppPaths.TrustDirectory).RemovePeer(revoked.DeviceId);
+                config.RemovePeer(revoked.DeviceId);
+                Console.WriteLine(removed ? $"Revoked {revoked.DeviceId}." : $"Removed local configuration for {revoked.DeviceId}.");
+                return 0;
+            case "endpoint":
+                if (args.Length is < 3 or > 4 || !int.TryParse(args.ElementAtOrDefault(3) ?? XasProtocol.DefaultPort.ToString(), out var endpointPort)
+                    || endpointPort is < 1 or > 65535)
+                    return Usage("Usage: xas endpoint <device-id> <host> [port]");
+                var localConfig = new LocalConfiguration();
+                var configured = localConfig.Resolve(args[1]) ?? throw new InvalidOperationException("No matching paired device.");
+                localConfig.UpsertPeer(configured with { Host = args[2], Port = endpointPort });
+                Console.WriteLine($"Endpoint for {configured.DeviceId}: {args[2]}:{endpointPort}");
+                return 0;
             default:
                 return null;
         }
