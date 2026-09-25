@@ -6,17 +6,19 @@ using Xas.Core.Security;
 using Xas.Core.Services;
 using Xas.Daemon.Shell;
 using Xas.Daemon.Clipboard;
+using Xas.Daemon.Display;
 
 namespace Xas.Daemon;
 
 public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionStore permissions,
-    Func<bool>? inputAvailable = null, ITextClipboardBackend? clipboardBackend = null)
+    Func<ushort>? inputVersion = null, ITextClipboardBackend? clipboardBackend = null)
 {
     private readonly ProcessShellBackend _shell = new();
     private readonly IInteractiveShellBackend _interactive = OperatingSystem.IsWindows()
         ? new WindowsConPtyBackend() : new LinuxPtyBackend();
     private readonly ClipboardService _clipboard = new(identity.DeviceId, permissions,
         clipboardBackend ?? (OperatingSystem.IsWindows() ? new WindowsTextClipboard() : new LinuxTextClipboard()));
+    private readonly LinuxDisplayMetadataService _display = new();
 
     public async ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, CancellationToken cancellationToken)
@@ -31,13 +33,24 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
                     new(Capability.FileSystem, 1)
                 };
                 if (_clipboard.IsAvailable) capabilities.Add(new(Capability.Clipboard, 1));
-                if (inputAvailable?.Invoke() == true) capabilities.Add(new(Capability.Input, 1));
+                if (inputVersion?.Invoke() is > 0 and var version) capabilities.Add(new(Capability.Input, version));
+                if (_display.IsAvailable) capabilities.Add(new(Capability.Display, 1));
                 var info = new DeviceInfo(identity.DeviceId, Environment.MachineName,
                     RuntimeInformation.OSDescription, RuntimeInformation.ProcessArchitecture.ToString(), capabilities);
                 return Reply(request, JsonSerializer.SerializeToUtf8Bytes(info));
             }
             case "device.ping":
                 return Reply(request, Array.Empty<byte>());
+            case "display.info":
+            {
+                if (request.Payload.Length != 0) throw new InvalidDataException("display.info takes no payload.");
+                if (!permissions.IsAllowed(peerId, Capability.Input))
+                    throw new UnauthorizedAccessException("Display metadata requires this peer's Input grant.");
+                if (!_display.IsAvailable) throw new PlatformNotSupportedException("Linux display metadata is unavailable.");
+                var metadata = await _display.GetPrimaryDisplayAsync(cancellationToken).ConfigureAwait(false)
+                    ?? throw new PlatformNotSupportedException("No active Linux display metadata was returned.");
+                return Reply(request, JsonSerializer.SerializeToUtf8Bytes(metadata));
+            }
             case "clipboard.get":
             case "clipboard.set":
                 return await _clipboard.HandleAsync(peerId, request, cancellationToken);

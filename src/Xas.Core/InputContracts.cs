@@ -3,7 +3,7 @@ using System.Buffers.Binary;
 namespace Xas.Core;
 
 /// <summary>Portable physical input events. Key codes use USB HID keyboard page 0x07 usages.</summary>
-public enum InputEventKind : byte { KeepAlive = 0, Move = 1, Button = 2, Scroll = 3, Key = 4 }
+public enum InputEventKind : byte { KeepAlive = 0, Move = 1, Button = 2, Scroll = 3, Key = 4, MoveAbsolute = 5 }
 
 /// <summary>Move uses relative pixels; scroll uses units of 1/120 wheel detent.</summary>
 public readonly record struct InputEvent(InputEventKind Kind, ushort Code = 0,
@@ -64,6 +64,7 @@ public static class InputWire
         {
             InputEventKind.KeepAlive => noCodeOrFlags && noPosition,
             InputEventKind.Move or InputEventKind.Scroll => noCodeOrFlags,
+            InputEventKind.MoveAbsolute => noCodeOrFlags && value.X >= 0 && value.Y >= 0,
             InputEventKind.Button => value.Code is >= 1 and <= 8 && noPosition && !value.Repeat,
             InputEventKind.Key => value.Code is >= 4 and <= 231 && noPosition && (!value.Repeat || value.Down),
             _ => false

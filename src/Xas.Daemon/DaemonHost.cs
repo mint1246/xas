@@ -2,12 +2,14 @@ using System.Net;
 using System.Net.Sockets;
 using Xas.Core;
 using Xas.Core.Discovery;
+using Xas.Core.Configuration;
 using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Core.Transport;
 using Xas.Daemon.Interactive;
 using Xas.Daemon.FileTransfer;
 using Xas.Daemon.Input;
+using Xas.Input;
 
 namespace Xas.Daemon;
 
@@ -17,16 +19,23 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
 {
     private readonly InputControlService _input = new(permissions,
         inputBackend ?? (OperatingSystem.IsWindows() ? new WindowsSendInputBackend() :
+            OperatingSystem.IsLinux() && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"))
+                ? new LinuxWaylandInputBackend() :
             OperatingSystem.IsLinux() && Environment.GetEnvironmentVariable("XAS_ENABLE_X11_INPUT") == "1"
                 ? new LinuxX11InputBackend() : new UnavailableInputBackend()));
     private RequestDispatcher? _dispatcher;
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        _dispatcher = new RequestDispatcher(identity, permissions, () => _input.IsAvailable, clipboardBackend);
+        _dispatcher = new RequestDispatcher(identity, permissions, () => _input.ProtocolVersion, clipboardBackend);
         var listener = new TcpListener(IPAddress.Any, port);
         await using var discovery = new LanDiscoveryService(identity.DeviceId, Environment.MachineName, port);
+        using var handoffStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         listener.Start();
+        var handoff = OperatingSystem.IsWindows()
+            ? WindowsMonitorHandoff.RunAsync(() => new LocalConfiguration().Resolve(null),
+                identity, trust, Console.Error, handoffStop.Token)
+            : Task.CompletedTask;
         try
         {
             try { await discovery.StartAsync(cancellationToken); }
@@ -44,7 +53,14 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
             }
             await Task.WhenAll(clients);
         }
-        finally { listener.Stop(); await _input.DisposeAsync(); }
+        finally
+        {
+            listener.Stop();
+            handoffStop.Cancel();
+            try { await handoff.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (handoffStop.IsCancellationRequested) { }
+            await _input.DisposeAsync();
+        }
     }
 
     private async Task HandleClientAsync(TcpClient socket, CancellationToken cancellationToken)

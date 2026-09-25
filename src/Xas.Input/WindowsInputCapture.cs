@@ -2,9 +2,25 @@ using System.Runtime.InteropServices;
 using System.Threading.Channels;
 using Xas.Core;
 
-namespace Xas.Cli.Input;
+namespace Xas.Input;
 
-/// <summary>Captures physical input on a dedicated Windows message thread for manual handoff.</summary>
+/// <summary>Rectangle occupied by a remote virtual monitor in Windows desktop coordinates.</summary>
+public readonly record struct WindowsCaptureRegion(int Left, int Top, int Right, int Bottom)
+{
+    public bool Contains(int x, int y) => x >= Left && x < Right && y >= Top && y < Bottom;
+
+    public (int X, int Y) MapToRemote(int x, int y, int remoteWidth, int remoteHeight)
+    {
+        if (!Contains(x, y) || Right <= Left || Bottom <= Top || remoteWidth <= 0 || remoteHeight <= 0)
+            throw new ArgumentOutOfRangeException(nameof(x), "Pointer and display dimensions must be valid for this region.");
+        var sourceWidth = Right - Left;
+        var sourceHeight = Bottom - Top;
+        return (sourceWidth == 1 ? 0 : (int)((long)(x - Left) * (remoteWidth - 1) / (sourceWidth - 1)),
+            sourceHeight == 1 ? 0 : (int)((long)(y - Top) * (remoteHeight - 1) / (sourceHeight - 1)));
+    }
+}
+
+/// <summary>Captures physical input on a dedicated Windows message thread.</summary>
 public sealed class WindowsInputCapture : IAsyncDisposable
 {
     private const int WhKeyboardLl = 13, WhMouseLl = 14;
@@ -15,6 +31,7 @@ public sealed class WindowsInputCapture : IAsyncDisposable
     private const uint WmLButtonDown = 0x0201, WmLButtonUp = 0x0202, WmRButtonDown = 0x0204, WmRButtonUp = 0x0205,
         WmMButtonDown = 0x0207, WmMButtonUp = 0x0208, WmMouseWheel = 0x020A, WmXButtonDown = 0x020B,
         WmXButtonUp = 0x020C, WmMouseHWheel = 0x020E;
+    private const uint WmMouseMove = 0x0200;
     private const uint RiMouse = 0, RiKeyboard = 1;
     private const ushort RidevPage = 0x01, RidevUsageMouse = 0x02, RidevUsageKeyboard = 0x06;
     private const uint WmAppStop = 0x8001;
@@ -31,22 +48,28 @@ public sealed class WindowsInputCapture : IAsyncDisposable
     private IntPtr _window, _keyboardHook, _mouseHook;
     private HookProc? _keyboardProc, _mouseProc;
     private readonly HashSet<ushort> _heldKeys = [];
+    private readonly WindowsCaptureRegion? _region;
+    private readonly int _remoteWidth, _remoteHeight;
     private Rect _previousClip;
     private bool _cursorClipped;
     private Exception? _failure;
     private int _disposeStarted;
     private int _stopStarted;
 
-    private WindowsInputCapture() { }
+    private WindowsInputCapture(WindowsCaptureRegion? region, int remoteWidth, int remoteHeight)
+    { _region = region; _remoteWidth = remoteWidth; _remoteHeight = remoteHeight; }
     public static bool IsAvailable => OperatingSystem.IsWindows();
     public ChannelReader<InputEvent> Events => _events.Reader;
     public Task Completion => _finished.Task;
 
-    public static async Task<WindowsInputCapture> StartAsync(CancellationToken cancellationToken = default)
+    public static async Task<WindowsInputCapture> StartAsync(CancellationToken cancellationToken = default,
+        WindowsCaptureRegion? region = null, int remoteWidth = 0, int remoteHeight = 0)
     {
         if (!IsAvailable) throw new PlatformNotSupportedException("Windows input capture is available only on Windows.");
+        if (region is not null && (remoteWidth <= 0 || remoteHeight <= 0))
+            throw new ArgumentOutOfRangeException(nameof(remoteWidth), "Monitor capture requires remote display dimensions.");
         cancellationToken.ThrowIfCancellationRequested();
-        var capture = new WindowsInputCapture();
+        var capture = new WindowsInputCapture(region, remoteWidth, remoteHeight);
         if (Interlocked.CompareExchange(ref _active, capture, null) is not null)
             throw new InvalidOperationException("Input capture is already active in this process.");
         capture._thread = new Thread(capture.Run) { IsBackground = true, Name = "xas input capture" };
@@ -73,6 +96,8 @@ public sealed class WindowsInputCapture : IAsyncDisposable
         if (id != 0) PostThreadMessage(id, WmQuit, IntPtr.Zero, IntPtr.Zero);
     }
 
+    public void EndCapture() => Stop();
+
     private void Run()
     {
         _threadId = GetCurrentThreadId();
@@ -85,25 +110,36 @@ public sealed class WindowsInputCapture : IAsyncDisposable
             RegisterClass(ref klass);
             _window = CreateWindowEx(0, klass.ClassName, string.Empty, 0, 0, 0, 0, 0, HwndMessage, IntPtr.Zero, instance, IntPtr.Zero);
             if (_window == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            var devices = new[]
+            if (_region is null)
             {
-                new RawInputDevice { UsagePage = RidevPage, Usage = RidevUsageMouse, Flags = RidevInputSink, Target = _window },
-                new RawInputDevice { UsagePage = RidevPage, Usage = RidevUsageKeyboard, Flags = RidevInputSink, Target = _window }
-            };
-            if (!RegisterRawInputDevices(devices, (uint)devices.Length, (uint)Marshal.SizeOf<RawInputDevice>()))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                var devices = new[]
+                {
+                    new RawInputDevice { UsagePage = RidevPage, Usage = RidevUsageMouse, Flags = RidevInputSink, Target = _window },
+                    new RawInputDevice { UsagePage = RidevPage, Usage = RidevUsageKeyboard, Flags = RidevInputSink, Target = _window }
+                };
+                if (!RegisterRawInputDevices(devices, (uint)devices.Length, (uint)Marshal.SizeOf<RawInputDevice>()))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            }
             _keyboardProc = KeyboardHook;
             _mouseProc = MouseHook;
             _keyboardHook = SetWindowsHookEx(WhKeyboardLl, _keyboardProc, instance, 0);
             _mouseHook = SetWindowsHookEx(WhMouseLl, _mouseProc, instance, 0);
             if (_keyboardHook == IntPtr.Zero || _mouseHook == IntPtr.Zero)
                 throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            if (!GetClipCursor(out _previousClip) || !GetCursorPos(out var pointer))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            var onePixel = new Rect { Left = pointer.X, Top = pointer.Y,
-                Right = checked(pointer.X + 1), Bottom = checked(pointer.Y + 1) };
-            if (!ClipCursor(ref onePixel)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            _cursorClipped = true;
+            if (_region is null)
+            {
+                if (!GetClipCursor(out _previousClip) || !GetCursorPos(out var pointer))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                var onePixel = new Rect { Left = pointer.X, Top = pointer.Y,
+                    Right = checked(pointer.X + 1), Bottom = checked(pointer.Y + 1) };
+                if (!ClipCursor(ref onePixel)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                _cursorClipped = true;
+            }
+            else
+            {
+                if (!GetCursorPos(out var pointer) || !_region.Value.Contains(pointer.X, pointer.Y))
+                    throw new InvalidOperationException("Pointer left the virtual monitor before input capture started.");
+            }
             _started.TrySetResult();
             while (GetMessage(out var message, IntPtr.Zero, 0, 0) > 0)
             {
@@ -129,6 +165,8 @@ public sealed class WindowsInputCapture : IAsyncDisposable
     private IntPtr OnKeyboard(int code, IntPtr wParam, IntPtr lParam)
     {
         if (code < 0 || _stop.IsCancellationRequested) return CallNextHookEx(_keyboardHook, code, wParam, lParam);
+        if (_region is { } region && GetCursorPos(out var pointer) && !region.Contains(pointer.X, pointer.Y))
+        { Stop(); return CallNextHookEx(_keyboardHook, code, wParam, lParam); }
         var data = Marshal.PtrToStructure<KeyboardData>(lParam);
         if ((data.Flags & 0x10) != 0) return CallNextHookEx(_keyboardHook, code, wParam, lParam);
         var down = wParam.ToInt64() is WmKeyDown or WmSysKeyDown;
@@ -157,10 +195,17 @@ public sealed class WindowsInputCapture : IAsyncDisposable
         if (code < 0 || _stop.IsCancellationRequested) return CallNextHookEx(_mouseHook, code, wParam, lParam);
         var msg = unchecked((uint)wParam.ToInt64());
         var data = Marshal.PtrToStructure<MouseHookData>(lParam);
+        if (_region is { } region && !region.Contains(data.Point.X, data.Point.Y))
+        { Stop(); return CallNextHookEx(_mouseHook, code, wParam, lParam); }
         if ((data.Flags & 0x0001) != 0) return CallNextHookEx(_mouseHook, code, wParam, lParam);
         var eventHandled = true;
         switch (msg)
         {
+            case WmMouseMove when _region is not null:
+                var (x, y) = _region.Value.MapToRemote(data.Point.X, data.Point.Y,
+                    _remoteWidth, _remoteHeight);
+                Publish(new(InputEventKind.MoveAbsolute, X: x, Y: y));
+                eventHandled = false; break;
             case WmLButtonDown: case WmLButtonUp: Publish(new(InputEventKind.Button, 1, msg == WmLButtonDown)); break;
             case WmRButtonDown: case WmRButtonUp: Publish(new(InputEventKind.Button, 2, msg == WmRButtonDown)); break;
             case WmMButtonDown: case WmMButtonUp: Publish(new(InputEventKind.Button, 3, msg == WmMButtonDown)); break;
@@ -173,7 +218,8 @@ public sealed class WindowsInputCapture : IAsyncDisposable
                 Publish(new(InputEventKind.Scroll, X: unchecked((short)(data.MouseData >> 16)), Y: 0)); break;
             default: eventHandled = false; break;
         }
-        // Movement is emitted from Raw Input so deltas are independent of cursor warping.
+        // In native monitor mode, Windows moves the logical cursor and we forward its mapped position.
+        // Manual capture remains confined and uses Raw Input deltas instead.
         return eventHandled ? new IntPtr(1) : CallNextHookEx(_mouseHook, code, wParam, lParam);
     }
 
@@ -230,6 +276,8 @@ public sealed class WindowsInputCapture : IAsyncDisposable
 
     private void OnRawInput(IntPtr handle)
     {
+        if (_region is { } region && GetCursorPos(out var pointer) && !region.Contains(pointer.X, pointer.Y))
+        { Stop(); return; }
         uint size = 0;
         GetRawInputData(handle, RidInput, IntPtr.Zero, ref size, (uint)Marshal.SizeOf<RawInputHeader>());
         if (size == 0 || size > 4096) return;

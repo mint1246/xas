@@ -9,6 +9,7 @@ public static class InputWireTests
         var events = new[]
         {
             new InputEvent(InputEventKind.Move, X: -4, Y: 15),
+            new InputEvent(InputEventKind.MoveAbsolute, X: 900, Y: 250),
             new InputEvent(InputEventKind.Button, Code: 5, Down: true),
             new InputEvent(InputEventKind.Scroll, X: 30, Y: -120),
             new InputEvent(InputEventKind.Key, Code: 4, Down: true, Repeat: true),
@@ -21,6 +22,7 @@ public static class InputWireTests
         AssertThrows<InvalidDataException>(() => InputWire.Decode(new byte[11]));
         AssertThrows<InvalidDataException>(() => InputWire.Decode(new byte[12 * (InputWire.MaxEventsPerFrame + 1)]));
         AssertThrows<ArgumentException>(() => InputWire.Encode([new InputEvent(InputEventKind.Key, Code: 0, Down: true)]));
+        AssertThrows<ArgumentException>(() => InputWire.Encode([new InputEvent(InputEventKind.MoveAbsolute, X: -1, Y: 0)]));
         var invalidFlags = InputWire.Encode([new InputEvent(InputEventKind.KeepAlive)]);
         invalidFlags[3] = 0x80;
         AssertThrows<InvalidDataException>(() => InputWire.Decode(invalidFlags));

@@ -18,13 +18,18 @@
 - [x] Explicit plain-text clipboard push/pull, per-peer Clipboard grants, origin/version tracking, Windows native clipboard roundtrip, and Linux tool-based backend source.
 - [x] Manual Windows input capture, authenticated input protocol, Input grants, exclusive lease, disconnect/timeout release, Windows SendInput receiver, and opt-in X11 XTest receiver source.
 - [x] Continuous plain-text clipboard sync with reconnect, echo suppression, deterministic simultaneous-edit resolution, and a network loopback test.
+- [x] Managed automatic Windows monitor-boundary handoff, absolute pointer protocol, Linux display metadata RPC, and topology/coordinate tests.
+- [x] Source for one-monitor Windows IddCx driver and Wayland portal/libei input helper.
 
 ## In progress
 
 - [ ] Compile and run the Linux PTY helper and full interactive path on Linux.
 - [ ] Validate file copy and clipboard commands between a real Windows and Linux pair.
 - [ ] Validate clipboard sync on a physical Windows/Linux pair, including simultaneous edits and reconnect after sleep.
-- [ ] Validate physical Windows input handoff and X11 receiver on actual desktops; add Wayland portal/libei injection.
+- [ ] Build/sign/install the Windows IddCx driver with WDK; extend it as a second Windows monitor and validate native monitor identification.
+- [ ] Build the Wayland portal/libei helper on Linux and validate compositor consent, absolute input, revocation, and release behavior.
+- [ ] Validate physical Windows cursor/keyboard handoff with X11 and Wayland receivers, including disconnect and emergency return.
+- [ ] Configure virtual display modes dynamically from Linux metadata; currently modes are fixed.
 - [ ] Reconnect long-lived sessions after sleep/network changes.
 - [ ] Complete capability negotiation for all services and per-peer grants.
 
@@ -32,8 +37,6 @@
 
 - [ ] Verify fully networked Linux PTY interactive shells on Linux.
 - [ ] Linux sudo and Windows elevated-user service broker.
-- [ ] Linux Wayland portal/libei input injection and monitor-boundary handoff.
-- [ ] Windows IddCx virtual display.
 - [ ] Clipboard images and richer formats.
 - [ ] WinFsp and FUSE mounts, removable media, and transfer resume.
 - [ ] Local web configuration UI, installation, and startup services.

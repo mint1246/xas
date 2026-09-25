@@ -1,7 +1,7 @@
 namespace Xas.Core;
 
 /// <summary>Features are advertised by implementations, then separately authorized per peer.</summary>
-public enum Capability { Shell = 1, FileSystem = 2, Input = 3, Clipboard = 4, PrivilegedShell = 5 }
+public enum Capability { Shell = 1, FileSystem = 2, Input = 3, Clipboard = 4, PrivilegedShell = 5, Display = 6 }
 
 public sealed record CapabilityVersion(Capability Capability, ushort Version);
 
@@ -28,6 +28,15 @@ public interface IInputInjectionBackend
     ValueTask InjectAsync(InputEvent inputEvent, CancellationToken cancellationToken);
     ValueTask ReleaseAllAsync(CancellationToken cancellationToken);
 }
+
+/// <summary>Optional session preparation, such as desktop-portal consent, before capture begins.</summary>
+public interface IInputActivationBackend
+{
+    ValueTask ActivateAsync(CancellationToken cancellationToken);
+}
+
+/// <summary>Backend that can position the remote cursor in display pixel coordinates.</summary>
+public interface IAbsoluteInputInjectionBackend : IInputInjectionBackend { }
 
 public interface IRemoteFilesystemBackend
 {

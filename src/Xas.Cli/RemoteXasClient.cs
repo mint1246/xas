@@ -10,7 +10,7 @@ using Xas.Cli.Interactive;
 using Xas.Cli.Terminal;
 using Xas.Cli.FileTransfer;
 using Xas.Cli.Clipboard;
-using Xas.Cli.Input;
+using Xas.Input;
 
 namespace Xas.Cli;
 

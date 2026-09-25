@@ -37,6 +37,11 @@ public sealed class ConnectionInputSession : IAsyncDisposable
                     if (request.Payload.Length != 0 || _id != 0) throw new InvalidDataException("input.open requires an empty payload and no active session.");
                     if (!_owner.Permissions.IsAllowed(_peerId, Capability.Input)) throw new UnauthorizedAccessException("Input access is not granted for this peer.");
                     _id = _owner.Acquire(this);
+                    if (_owner.Backend is IInputActivationBackend activation)
+                    {
+                        try { await activation.ActivateAsync(cancellationToken).ConfigureAwait(false); }
+                        catch { await CloseCoreAsync().ConfigureAwait(false); throw; }
+                    }
                     _lastActivity = DateTime.UtcNow;
                     _watchdog = WatchdogAsync(_shutdown.Token);
                     var response = new byte[4]; BinaryPrimitives.WriteUInt32BigEndian(response, _id);
@@ -77,6 +82,8 @@ public sealed class ConnectionInputSession : IAsyncDisposable
             {
                 foreach (var e in events)
                 {
+                    if (e.Kind == InputEventKind.MoveAbsolute && _owner.ProtocolVersion < 2)
+                        throw new NotSupportedException("The active input backend cannot position the pointer absolutely.");
                     Track(e);
                     if (e.Kind != InputEventKind.KeepAlive)
                         await _owner.Backend.InjectAsync(e, _shutdown.Token).ConfigureAwait(false);

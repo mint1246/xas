@@ -4,7 +4,7 @@ using Xas.Core;
 namespace Xas.Daemon.Input;
 
 /// <summary>Input injection for a real X11 desktop session using XTest. Wayland and Xwayland sessions are intentionally unsupported.</summary>
-public sealed class LinuxX11InputBackend : IInputInjectionBackend, IDisposable
+public sealed class LinuxX11InputBackend : IAbsoluteInputInjectionBackend, IDisposable
 {
     private readonly object _sync = new();
     private IntPtr _display;
@@ -42,6 +42,10 @@ public sealed class LinuxX11InputBackend : IInputInjectionBackend, IDisposable
                     case InputEventKind.Move:
                         if (inputEvent.X != 0 || inputEvent.Y != 0)
                             Check(XTestFakeRelativeMotionEvent(_display, XDefaultScreen(_display), inputEvent.X, inputEvent.Y, 0), "relative mouse motion");
+                        break;
+                    case InputEventKind.MoveAbsolute:
+                        Check(XTestFakeMotionEvent(_display, XDefaultScreen(_display),
+                            inputEvent.X, inputEvent.Y, 0), "absolute mouse motion");
                         break;
                     case InputEventKind.Button:
                         InjectButton(inputEvent);
@@ -266,6 +270,7 @@ public sealed class LinuxX11InputBackend : IInputInjectionBackend, IDisposable
     [DllImport("libX11.so.6", CallingConvention = CallingConvention.Cdecl)] private static extern byte XKeysymToKeycode(IntPtr display, UIntPtr keysym);
     [DllImport("libXtst.so.6", CallingConvention = CallingConvention.Cdecl)] private static extern int XTestQueryExtension(IntPtr display, out int eventBase, out int errorBase, out int majorVersion, out int minorVersion);
     [DllImport("libXtst.so.6", CallingConvention = CallingConvention.Cdecl)] private static extern int XTestFakeRelativeMotionEvent(IntPtr display, int screenNumber, int x, int y, ulong delay);
+    [DllImport("libXtst.so.6", CallingConvention = CallingConvention.Cdecl)] private static extern int XTestFakeMotionEvent(IntPtr display, int screenNumber, int x, int y, ulong delay);
     [DllImport("libXtst.so.6", CallingConvention = CallingConvention.Cdecl)] private static extern int XTestFakeButtonEvent(IntPtr display, uint button, int isPress, ulong delay);
     [DllImport("libXtst.so.6", CallingConvention = CallingConvention.Cdecl)] private static extern int XTestFakeKeyEvent(IntPtr display, byte keycode, int isPress, ulong delay);
 }

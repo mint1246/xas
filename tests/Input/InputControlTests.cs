@@ -41,7 +41,12 @@ public static class InputControlTests
             Assert(backend.ReleaseCalls == 2, "The inactivity watchdog did not release the second lease.");
             await using var third = service.CreateSession("third");
             permissions.SetAllowed("third", Capability.Input, true);
-            await third.HandleRequestAsync(Request("input.open"), default);
+            var thirdOpen = await third.HandleRequestAsync(Request("input.open"), default);
+            var thirdId = BinaryPrimitives.ReadUInt32BigEndian(thirdOpen.Payload);
+            await Throws<NotSupportedException>(() => third.HandleMessageAsync(new ProtocolMessage(
+                MessageKind.StreamData, 0, thirdId, "input.event",
+                InputWire.Encode([new InputEvent(InputEventKind.MoveAbsolute, X: 1, Y: 2)]))).AsTask());
+            Assert(backend.ReleaseCalls == 3, "Unsupported absolute input did not release the lease.");
         }
         finally { Directory.Delete(directory, true); }
     }

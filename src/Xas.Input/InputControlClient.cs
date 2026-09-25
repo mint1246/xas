@@ -6,44 +6,73 @@ using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Core.Transport;
 
-namespace Xas.Cli.Input;
+namespace Xas.Input;
 
 /// <summary>Manual Windows input takeover over one authenticated connection.</summary>
 public static class InputControlClient
 {
     public static async Task RunAsync(ConfiguredPeer configured, DeviceIdentity identity,
-        PeerTrustStore trust, CancellationToken cancellationToken)
+        PeerTrustStore trust, CancellationToken cancellationToken, WindowsCaptureRegion? region = null)
     {
         ArgumentNullException.ThrowIfNull(configured);
         if (!WindowsInputCapture.IsAvailable)
             throw new PlatformNotSupportedException("Manual input capture requires a Windows user session.");
+        using var setup = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (region is not null) setup.CancelAfter(TimeSpan.FromSeconds(55));
         await using var connection = await MutualTlsTransport.ConnectAsync(configured.Host, configured.Port,
-            identity, trust, configured.DeviceId, TimeSpan.FromSeconds(10), cancellationToken).ConfigureAwait(false);
+            identity, trust, configured.DeviceId, region is null ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(3),
+            setup.Token).ConfigureAwait(false);
         await using var frames = new BinaryFrameConnection(connection.Stream, leaveOpen: true);
         await using var peer = new MultiplexedProtocolPeer(frames, (_, _) =>
             ValueTask.FromException<ProtocolMessage>(new NotSupportedException("The input controller does not accept remote requests.")));
-        var infoReply = await peer.RequestAsync("device.info", [], cancellationToken: cancellationToken).ConfigureAwait(false);
+        var infoReply = await peer.RequestAsync("device.info", [], cancellationToken: setup.Token).ConfigureAwait(false);
         DeviceInfo? info;
         try { info = JsonSerializer.Deserialize<DeviceInfo>(infoReply.Payload); }
         catch (JsonException ex) { throw new InvalidDataException("Invalid device.info response.", ex); }
         if (info?.DeviceId != configured.DeviceId) throw new InvalidDataException("Device identity changed during input setup.");
         if (!info.Capabilities.Any(c => c.Capability == Capability.Input && c.Version >= 1))
             throw new NotSupportedException("The remote device has no available input injection backend.");
+        DisplayMetadata? display = null;
+        if (region is not null)
+        {
+            if (!info.Capabilities.Any(c => c.Capability == Capability.Input && c.Version >= 2) ||
+                !info.Capabilities.Any(c => c.Capability == Capability.Display && c.Version >= 1))
+                throw new NotSupportedException("Automatic monitor handoff requires remote display metadata and absolute input positioning.");
+            var displayReply = await peer.RequestAsync("display.info", [], cancellationToken: setup.Token).ConfigureAwait(false);
+            display = JsonSerializer.Deserialize<DisplayMetadata>(displayReply.Payload)
+                ?? throw new InvalidDataException("The remote display metadata was empty.");
+            if (display.WidthPixels is < 1 or > 16384 || display.HeightPixels is < 1 or > 16384)
+                throw new InvalidDataException("The remote display dimensions are invalid.");
+        }
 
-        var opened = await peer.RequestAsync("input.open", [], cancellationToken: cancellationToken).ConfigureAwait(false);
+        var opened = await peer.RequestAsync("input.open", [], cancellationToken: setup.Token).ConfigureAwait(false);
         if (opened.Payload.Length != 4) throw new InvalidDataException("Invalid input.open response.");
         var sessionId = BinaryPrimitives.ReadUInt32BigEndian(opened.Payload);
         if (sessionId == 0) throw new InvalidDataException("The remote input session ID was zero.");
 
         try
         {
-            Console.Error.WriteLine("Remote input is active. Press Ctrl+Alt+Esc to return control locally.");
-            await using var capture = await WindowsInputCapture.StartAsync(cancellationToken).ConfigureAwait(false);
+            if (region is { } bounds && display is not null)
+            {
+                if (!WindowsMonitorTopology.TryGetPointer(out var x, out var y) || !bounds.Contains(x, y))
+                    throw new InvalidOperationException("Pointer left the virtual monitor during remote setup.");
+                var (targetX, targetY) = bounds.MapToRemote(x, y,
+                    display.WidthPixels, display.HeightPixels);
+                await SendWithTimeoutAsync(peer, sessionId,
+                    [new InputEvent(InputEventKind.MoveAbsolute, X: targetX, Y: targetY)],
+                    setup.Token).ConfigureAwait(false);
+            }
+            if (region is null) Console.Error.WriteLine("Remote input is active. Press Ctrl+Alt+Esc to return control locally.");
+            await using var capture = await WindowsInputCapture.StartAsync(cancellationToken, region,
+                display?.WidthPixels ?? 0, display?.HeightPixels ?? 0).ConfigureAwait(false);
             using var active = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             var sendTask = SendEventsAsync(peer, capture, sessionId, active.Token);
             var heartbeatTask = SendHeartbeatAsync(peer, sessionId, active.Token);
+            var boundaryTask = region is null ? Task.Delay(Timeout.Infinite, active.Token) :
+                WatchBoundaryAsync(capture, region.Value, active.Token);
             var cancelled = Task.Delay(Timeout.Infinite, cancellationToken);
-            var first = await Task.WhenAny(capture.Completion, sendTask, heartbeatTask, peer.Completion, cancelled).ConfigureAwait(false);
+            var first = await Task.WhenAny(capture.Completion, sendTask, heartbeatTask,
+                boundaryTask, peer.Completion, cancelled).ConfigureAwait(false);
             active.Cancel();
             try { await capture.DisposeAsync().ConfigureAwait(false); }
             catch when (first != capture.Completion) { /* Observe the primary send/connection failure below. */ }
@@ -54,6 +83,7 @@ public static class InputControlClient
             await capture.Completion.ConfigureAwait(false);
             await ObserveCancelledAsync(sendTask).ConfigureAwait(false);
             await ObserveCancelledAsync(heartbeatTask).ConfigureAwait(false);
+            await ObserveCancelledAsync(boundaryTask).ConfigureAwait(false);
         }
         finally
         {
@@ -106,5 +136,18 @@ public static class InputControlClient
     {
         try { await task.ConfigureAwait(false); }
         catch (OperationCanceledException) { }
+    }
+
+    private static async Task WatchBoundaryAsync(WindowsInputCapture capture,
+        WindowsCaptureRegion region, CancellationToken token)
+    {
+        var ticks = 0;
+        while (true)
+        {
+            await Task.Delay(25, token).ConfigureAwait(false);
+            if (!WindowsMonitorTopology.TryGetPointer(out var x, out var y) || !region.Contains(x, y) ||
+                (++ticks % 20 == 0 && WindowsMonitorTopology.FindRemote()?.Region != region))
+            { capture.EndCapture(); return; }
+        }
     }
 }

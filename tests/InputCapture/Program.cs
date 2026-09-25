@@ -1,5 +1,5 @@
 using System.Reflection;
-using Xas.Cli.Input;
+using Xas.Input;
 
 static void Check(ushort scan, bool extended, ushort expected)
 {

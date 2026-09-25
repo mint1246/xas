@@ -1,0 +1,171 @@
+using System.Diagnostics;
+using Xas.Core;
+
+namespace Xas.Daemon.Input;
+
+/// <summary>Wayland input injection through an XDG RemoteDesktop portal EIS session.</summary>
+public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, IInputActivationBackend, IDisposable
+{
+    private readonly object _gate = new();
+    private readonly SemaphoreSlim _activationGate = new(1, 1);
+    private Process? _helper;
+    private StreamWriter? _input;
+    private StreamReader? _output;
+    private bool _ready;
+    private bool _disposed;
+
+    public bool IsAvailable
+    {
+        get
+        {
+            lock (_gate)
+            {
+                if (_disposed || !OperatingSystem.IsLinux() || string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"))) return false;
+                var helper = FindHelper();
+                if (helper is null) return false;
+                try
+                {
+                    using var probe = Process.Start(new ProcessStartInfo(helper, "--probe") { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true });
+                    if (probe is null) return false;
+                    probe.WaitForExit(1500);
+                    if (!probe.HasExited) { probe.Kill(true); return false; }
+                    return probe.ExitCode == 0;
+                }
+                catch { return false; }
+            }
+        }
+    }
+
+    public async ValueTask ActivateAsync(CancellationToken cancellationToken)
+    {
+        await _activationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            Process process;
+            lock (_gate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (_ready && _helper is { HasExited: false }) return;
+                StartHelper();
+                process = _helper!;
+            }
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(45));
+            string? reply;
+            try { reply = await process.StandardOutput.ReadLineAsync(timeout.Token).ConfigureAwait(false); }
+            catch (OperationCanceledException)
+            {
+                lock (_gate) StopHelper();
+                if (cancellationToken.IsCancellationRequested) throw;
+                throw new TimeoutException("Timed out waiting for RemoteDesktop portal consent and EIS device setup.");
+            }
+            lock (_gate)
+            {
+                if (reply != "READY")
+                {
+                    var error = process.HasExited ? process.StandardError.ReadToEnd() : reply;
+                    StopHelper();
+                    throw new IOException($"Wayland RemoteDesktop portal/EIS setup failed: {error}");
+                }
+                _ready = true;
+            }
+        }
+        finally { _activationGate.Release(); }
+    }
+
+    public async ValueTask InjectAsync(InputEvent inputEvent, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await ActivateAsync(cancellationToken).ConfigureAwait(false);
+        await _activationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var line = inputEvent.Kind switch
+            {
+                InputEventKind.KeepAlive => "N",
+                InputEventKind.Move => $"M {inputEvent.X} {inputEvent.Y}",
+                InputEventKind.MoveAbsolute => $"A {inputEvent.X} {inputEvent.Y}",
+                InputEventKind.Button => $"B {inputEvent.Code} {(inputEvent.Down ? 1 : 0)}",
+                InputEventKind.Scroll => $"S {inputEvent.X} {inputEvent.Y}",
+                InputEventKind.Key => $"K {inputEvent.Code} {(inputEvent.Down ? 1 : 0)} {(inputEvent.Repeat ? 1 : 0)}",
+                _ => throw new ArgumentOutOfRangeException(nameof(inputEvent))
+            };
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(2));
+                StreamWriter input;
+                StreamReader output;
+                lock (_gate)
+                {
+                    ObjectDisposedException.ThrowIf(_disposed, this);
+                    input = _input ?? throw new IOException("Wayland input helper is not running.");
+                    output = _output ?? throw new IOException("Wayland input helper is not running.");
+                }
+                await input.WriteLineAsync(line.AsMemory(), timeout.Token).ConfigureAwait(false);
+                await input.FlushAsync(timeout.Token).ConfigureAwait(false);
+                var reply = await output.ReadLineAsync(timeout.Token).ConfigureAwait(false);
+                if (reply != "OK") throw new IOException(reply?.StartsWith("ERR ", StringComparison.Ordinal) == true ? reply[4..] : "Wayland input helper exited unexpectedly.");
+            }
+            catch { lock (_gate) StopHelper(); throw; }
+        }
+        finally { _activationGate.Release(); }
+    }
+
+    public async ValueTask ReleaseAllAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await _activationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        Process? process;
+        StreamReader? output;
+        lock (_gate)
+        {
+            if (_helper is null) { _activationGate.Release(); return; }
+            process = _helper;
+            output = _output;
+            try { _input!.WriteLine("R"); _input.Flush(); }
+            catch { StopHelper(); _activationGate.Release(); throw; }
+        }
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(1));
+            try { _ = await output!.ReadLineAsync(timeout.Token).ConfigureAwait(false); } catch (OperationCanceledException) { }
+        }
+        finally
+        {
+            lock (_gate) StopHelper();
+            _activationGate.Release();
+        }
+    }
+
+    private void StartHelper()
+    {
+        if (_helper is { HasExited: false }) { _ready = false; throw new InvalidOperationException("Wayland EIS helper is running without a completed activation."); }
+        var path = FindHelper() ?? throw new PlatformNotSupportedException("Wayland input requires xas-wayland-eis built with libei and liboeffis and available in PATH or XAS_WAYLAND_EIS_HELPER.");
+        var p = Process.Start(new ProcessStartInfo(path) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true })
+            ?? throw new IOException("Could not start xas-wayland-eis.");
+        _helper = p; _input = p.StandardInput; _output = p.StandardOutput;
+        _ready = false;
+    }
+
+    private static string? FindHelper()
+    {
+        var configured = Environment.GetEnvironmentVariable("XAS_WAYLAND_EIS_HELPER");
+        if (!string.IsNullOrWhiteSpace(configured) && File.Exists(configured)) return configured;
+        var name = OperatingSystem.IsWindows() ? "xas-wayland-eis.exe" : "xas-wayland-eis";
+        var adjacent = Path.Combine(AppContext.BaseDirectory, name);
+        if (File.Exists(adjacent)) return adjacent;
+        var path = Environment.GetEnvironmentVariable("PATH") ?? "";
+        return path.Split(Path.PathSeparator).Select(p => Path.Combine(p, name)).FirstOrDefault(File.Exists);
+    }
+
+    private void StopHelper()
+    {
+        try { if (_helper is { HasExited: false }) { _helper.Kill(true); _helper.WaitForExit(1000); } } catch { }
+        _input?.Dispose(); _output?.Dispose(); _helper?.Dispose(); _input = null; _output = null; _helper = null; _ready = false;
+    }
+
+    public void Dispose() { lock (_gate) { if (_disposed) return; StopHelper(); _disposed = true; } }
+}

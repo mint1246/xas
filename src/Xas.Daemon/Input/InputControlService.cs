@@ -21,6 +21,7 @@ public sealed class InputControlService : IAsyncDisposable
     }
 
     public bool IsAvailable => !_disposed && _backend.IsAvailable;
+    public ushort ProtocolVersion => IsAvailable ? (ushort)(_backend is IAbsoluteInputInjectionBackend ? 2 : 1) : (ushort)0;
 
     public ConnectionInputSession CreateSession(string peerId)
     {
