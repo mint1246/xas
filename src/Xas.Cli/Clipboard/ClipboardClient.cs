@@ -55,6 +55,67 @@ public static class ClipboardClient
         await localBackend.SetTextAsync(remote.Text, token).ConfigureAwait(false);
     }
 
+    /// <summary>Polls both clipboards, transfers subsequent changes, and reconnects after transport loss.</summary>
+    public static async Task SyncAsync(string? deviceId, LocalConfiguration config, DeviceIdentity identity,
+        PeerTrustStore trust, ITextClipboardBackend localBackend, TextWriter status, CancellationToken token)
+    {
+        if (!localBackend.IsAvailable) throw new InvalidOperationException("A user-session text clipboard is unavailable.");
+        var configured = Resolve(config, deviceId);
+        ClipboardSyncState? state = null;
+        var retrySeconds = 1;
+        while (true)
+        {
+            token.ThrowIfCancellationRequested();
+            try
+            {
+                await using var protocol = await ConnectAsync(configured, identity, trust, token).ConfigureAwait(false);
+                await RequireCapabilityAsync(protocol, configured.DeviceId, token).ConfigureAwait(false);
+                status.WriteLine($"Clipboard sync connected to {configured.DeviceId}.");
+                retrySeconds = 1;
+                while (true)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var local = await localBackend.GetSnapshotAsync(token).ConfigureAwait(false);
+                    EnsureTextWithinLimit(local.Text);
+                    var remote = await GetRemoteClipboardAsync(protocol, token).ConfigureAwait(false);
+                    if (state is null) state = new ClipboardSyncState(local, remote);
+                    else
+                    {
+                        switch (state.Decide(local, remote, identity.DeviceId, configured.DeviceId))
+                        {
+                            case ClipboardSyncAction.Push:
+                                var payload = new ClipboardPayload(identity.DeviceId, local.ChangeId, local.Text);
+                                var reply = await protocol.RequestAsync("clipboard.set",
+                                    JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions),
+                                    cancellationToken: token).ConfigureAwait(false);
+                                if (reply.Payload.Length != 0) throw new InvalidDataException("Invalid clipboard.set response.");
+                                state.Observe(local, payload);
+                                break;
+                            case ClipboardSyncAction.Pull:
+                                var before = await localBackend.GetSnapshotAsync(token).ConfigureAwait(false);
+                                if (before.ChangeId != local.ChangeId || before.Text != local.Text) break;
+                                await localBackend.SetTextAsync(remote.Text, token).ConfigureAwait(false);
+                                state.Observe(await localBackend.GetSnapshotAsync(token).ConfigureAwait(false), remote);
+                                break;
+                            default:
+                                state.Observe(local, remote);
+                                break;
+                        }
+                    }
+                    await Task.Delay(TimeSpan.FromMilliseconds(750), token).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex) when (!token.IsCancellationRequested &&
+                ex is IOException or System.Net.Sockets.SocketException or TimeoutException or
+                    System.ComponentModel.Win32Exception)
+            {
+                status.WriteLine($"Clipboard sync disconnected: {ex.Message}. Reconnecting in {retrySeconds}s.");
+                await Task.Delay(TimeSpan.FromSeconds(retrySeconds), token).ConfigureAwait(false);
+                retrySeconds = Math.Min(retrySeconds * 2, 30);
+            }
+        }
+    }
+
     private static ConfiguredPeer Resolve(LocalConfiguration config, string? deviceId) =>
         config.Resolve(deviceId) ?? throw new InvalidOperationException("No matching configured device.");
 

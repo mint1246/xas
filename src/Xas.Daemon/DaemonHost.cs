@@ -13,7 +13,7 @@ namespace Xas.Daemon;
 
 public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
     PeerPermissionStore permissions, int port = XasProtocol.DefaultPort,
-    IInputInjectionBackend? inputBackend = null)
+    IInputInjectionBackend? inputBackend = null, ITextClipboardBackend? clipboardBackend = null)
 {
     private readonly InputControlService _input = new(permissions,
         inputBackend ?? (OperatingSystem.IsWindows() ? new WindowsSendInputBackend() :
@@ -23,7 +23,7 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        _dispatcher = new RequestDispatcher(identity, permissions, () => _input.IsAvailable);
+        _dispatcher = new RequestDispatcher(identity, permissions, () => _input.IsAvailable, clipboardBackend);
         var listener = new TcpListener(IPAddress.Any, port);
         await using var discovery = new LanDiscoveryService(identity.DeviceId, Environment.MachineName, port);
         listener.Start();

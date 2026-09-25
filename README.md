@@ -33,6 +33,7 @@ xas cp laptop:~/log.txt .
 xas cp -r ./project laptop:~/projects/
 xas clipboard push
 xas clipboard pull
+xas clipboard sync
 xas input
 ```
 
@@ -42,12 +43,12 @@ Command output is streamed as binary frames. Redirected stdin is forwarded for s
 
 For `xas cp`, grant the caller separately with `xas allow <caller-id> filesystem` on the remote machine, whether the copy uploads or downloads. The transfer streams file bytes, preserves file modification times, copies directories with `-r`, and refuses to overwrite existing files unless `-f` is supplied. It does not follow symbolic links or reparse points. File copy is explicit; Explorer/FUSE mounts remain pending.
 
-For `xas clipboard push` or `pull`, grant the caller with `xas allow <caller-id> clipboard` on the receiving machine. This initial mode transfers plain text manually, up to 256 KiB. On Linux it needs `wl-copy`/`wl-paste` in a Wayland session or `xclip`/`xsel` in X11. Clipboard images, rich text, and automatic watching are pending.
+For clipboard commands, grant the caller with `xas allow <caller-id> clipboard` on the receiving machine. `push` and `pull` transfer plain text once; `sync` keeps both text clipboards in step until Ctrl+C. It observes both initial values without replacing either, then transfers subsequent changes. Both sides may run sync; when simultaneous edits conflict, the lexically higher device ID wins. Sync retries dropped connections. Text is limited to 256 KiB. On Linux it needs `wl-copy`/`wl-paste` in a Wayland session or `xclip`/`xsel` in X11. Images and rich text remain pending.
 
 For manual input control, run `xas allow <caller-id> input` on the receiver and `xas input [device-id]` from a Windows desktop session. The sender captures physical keyboard and mouse input and confines its pointer while the session is active. Press **Ctrl+Alt+Esc** to return control locally. The receiver accepts one input session at a time, releases held keys and buttons when it closes or disconnects, and expires idle sessions after four seconds. Windows receivers use SendInput in an interactive user session; UAC secure desktops and higher-integrity applications may reject injected input. Linux X11 receivers can opt into the XTest backend with `XAS_ENABLE_X11_INPUT=1` in the daemon environment; this path still needs testing on a Linux desktop. Wayland input injection needs portal consent and is pending. See [docs/input-protocol.md](docs/input-protocol.md).
 
 ## Current limits
 
-Windows interactive shells pass a networked ConPTY integration test. Linux interactive code is connected to the same protocol, but the native PTY helper could not be built or exercised on this Windows host; compile it on Linux with `make -C native/linux-pty` and put the resulting `xas-linux-pty` on `PATH` or set `XAS_LINUX_PTY_HELPER` to its path. `--sudo` and `--admin` remain unsupported. Discovery can update a stale endpoint after pinned TLS authentication; long-lived reconnect state is pending. Automatic daemon startup, installers, monitor-boundary handoff, virtual display, filesystem mounts, removable media, automatic clipboard sync, and web UI are pending.
+Windows interactive shells pass a networked ConPTY integration test. Linux interactive code is connected to the same protocol, but the native PTY helper could not be built or exercised on this Windows host; compile it on Linux with `make -C native/linux-pty` and put the resulting `xas-linux-pty` on `PATH` or set `XAS_LINUX_PTY_HELPER` to its path. `--sudo` and `--admin` remain unsupported. Discovery can update a stale endpoint after pinned TLS authentication; reconnect for shell and input sessions is pending. Automatic daemon startup, installers, monitor-boundary handoff, virtual display, filesystem mounts, removable media, clipboard images and rich text, and web UI are pending.
 
 See [docs/prerequisites.md](docs/prerequisites.md) for platform components and current upstream references.

@@ -10,13 +10,13 @@ using Xas.Daemon.Clipboard;
 namespace Xas.Daemon;
 
 public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionStore permissions,
-    Func<bool>? inputAvailable = null)
+    Func<bool>? inputAvailable = null, ITextClipboardBackend? clipboardBackend = null)
 {
     private readonly ProcessShellBackend _shell = new();
     private readonly IInteractiveShellBackend _interactive = OperatingSystem.IsWindows()
         ? new WindowsConPtyBackend() : new LinuxPtyBackend();
     private readonly ClipboardService _clipboard = new(identity.DeviceId, permissions,
-        OperatingSystem.IsWindows() ? new WindowsTextClipboard() : new LinuxTextClipboard());
+        clipboardBackend ?? (OperatingSystem.IsWindows() ? new WindowsTextClipboard() : new LinuxTextClipboard()));
 
     public async ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, CancellationToken cancellationToken)

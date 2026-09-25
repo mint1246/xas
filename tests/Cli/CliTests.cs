@@ -14,6 +14,7 @@ public static class CliTests
         await InteractiveDefaultUsesClient();
         await CopyParsesFlagsAndOperands();
         await ClipboardParsesDirectionAndTarget();
+        await ClipboardSyncParsesTarget();
         await InputParsesTarget();
     }
 
@@ -105,6 +106,14 @@ public static class CliTests
         Equal(2, await cli.RunAsync(["input", "one", "two"]));
     }
 
+    private static async Task ClipboardSyncParsesTarget()
+    {
+        var client = new FakeClient();
+        var cli = CreateCli(client);
+        Equal(19, await cli.RunAsync(["clipboard", "sync", "desktop"]));
+        Equal("desktop", client.WatchDeviceId);
+    }
+
     private static XasCommandLine CreateCli(FakeClient client) => new(client, TextWriter.Null, TextWriter.Null);
 
     private static void Equal<T>(T expected, T actual)
@@ -139,6 +148,7 @@ public static class CliTests
         public bool? ClipboardPush { get; private set; }
         public string? ClipboardDeviceId { get; private set; }
         public string? InputDeviceId { get; private set; }
+        public string? WatchDeviceId { get; private set; }
 
         public Task<IReadOnlyList<DeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<DeviceInfo>>([]);
         public Task<DeviceInfo?> GetDeviceInfoAsync(string? deviceId, CancellationToken cancellationToken)
@@ -182,6 +192,11 @@ public static class CliTests
         {
             InputDeviceId = deviceId;
             return Task.FromResult(17);
+        }
+        public Task<int> WatchClipboardAsync(string? deviceId, CancellationToken cancellationToken)
+        {
+            WatchDeviceId = deviceId;
+            return Task.FromResult(19);
         }
     }
 }

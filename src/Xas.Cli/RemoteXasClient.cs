@@ -214,6 +214,25 @@ public sealed class RemoteXasClient : IXasClient, IDisposable
         { throw new XasClientException($"Remote input ended: {ex.Message}"); }
     }
 
+    public async Task<int> WatchClipboardAsync(string? deviceId, CancellationToken cancellationToken)
+    {
+        ITextClipboardBackend backend = OperatingSystem.IsWindows()
+            ? new WindowsTextClipboard() : new LinuxTextClipboard();
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        ConsoleCancelEventHandler onCancel = (_, e) => { e.Cancel = true; stop.Cancel(); };
+        Console.CancelKeyPress += onCancel;
+        try
+        {
+            Console.Error.WriteLine("Clipboard sync is running. Press Ctrl+C to stop.");
+            await ClipboardClient.SyncAsync(deviceId, _configuration, _identity, _trust, backend,
+                Console.Error, stop.Token).ConfigureAwait(false);
+            return 0;
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { return 0; }
+        catch (RemoteProtocolException ex) { throw new XasClientException(ex.Message); }
+        finally { Console.CancelKeyPress -= onCancel; }
+    }
+
     private async Task<byte[]> ReadPipedInputAsync(CancellationToken cancellationToken)
     {
         const int limit = 900_000;

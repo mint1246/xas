@@ -40,6 +40,7 @@ public interface IXasClient
     Task<int> CopyAsync(string source, string destination, bool recursive, bool overwrite,
         CancellationToken cancellationToken);
     Task<int> SyncClipboardAsync(bool push, string? deviceId, CancellationToken cancellationToken);
+    Task<int> WatchClipboardAsync(string? deviceId, CancellationToken cancellationToken);
     Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken);
 }
 
@@ -205,11 +206,13 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
 
     private async Task<int> ClipboardAsync(string[] args, string? targetDevice, CancellationToken ct)
     {
-        if (args.Length is < 2 or > 3 || args[1] is not ("push" or "pull"))
+        if (args.Length is < 2 or > 3 || args[1] is not ("push" or "pull" or "sync"))
         {
-            error.WriteLine("Usage: xas clipboard push|pull [device-id]");
+            error.WriteLine("Usage: xas clipboard push|pull|sync [device-id]");
             return 2;
         }
+        if (args[1] == "sync")
+            return await client.WatchClipboardAsync(ResolveTarget(targetDevice, args.Skip(2).ToArray()), ct);
         return await client.SyncClipboardAsync(args[1] == "push",
             ResolveTarget(targetDevice, args.Skip(2).ToArray()), ct);
     }
@@ -234,7 +237,7 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         writer.WriteLine("  -c <command>            Run a shell command on the selected/default device");
         writer.WriteLine("  exec [--] <exe> [args]  Run an executable on the selected/default device");
         writer.WriteLine("  cp [-r] [-f] <src> <dst>  Copy files to or from a paired device");
-        writer.WriteLine("  clipboard push|pull [id]  Transfer plain text clipboard content");
+        writer.WriteLine("  clipboard push|pull|sync [id]  Transfer or continuously sync plain text");
         writer.WriteLine("  input [device-id]       Capture Windows input manually (Ctrl+Alt+Esc releases)");
         writer.WriteLine("  (no arguments)          Open an interactive shell (requires PTY support)");
         writer.WriteLine("  identity                Show local device ID and fingerprint");

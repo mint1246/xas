@@ -17,12 +17,13 @@
 - [x] Explicit authenticated `xas cp` for streamed files and recursive directories, overwrite protection, timestamps, and separate FileSystem grants.
 - [x] Explicit plain-text clipboard push/pull, per-peer Clipboard grants, origin/version tracking, Windows native clipboard roundtrip, and Linux tool-based backend source.
 - [x] Manual Windows input capture, authenticated input protocol, Input grants, exclusive lease, disconnect/timeout release, Windows SendInput receiver, and opt-in X11 XTest receiver source.
+- [x] Continuous plain-text clipboard sync with reconnect, echo suppression, deterministic simultaneous-edit resolution, and a network loopback test.
 
 ## In progress
 
 - [ ] Compile and run the Linux PTY helper and full interactive path on Linux.
 - [ ] Validate file copy and clipboard commands between a real Windows and Linux pair.
-- [ ] Build automatic clipboard watch/reconnect without echo loops.
+- [ ] Validate clipboard sync on a physical Windows/Linux pair, including simultaneous edits and reconnect after sleep.
 - [ ] Validate physical Windows input handoff and X11 receiver on actual desktops; add Wayland portal/libei injection.
 - [ ] Reconnect long-lived sessions after sleep/network changes.
 - [ ] Complete capability negotiation for all services and per-peer grants.
@@ -33,6 +34,6 @@
 - [ ] Linux sudo and Windows elevated-user service broker.
 - [ ] Linux Wayland portal/libei input injection and monitor-boundary handoff.
 - [ ] Windows IddCx virtual display.
-- [ ] Automatic clipboard synchronization and richer formats.
+- [ ] Clipboard images and richer formats.
 - [ ] WinFsp and FUSE mounts, removable media, and transfer resume.
 - [ ] Local web configuration UI, installation, and startup services.

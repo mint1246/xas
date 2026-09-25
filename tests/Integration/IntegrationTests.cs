@@ -6,6 +6,7 @@ using System.Text.Json;
 using Xas.Cli;
 using Xas.Cli.Interactive;
 using Xas.Cli.FileTransfer;
+using Xas.Cli.Clipboard;
 using Xas.Core;
 using Xas.Core.Configuration;
 using Xas.Core.Protocol;
@@ -33,11 +34,14 @@ public static class IntegrationTests
             var permissions = new PeerPermissionStore(Path.Combine(root, "server-trust"));
             permissions.SetAllowed(clientIdentity.DeviceId, Capability.Shell, true);
             permissions.SetAllowed(clientIdentity.DeviceId, Capability.FileSystem, true);
+            permissions.SetAllowed(clientIdentity.DeviceId, Capability.Clipboard, true);
             var inputBackend = new RecordingInputBackend();
+            var remoteClipboard = new RecordingTextClipboard("remote initial");
 
             var port = ReservePort();
             using var stop = new CancellationTokenSource();
-            var daemon = new DaemonHost(serverIdentity, serverTrust, permissions, port, inputBackend);
+            var daemon = new DaemonHost(serverIdentity, serverTrust, permissions, port,
+                inputBackend, remoteClipboard);
             var serverTask = daemon.RunAsync(stop.Token);
             try
             {
@@ -83,6 +87,29 @@ public static class IntegrationTests
                 var config = new LocalConfiguration(Path.Combine(root, "client-config"));
                 config.UpsertPeer(new ConfiguredPeer(serverIdentity.DeviceId, "server", "127.0.0.1", port));
                 config.SetDefault(serverIdentity.DeviceId);
+                var localClipboard = new RecordingTextClipboard("local initial");
+                using (var syncStop = new CancellationTokenSource())
+                {
+                    var syncTask = ClipboardClient.SyncAsync(null, config, clientIdentity, clientTrust,
+                        localClipboard, TextWriter.Null, syncStop.Token);
+                    try
+                    {
+                        await WaitUntilAsync(() => localClipboard.ReadCount >= 2 && remoteClipboard.ReadCount >= 2);
+                        await localClipboard.SetTextAsync("from local", CancellationToken.None);
+                        await WaitUntilAsync(() => remoteClipboard.Text == "from local");
+                        await remoteClipboard.SetTextAsync("from remote", CancellationToken.None);
+                        await WaitUntilAsync(() => localClipboard.Text == "from remote");
+                        var remoteWrites = remoteClipboard.WriteCount;
+                        await Task.Delay(1600);
+                        Assert(remoteClipboard.WriteCount == remoteWrites,
+                            "Clipboard sync echoed an imported value back to its origin.");
+                    }
+                    finally
+                    {
+                        syncStop.Cancel();
+                        try { await syncTask; } catch (OperationCanceledException) { }
+                    }
+                }
                 using var output = new MemoryStream();
                 using var error = new MemoryStream();
                 using var cliClient = new RemoteXasClient(config, clientIdentity, clientTrust, output, error);
@@ -196,6 +223,28 @@ public static class IntegrationTests
     private static void Assert(bool condition, string message)
     {
         if (!condition) throw new Exception(message);
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(6));
+        while (!condition()) await Task.Delay(50, timeout.Token);
+    }
+
+    private sealed class RecordingTextClipboard(string initialText) : ITextClipboardBackend
+    {
+        private readonly object _gate = new();
+        private string _text = initialText;
+        private ulong _changeId = 1;
+        private int _reads, _writes;
+        public bool IsAvailable => true;
+        public string Text { get { lock (_gate) return _text; } }
+        public int ReadCount { get { lock (_gate) return _reads; } }
+        public int WriteCount { get { lock (_gate) return _writes; } }
+        public ValueTask<ClipboardTextSnapshot> GetSnapshotAsync(CancellationToken cancellationToken)
+        { lock (_gate) { _reads++; return ValueTask.FromResult(new ClipboardTextSnapshot(_text, _changeId)); } }
+        public ValueTask SetTextAsync(string text, CancellationToken cancellationToken)
+        { lock (_gate) { _text = text; _changeId++; _writes++; return ValueTask.CompletedTask; } }
     }
 
     private sealed class RecordingInputBackend : IInputInjectionBackend
