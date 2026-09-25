@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Xas.Cli;
 using Xas.Cli.Interactive;
+using Xas.Cli.FileTransfer;
 using Xas.Core;
 using Xas.Core.Configuration;
 using Xas.Core.Protocol;
@@ -30,6 +31,7 @@ public static class IntegrationTests
             clientTrust.Approve(serverIdentity.DeviceId, serverIdentity.Fingerprint, "server");
             var permissions = new PeerPermissionStore(Path.Combine(root, "server-trust"));
             permissions.SetAllowed(clientIdentity.DeviceId, Capability.Shell, true);
+            permissions.SetAllowed(clientIdentity.DeviceId, Capability.FileSystem, true);
 
             var port = ReservePort();
             using var stop = new CancellationTokenSource();
@@ -90,6 +92,52 @@ public static class IntegrationTests
                     Assert(interactiveExit == 7 && interactiveText.Contains("XAS_INTERACTIVE_OK", StringComparison.Ordinal),
                         $"Networked ConPTY shell failed: exit {interactiveExit}, output '{interactiveText}'.");
                 }
+
+                var uploadSource = Path.Combine(root, "source.bin");
+                var uploadBytes = new byte[1_500_000];
+                Random.Shared.NextBytes(uploadBytes);
+                await File.WriteAllBytesAsync(uploadSource, uploadBytes);
+                var remoteDir = Path.Combine(root, "remote-files");
+                Directory.CreateDirectory(remoteDir);
+                await FileCopyClient.CopyAsync(uploadSource, "server:" + remoteDir + Path.DirectorySeparatorChar,
+                    recursive: false, overwrite: false, config, clientIdentity, clientTrust, TextWriter.Null, CancellationToken.None);
+                var remoteFile = Path.Combine(remoteDir, "source.bin");
+                Assert(File.ReadAllBytes(remoteFile).SequenceEqual(uploadBytes), "Uploaded file content did not match.");
+                var downloadDir = Path.Combine(root, "downloads");
+                Directory.CreateDirectory(downloadDir);
+                await FileCopyClient.CopyAsync("server:" + remoteFile, downloadDir,
+                    recursive: false, overwrite: false, config, clientIdentity, clientTrust, TextWriter.Null, CancellationToken.None);
+                Assert(File.ReadAllBytes(Path.Combine(downloadDir, "source.bin")).SequenceEqual(uploadBytes),
+                    "Downloaded file content did not match.");
+                var projectDir = Path.Combine(root, "project");
+                Directory.CreateDirectory(Path.Combine(projectDir, "nested"));
+                await File.WriteAllTextAsync(Path.Combine(projectDir, "nested", "héllo.txt"), "recursive copy ✓");
+                await FileCopyClient.CopyAsync(projectDir, "server:" + remoteDir + Path.DirectorySeparatorChar,
+                    recursive: true, overwrite: false, config, clientIdentity, clientTrust, TextWriter.Null, CancellationToken.None);
+                await FileCopyClient.CopyAsync("server:" + Path.Combine(remoteDir, "project"), downloadDir,
+                    recursive: true, overwrite: false, config, clientIdentity, clientTrust, TextWriter.Null, CancellationToken.None);
+                Assert(await File.ReadAllTextAsync(Path.Combine(downloadDir, "project", "nested", "héllo.txt")) == "recursive copy ✓",
+                    "Recursive Unicode file copy failed.");
+                try
+                {
+                    await FileCopyClient.CopyAsync(uploadSource, "server:" + remoteFile,
+                        recursive: false, overwrite: false, config, clientIdentity, clientTrust, TextWriter.Null, CancellationToken.None);
+                    throw new Exception("File copy overwrote an existing destination without --force.");
+                }
+                catch (RemoteProtocolException) { }
+                await File.WriteAllTextAsync(uploadSource, "overwritten deliberately");
+                await FileCopyClient.CopyAsync(uploadSource, "server:" + remoteFile,
+                    recursive: false, overwrite: true, config, clientIdentity, clientTrust, TextWriter.Null, CancellationToken.None);
+                Assert(await File.ReadAllTextAsync(remoteFile) == "overwritten deliberately",
+                    "Forced overwrite did not replace the remote file.");
+
+                permissions.SetAllowed(clientIdentity.DeviceId, Capability.FileSystem, false);
+                try
+                {
+                    await peer.RequestAsync("file.stat", JsonSerializer.SerializeToUtf8Bytes(new { path = remoteFile }));
+                    throw new Exception("Denied file system request succeeded.");
+                }
+                catch (RemoteProtocolException) { }
 
                 permissions.SetAllowed(clientIdentity.DeviceId, Capability.Shell, false);
                 try

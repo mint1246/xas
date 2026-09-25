@@ -13,7 +13,14 @@ internal static class Program
             using var client = new RemoteXasClient(Console.OpenStandardOutput(), Console.OpenStandardError());
             return await new XasCommandLine(client, Console.Out, Console.Error).RunAsync(args);
         }
-        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or InvalidDataException or IOException)
+        catch (OperationCanceledException)
+        {
+            Console.Error.WriteLine("Operation cancelled.");
+            return 130;
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or InvalidDataException or
+            IOException or NotSupportedException or UnauthorizedAccessException or TimeoutException or
+            System.ComponentModel.Win32Exception or System.Security.Authentication.AuthenticationException)
         {
             Console.Error.WriteLine(ex.Message);
             return 1;
@@ -30,6 +37,9 @@ public interface IXasClient
     Task<bool> PingAsync(string? deviceId, CancellationToken cancellationToken);
     Task<int> RunShellAsync(ShellRequest request, string? deviceId, CancellationToken cancellationToken);
     Task<int> RunInteractiveAsync(string? deviceId, CancellationToken cancellationToken);
+    Task<int> CopyAsync(string source, string destination, bool recursive, bool overwrite,
+        CancellationToken cancellationToken);
+    Task<int> SyncClipboardAsync(bool push, string? deviceId, CancellationToken cancellationToken);
 }
 
 public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWriter error)
@@ -70,6 +80,10 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
                     return await RunCommandAsync(args, targetDevice, cancellationToken);
                 case "exec":
                     return await RunExecutableAsync(args, targetDevice, cancellationToken);
+                case "cp":
+                    return await CopyAsync(args, targetDevice, cancellationToken);
+                case "clipboard":
+                    return await ClipboardAsync(args, targetDevice, cancellationToken);
                 case "--sudo":
                 case "--admin":
                     error.WriteLine("Privileged remote shells are unavailable: no platform privilege broker is installed.");
@@ -159,6 +173,43 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         return await client.RunShellAsync(new ShellRequest(ShellMode.Exec, null, args[executableIndex], args.Skip(executableIndex + 1).ToArray()), deviceId, ct);
     }
 
+    private async Task<int> CopyAsync(string[] args, string? targetDevice, CancellationToken ct)
+    {
+        if (targetDevice is not null)
+        {
+            error.WriteLine("Specify the remote device in the copy operand, for example laptop:~/file.");
+            return 2;
+        }
+        var recursive = false;
+        var overwrite = false;
+        var index = 1;
+        while (index < args.Length && args[index].StartsWith("-", StringComparison.Ordinal))
+        {
+            if (args[index] == "--") { index++; break; }
+            if (args[index] is "-r" or "--recursive") recursive = true;
+            else if (args[index] is "-f" or "--force") overwrite = true;
+            else { error.WriteLine($"Unknown copy option: {args[index]}"); return 2; }
+            index++;
+        }
+        if (args.Length - index != 2)
+        {
+            error.WriteLine("Usage: xas cp [-r] [-f] <source> <destination>");
+            return 2;
+        }
+        return await client.CopyAsync(args[index], args[index + 1], recursive, overwrite, ct);
+    }
+
+    private async Task<int> ClipboardAsync(string[] args, string? targetDevice, CancellationToken ct)
+    {
+        if (args.Length is < 2 or > 3 || args[1] is not ("push" or "pull"))
+        {
+            error.WriteLine("Usage: xas clipboard push|pull [device-id]");
+            return 2;
+        }
+        return await client.SyncClipboardAsync(args[1] == "push",
+            ResolveTarget(targetDevice, args.Skip(2).ToArray()), ct);
+    }
+
     private static string? ResolveTarget(string? targetDevice, string[] positional)
     {
         if (positional.Length > 1)
@@ -178,6 +229,8 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         writer.WriteLine("  ping [device-id]        Check device connectivity");
         writer.WriteLine("  -c <command>            Run a shell command on the selected/default device");
         writer.WriteLine("  exec [--] <exe> [args]  Run an executable on the selected/default device");
+        writer.WriteLine("  cp [-r] [-f] <src> <dst>  Copy files to or from a paired device");
+        writer.WriteLine("  clipboard push|pull [id]  Transfer plain text clipboard content");
         writer.WriteLine("  (no arguments)          Open an interactive shell (requires PTY support)");
         writer.WriteLine("  identity                Show local device ID and fingerprint");
         writer.WriteLine("  pair <id> <fp> <host> [port] [name]  Approve a peer locally");

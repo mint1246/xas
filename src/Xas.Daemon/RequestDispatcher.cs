@@ -5,6 +5,7 @@ using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Core.Services;
 using Xas.Daemon.Shell;
+using Xas.Daemon.Clipboard;
 
 namespace Xas.Daemon;
 
@@ -13,6 +14,8 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
     private readonly ProcessShellBackend _shell = new();
     private readonly IInteractiveShellBackend _interactive = OperatingSystem.IsWindows()
         ? new WindowsConPtyBackend() : new LinuxPtyBackend();
+    private readonly ClipboardService _clipboard = new(identity.DeviceId, permissions,
+        OperatingSystem.IsWindows() ? new WindowsTextClipboard() : new LinuxTextClipboard());
 
     public async ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, CancellationToken cancellationToken)
@@ -23,11 +26,18 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
             {
                 var info = new DeviceInfo(identity.DeviceId, Environment.MachineName,
                     RuntimeInformation.OSDescription, RuntimeInformation.ProcessArchitecture.ToString(),
-                    [new CapabilityVersion(Capability.Shell, (ushort)(_interactive.IsAvailable ? 3 : 2))]);
+                    _clipboard.IsAvailable
+                        ? [new CapabilityVersion(Capability.Shell, (ushort)(_interactive.IsAvailable ? 3 : 2)),
+                            new CapabilityVersion(Capability.FileSystem, 1), new CapabilityVersion(Capability.Clipboard, 1)]
+                        : [new CapabilityVersion(Capability.Shell, (ushort)(_interactive.IsAvailable ? 3 : 2)),
+                            new CapabilityVersion(Capability.FileSystem, 1)]);
                 return Reply(request, JsonSerializer.SerializeToUtf8Bytes(info));
             }
             case "device.ping":
                 return Reply(request, Array.Empty<byte>());
+            case "clipboard.get":
+            case "clipboard.set":
+                return await _clipboard.HandleAsync(peerId, request, cancellationToken);
             case "shell.run":
             {
                 if (!permissions.IsAllowed(peerId, Capability.Shell))

@@ -28,14 +28,23 @@ xas info
 xas -c "uname -a"
 xas exec git status
 xas
+xas cp file.zip laptop:~/Downloads/
+xas cp laptop:~/log.txt .
+xas cp -r ./project laptop:~/projects/
+xas clipboard push
+xas clipboard pull
 ```
 
 Use `xas -d <id>` for an interactive shell on a specific peer, or add `-c "..."` or `exec ...` for one-shot work. `xas endpoint <id> <host> [port]` updates a changed address. `xas revoke <id>` removes local trust, grants, and endpoint. The daemon listens on TCP port 47821 by default; LAN multicast discovery also uses UDP port 47821. Network and host firewall rules must allow the needed ports. Interactive mode requires an attached terminal. The CLI restores its terminal mode when the session ends.
 
 Command output is streamed as binary frames. Redirected stdin is forwarded for shell version 2, currently up to 900,000 bytes per command. The CLI returns the remote process exit code. Every remote shell request is checked against the receiver's local permission store.
 
+For `xas cp`, grant the caller separately with `xas allow <caller-id> filesystem` on the remote machine, whether the copy uploads or downloads. The transfer streams file bytes, preserves file modification times, copies directories with `-r`, and refuses to overwrite existing files unless `-f` is supplied. It does not follow symbolic links or reparse points. File copy is explicit; Explorer/FUSE mounts remain pending.
+
+For `xas clipboard push` or `pull`, grant the caller with `xas allow <caller-id> clipboard` on the receiving machine. This initial mode transfers plain text manually, up to 256 KiB. On Linux it needs `wl-copy`/`wl-paste` in a Wayland session or `xclip`/`xsel` in X11. Clipboard images, rich text, and automatic watching are pending.
+
 ## Current limits
 
-Windows interactive shells pass a networked ConPTY integration test. Linux interactive code is connected to the same protocol, but the native PTY helper could not be built or exercised on this Windows host; compile it on Linux with `make -C native/linux-pty` and put the resulting `xas-linux-pty` on `PATH` or set `XAS_LINUX_PTY_HELPER` to its path. `--sudo` and `--admin` remain unsupported. Discovery can update a stale endpoint after pinned TLS authentication; long-lived reconnect state is pending. Automatic daemon startup, installers, input handoff, virtual display, filesystem mounts, file transfer, clipboard, and web UI are pending.
+Windows interactive shells pass a networked ConPTY integration test. Linux interactive code is connected to the same protocol, but the native PTY helper could not be built or exercised on this Windows host; compile it on Linux with `make -C native/linux-pty` and put the resulting `xas-linux-pty` on `PATH` or set `XAS_LINUX_PTY_HELPER` to its path. `--sudo` and `--admin` remain unsupported. Discovery can update a stale endpoint after pinned TLS authentication; long-lived reconnect state is pending. Automatic daemon startup, installers, mouse/keyboard handoff, virtual display, filesystem mounts, removable media, automatic clipboard sync, and web UI are pending.
 
 See [docs/prerequisites.md](docs/prerequisites.md) for platform components and current upstream references.

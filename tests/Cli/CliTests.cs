@@ -12,6 +12,8 @@ public static class CliTests
         await InfoAndPingUseExplicitTarget();
         await InvalidTargetAndExtraCommandArgumentsAreRejected();
         await InteractiveDefaultUsesClient();
+        await CopyParsesFlagsAndOperands();
+        await ClipboardParsesDirectionAndTarget();
     }
 
     private static async Task CommandPreservesOneExactArgumentAndTarget()
@@ -65,6 +67,32 @@ public static class CliTests
         Equal("device-c", client.InteractiveDeviceId);
     }
 
+    private static async Task CopyParsesFlagsAndOperands()
+    {
+        var client = new FakeClient();
+        var cli = CreateCli(client);
+        Equal(11, await cli.RunAsync(["cp", "-r", "--force", "./project", "laptop:~/projects/"]));
+        Equal("./project", client.CopySource);
+        Equal("laptop:~/projects/", client.CopyDestination);
+        Equal(true, client.CopyRecursive);
+        Equal(true, client.CopyOverwrite);
+        Equal(2, await cli.RunAsync(["cp", "-r", "only-one"]));
+        Equal(2, await cli.RunAsync(["-d", "laptop", "cp", "a", "b"]));
+    }
+
+    private static async Task ClipboardParsesDirectionAndTarget()
+    {
+        var client = new FakeClient();
+        var cli = CreateCli(client);
+        Equal(13, await cli.RunAsync(["-d", "laptop", "clipboard", "push"]));
+        Equal(true, client.ClipboardPush);
+        Equal("laptop", client.ClipboardDeviceId);
+        Equal(13, await cli.RunAsync(["clipboard", "pull", "desktop"]));
+        Equal(false, client.ClipboardPush);
+        Equal("desktop", client.ClipboardDeviceId);
+        Equal(2, await cli.RunAsync(["clipboard", "paste"]));
+    }
+
     private static XasCommandLine CreateCli(FakeClient client) => new(client, TextWriter.Null, TextWriter.Null);
 
     private static void Equal<T>(T expected, T actual)
@@ -92,6 +120,12 @@ public static class CliTests
         public string? InfoDeviceId { get; private set; }
         public string? PingDeviceId { get; private set; }
         public string? InteractiveDeviceId { get; private set; }
+        public string? CopySource { get; private set; }
+        public string? CopyDestination { get; private set; }
+        public bool CopyRecursive { get; private set; }
+        public bool CopyOverwrite { get; private set; }
+        public bool? ClipboardPush { get; private set; }
+        public string? ClipboardDeviceId { get; private set; }
 
         public Task<IReadOnlyList<DeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<DeviceInfo>>([]);
         public Task<DeviceInfo?> GetDeviceInfoAsync(string? deviceId, CancellationToken cancellationToken)
@@ -115,6 +149,21 @@ public static class CliTests
         {
             InteractiveDeviceId = deviceId;
             return Task.FromResult(9);
+        }
+        public Task<int> CopyAsync(string source, string destination, bool recursive, bool overwrite,
+            CancellationToken cancellationToken)
+        {
+            CopySource = source;
+            CopyDestination = destination;
+            CopyRecursive = recursive;
+            CopyOverwrite = overwrite;
+            return Task.FromResult(11);
+        }
+        public Task<int> SyncClipboardAsync(bool push, string? deviceId, CancellationToken cancellationToken)
+        {
+            ClipboardPush = push;
+            ClipboardDeviceId = deviceId;
+            return Task.FromResult(13);
         }
     }
 }

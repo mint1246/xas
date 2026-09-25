@@ -14,10 +14,15 @@
 - [x] Authenticated endpoint refresh from LAN discovery after a stale address fails.
 - [x] Combined loopback tests and first working Git commit.
 - [x] Authenticated interactive shell protocol, per-connection session cleanup, Windows networked ConPTY test, and local Windows/Linux raw terminal adapters.
+- [x] Explicit authenticated `xas cp` for streamed files and recursive directories, overwrite protection, timestamps, and separate FileSystem grants.
+- [x] Explicit plain-text clipboard push/pull, per-peer Clipboard grants, origin/version tracking, Windows native clipboard roundtrip, and Linux tool-based backend source.
 
 ## In progress
 
 - [ ] Compile and run the Linux PTY helper and full interactive path on Linux.
+- [ ] Validate file copy and clipboard commands between a real Windows and Linux pair.
+- [ ] Build automatic clipboard watch/reconnect without echo loops.
+- [ ] Implement Windows input capture and Linux Wayland portal/libei injection with emergency local takeover.
 - [ ] Reconnect long-lived sessions after sleep/network changes.
 - [ ] Complete capability negotiation for all services and per-peer grants.
 
@@ -27,6 +32,6 @@
 - [ ] Linux sudo and Windows elevated-user service broker.
 - [ ] Windows input capture, Linux portal/libei injection, and disconnect safety.
 - [ ] Windows IddCx virtual display.
-- [ ] Clipboard synchronization.
-- [ ] Filesystem RPC, WinFsp and FUSE mounts, removable media, transfer.
+- [ ] Automatic clipboard synchronization and richer formats.
+- [ ] WinFsp and FUSE mounts, removable media, and transfer resume.
 - [ ] Local web configuration UI, installation, and startup services.

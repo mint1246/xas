@@ -6,6 +6,7 @@ using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Core.Transport;
 using Xas.Daemon.Interactive;
+using Xas.Daemon.FileTransfer;
 
 namespace Xas.Daemon;
 
@@ -48,11 +49,19 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
                 TimeSpan.FromSeconds(10), cancellationToken);
             await using var frames = new BinaryFrameConnection(tls.Stream, leaveOpen: true);
             await using var interactive = new InteractiveShellManager(tls.PeerDeviceId, permissions, frames.SendAsync);
+            await using var files = new FileTransferServer(tls.PeerDeviceId, permissions, frames.SendAsync);
             await using var peer = new MultiplexedProtocolPeer(frames,
                 (message, ct) => message.Method is "shell.open" or "shell.resize" or "shell.close"
                     ? interactive.HandleRequestAsync(message, ct)
+                    : message.Method.StartsWith("file.", StringComparison.Ordinal)
+                    ? files.HandleRequestAsync(message, ct)
                     : _dispatcher.HandleAsync(tls.PeerDeviceId, message, frames.SendAsync, ct));
-            peer.MessageReceived += interactive.HandleMessageAsync;
+            peer.MessageReceived += message => message.Method switch
+            {
+                "shell.input" => interactive.HandleMessageAsync(message),
+                "file.put.data" => files.HandleMessageAsync(message),
+                _ => ValueTask.FromException(new InvalidDataException($"Unexpected stream message: {message.Method}"))
+            };
             await peer.Completion;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }

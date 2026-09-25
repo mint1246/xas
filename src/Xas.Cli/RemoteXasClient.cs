@@ -8,6 +8,8 @@ using Xas.Core.Services;
 using Xas.Core.Transport;
 using Xas.Cli.Interactive;
 using Xas.Cli.Terminal;
+using Xas.Cli.FileTransfer;
+using Xas.Cli.Clipboard;
 
 namespace Xas.Cli;
 
@@ -156,10 +158,45 @@ public sealed class RemoteXasClient : IXasClient, IDisposable
         }
         catch (RemoteProtocolException ex) { throw new XasClientException(ex.Message); }
         catch (Exception ex) when (ex is IOException or System.Net.Sockets.SocketException or
-            System.Security.Authentication.AuthenticationException)
+            System.Security.Authentication.AuthenticationException or TimeoutException)
         {
             throw new XasClientException($"Could not open an interactive shell on {configured.DeviceId}: {ex.Message}");
         }
+    }
+
+    public async Task<int> CopyAsync(string source, string destination, bool recursive, bool overwrite,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await FileCopyClient.CopyAsync(source, destination, recursive, overwrite,
+                _configuration, _identity, _trust, Console.Error, cancellationToken).ConfigureAwait(false);
+            return 0;
+        }
+        catch (RemoteProtocolException ex) { throw new XasClientException(ex.Message); }
+        catch (Exception ex) when (ex is System.Net.Sockets.SocketException or
+            System.Security.Authentication.AuthenticationException or TimeoutException)
+        { throw new XasClientException($"Could not copy files: {ex.Message}"); }
+    }
+
+    public async Task<int> SyncClipboardAsync(bool push, string? deviceId, CancellationToken cancellationToken)
+    {
+        ITextClipboardBackend backend = OperatingSystem.IsWindows()
+            ? new WindowsTextClipboard() : new LinuxTextClipboard();
+        try
+        {
+            if (push)
+                await ClipboardClient.PushAsync(deviceId, _configuration, _identity, _trust, backend,
+                    cancellationToken).ConfigureAwait(false);
+            else
+                await ClipboardClient.PullAsync(deviceId, _configuration, _identity, _trust, backend,
+                    cancellationToken).ConfigureAwait(false);
+            return 0;
+        }
+        catch (RemoteProtocolException ex) { throw new XasClientException(ex.Message); }
+        catch (Exception ex) when (ex is System.Net.Sockets.SocketException or
+            System.Security.Authentication.AuthenticationException or TimeoutException)
+        { throw new XasClientException($"Could not transfer clipboard text: {ex.Message}"); }
     }
 
     private async Task<byte[]> ReadPipedInputAsync(CancellationToken cancellationToken)
