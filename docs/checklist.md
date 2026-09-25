@@ -13,17 +13,17 @@
 - [x] Linux PTY helper source and managed bridge compile on Windows; Linux runtime test pending.
 - [x] Authenticated endpoint refresh from LAN discovery after a stale address fails.
 - [x] Combined loopback tests and first working Git commit.
+- [x] Authenticated interactive shell protocol, per-connection session cleanup, Windows networked ConPTY test, and local Windows/Linux raw terminal adapters.
 
 ## In progress
 
-- [ ] Wire interactive shell sessions through the authenticated protocol and CLI.
-- [ ] Compile and run the Linux PTY helper on Linux, then connect interactive sessions to the CLI.
+- [ ] Compile and run the Linux PTY helper and full interactive path on Linux.
 - [ ] Reconnect long-lived sessions after sleep/network changes.
 - [ ] Complete capability negotiation for all services and per-peer grants.
 
 ## Pending
 
-- [ ] Fully networked Linux PTY and Windows ConPTY interactive shells.
+- [ ] Verify fully networked Linux PTY interactive shells on Linux.
 - [ ] Linux sudo and Windows elevated-user service broker.
 - [ ] Windows input capture, Linux portal/libei injection, and disconnect safety.
 - [ ] Windows IddCx virtual display.

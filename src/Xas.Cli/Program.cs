@@ -29,6 +29,7 @@ public interface IXasClient
     Task SetDefaultDeviceAsync(string deviceId, CancellationToken cancellationToken);
     Task<bool> PingAsync(string? deviceId, CancellationToken cancellationToken);
     Task<int> RunShellAsync(ShellRequest request, string? deviceId, CancellationToken cancellationToken);
+    Task<int> RunInteractiveAsync(string? deviceId, CancellationToken cancellationToken);
 }
 
 public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWriter error)
@@ -48,7 +49,10 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         }
 
         if (args.Length == 0)
-            return UnsupportedInteractive();
+        {
+            try { return await client.RunInteractiveAsync(targetDevice, cancellationToken); }
+            catch (XasClientException ex) { error.WriteLine(ex.Message); return 1; }
+        }
 
         try
         {
@@ -162,12 +166,6 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         if (targetDevice is not null && positional.Length == 1)
             throw new XasClientException("Specify the target once, either with -d or as the command argument.");
         return targetDevice ?? positional.FirstOrDefault();
-    }
-
-    private int UnsupportedInteractive()
-    {
-        error.WriteLine("Interactive shell is unavailable: this CLI has no PTY streaming transport yet. Use 'xas -c <command>' or 'xas exec <executable> [arguments...]' when connected to a compatible daemon.");
-        return 3;
     }
 
     private static void WriteUsage(TextWriter writer)

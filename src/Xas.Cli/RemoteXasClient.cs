@@ -6,6 +6,8 @@ using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Core.Services;
 using Xas.Core.Transport;
+using Xas.Cli.Interactive;
+using Xas.Cli.Terminal;
 
 namespace Xas.Cli;
 
@@ -138,6 +140,26 @@ public sealed class RemoteXasClient : IXasClient, IDisposable
             await _error.WriteAsync(warning, cancellationToken).ConfigureAwait(false);
         }
         return result.ExitCode;
+    }
+
+    public async Task<int> RunInteractiveAsync(string? deviceId, CancellationToken cancellationToken)
+    {
+        var configured = Resolve(deviceId) ?? throw new XasClientException("No matching configured device.");
+        if (Console.IsInputRedirected || Console.IsOutputRedirected)
+            throw new XasClientException("Interactive shell requires an attached terminal.");
+        using var terminal = TerminalMode.Enter();
+        try
+        {
+            return await InteractiveShellClient.RunAsync(configured, _identity, _trust,
+                Console.OpenStandardInput(), _output, (ushort)terminal.Columns, (ushort)terminal.Rows,
+                cancellationToken, TerminalMode.CurrentSize).ConfigureAwait(false);
+        }
+        catch (RemoteProtocolException ex) { throw new XasClientException(ex.Message); }
+        catch (Exception ex) when (ex is IOException or System.Net.Sockets.SocketException or
+            System.Security.Authentication.AuthenticationException)
+        {
+            throw new XasClientException($"Could not open an interactive shell on {configured.DeviceId}: {ex.Message}");
+        }
     }
 
     private async Task<byte[]> ReadPipedInputAsync(CancellationToken cancellationToken)

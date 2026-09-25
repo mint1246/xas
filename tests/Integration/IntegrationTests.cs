@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using Xas.Cli;
+using Xas.Cli.Interactive;
 using Xas.Core;
 using Xas.Core.Configuration;
 using Xas.Core.Protocol;
@@ -77,7 +78,27 @@ public static class IntegrationTests
                 Assert(inputExit == 0 && Encoding.UTF8.GetString(output.ToArray()) == "piped input\n",
                     "The CLI client did not forward binary standard input.");
 
+                if (OperatingSystem.IsWindows())
+                {
+                    using var interactiveInput = new MemoryStream(Encoding.UTF8.GetBytes("echo XAS_INTERACTIVE_OK\r\nexit /b 7\r\n"));
+                    using var interactiveOutput = new MemoryStream();
+                    using var interactiveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+                    var interactiveExit = await InteractiveShellClient.RunAsync(
+                        config.Resolve(null)!, clientIdentity, clientTrust, interactiveInput, interactiveOutput,
+                        80, 24, interactiveTimeout.Token);
+                    var interactiveText = Encoding.UTF8.GetString(interactiveOutput.ToArray());
+                    Assert(interactiveExit == 7 && interactiveText.Contains("XAS_INTERACTIVE_OK", StringComparison.Ordinal),
+                        $"Networked ConPTY shell failed: exit {interactiveExit}, output '{interactiveText}'.");
+                }
+
                 permissions.SetAllowed(clientIdentity.DeviceId, Capability.Shell, false);
+                try
+                {
+                    await peer.RequestAsync("shell.open", JsonSerializer.SerializeToUtf8Bytes(
+                        new { columns = 80, rows = 24, elevated = false }));
+                    throw new Exception("Denied interactive shell request succeeded.");
+                }
+                catch (RemoteProtocolException) { }
                 try
                 {
                     await peer.RequestAsync("shell.run", ShellWire.EncodeRequest(shellRequest));

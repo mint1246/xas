@@ -11,6 +11,8 @@ namespace Xas.Daemon;
 public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionStore permissions)
 {
     private readonly ProcessShellBackend _shell = new();
+    private readonly IInteractiveShellBackend _interactive = OperatingSystem.IsWindows()
+        ? new WindowsConPtyBackend() : new LinuxPtyBackend();
 
     public async ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, CancellationToken cancellationToken)
@@ -21,7 +23,7 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
             {
                 var info = new DeviceInfo(identity.DeviceId, Environment.MachineName,
                     RuntimeInformation.OSDescription, RuntimeInformation.ProcessArchitecture.ToString(),
-                    [new CapabilityVersion(Capability.Shell, 2)]);
+                    [new CapabilityVersion(Capability.Shell, (ushort)(_interactive.IsAvailable ? 3 : 2))]);
                 return Reply(request, JsonSerializer.SerializeToUtf8Bytes(info));
             }
             case "device.ping":

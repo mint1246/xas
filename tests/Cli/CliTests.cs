@@ -11,7 +11,7 @@ public static class CliTests
         await ExecPassesExecutableArgumentsAndTarget();
         await InfoAndPingUseExplicitTarget();
         await InvalidTargetAndExtraCommandArgumentsAreRejected();
-        InteractiveDefaultIsClearlyUnsupported();
+        await InteractiveDefaultUsesClient();
     }
 
     private static async Task CommandPreservesOneExactArgumentAndTarget()
@@ -55,12 +55,14 @@ public static class CliTests
         Equal<ShellRequest?>(null, client.ShellRequest);
     }
 
-    private static void InteractiveDefaultIsClearlyUnsupported()
+    private static async Task InteractiveDefaultUsesClient()
     {
-        var error = new StringWriter();
-        var cli = new XasCommandLine(new FakeClient(), TextWriter.Null, error);
-        Equal(3, cli.RunAsync([]).GetAwaiter().GetResult());
-        Contains("PTY", error.ToString());
+        var client = new FakeClient();
+        var cli = CreateCli(client);
+        Equal(9, await cli.RunAsync([]));
+        Equal<string?>(null, client.InteractiveDeviceId);
+        Equal(9, await cli.RunAsync(["-d", "device-c"]));
+        Equal("device-c", client.InteractiveDeviceId);
     }
 
     private static XasCommandLine CreateCli(FakeClient client) => new(client, TextWriter.Null, TextWriter.Null);
@@ -89,6 +91,7 @@ public static class CliTests
         public string? ShellDeviceId { get; private set; }
         public string? InfoDeviceId { get; private set; }
         public string? PingDeviceId { get; private set; }
+        public string? InteractiveDeviceId { get; private set; }
 
         public Task<IReadOnlyList<DeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<DeviceInfo>>([]);
         public Task<DeviceInfo?> GetDeviceInfoAsync(string? deviceId, CancellationToken cancellationToken)
@@ -107,6 +110,11 @@ public static class CliTests
             ShellRequest = request;
             ShellDeviceId = deviceId;
             return Task.FromResult(7);
+        }
+        public Task<int> RunInteractiveAsync(string? deviceId, CancellationToken cancellationToken)
+        {
+            InteractiveDeviceId = deviceId;
+            return Task.FromResult(9);
         }
     }
 }

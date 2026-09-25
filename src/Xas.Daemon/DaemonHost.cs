@@ -5,6 +5,7 @@ using Xas.Core.Discovery;
 using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Core.Transport;
+using Xas.Daemon.Interactive;
 
 namespace Xas.Daemon;
 
@@ -46,8 +47,12 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
             await using var tls = await MutualTlsTransport.AcceptAsync(socket, identity, trust,
                 TimeSpan.FromSeconds(10), cancellationToken);
             await using var frames = new BinaryFrameConnection(tls.Stream, leaveOpen: true);
+            await using var interactive = new InteractiveShellManager(tls.PeerDeviceId, permissions, frames.SendAsync);
             await using var peer = new MultiplexedProtocolPeer(frames,
-                (message, ct) => _dispatcher.HandleAsync(tls.PeerDeviceId, message, frames.SendAsync, ct));
+                (message, ct) => message.Method is "shell.open" or "shell.resize" or "shell.close"
+                    ? interactive.HandleRequestAsync(message, ct)
+                    : _dispatcher.HandleAsync(tls.PeerDeviceId, message, frames.SendAsync, ct));
+            peer.MessageReceived += interactive.HandleMessageAsync;
             await peer.Completion;
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }

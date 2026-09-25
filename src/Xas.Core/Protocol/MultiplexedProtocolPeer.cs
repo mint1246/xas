@@ -28,6 +28,12 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
     /// <summary>Completes when the connection closes or the receive loop stops.</summary>
     public Task Completion => _reader;
 
+    public ValueTask SendAsync(ProtocolMessage message, CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        return _connection.SendAsync(message, cancellationToken);
+    }
+
     public async ValueTask<ProtocolMessage> RequestAsync(string method, byte[] payload,
         uint streamId = 0, CancellationToken cancellationToken = default)
     {
