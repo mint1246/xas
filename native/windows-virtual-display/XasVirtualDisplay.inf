@@ -40,11 +40,11 @@ UmdfKernelModeClientPolicy=AllowKernelModeClients
 
 [XasVirtualDisplay_ServiceInstall]
 UmdfLibraryVersion=2.25
-ServiceBinary=%12%\UMDF\XasVirtualDisplay.dll
+ServiceBinary=%13%\XasVirtualDisplay.dll
 UmdfExtensions=IddCx0104
 
 [DestinationDirs]
-DriverCopy=12,UMDF
+DriverCopy=13
 
 [DriverCopy]
 XasVirtualDisplay.dll

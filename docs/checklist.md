@@ -20,13 +20,14 @@
 - [x] Continuous plain-text clipboard sync with reconnect, echo suppression, deterministic simultaneous-edit resolution, and a network loopback test.
 - [x] Managed automatic Windows monitor-boundary handoff, absolute pointer protocol, Linux display metadata RPC, and topology/coordinate tests.
 - [x] Source for one-monitor Windows IddCx driver and Wayland portal/libei input helper.
+- [x] Build the Windows x64 IddCx DLL with the Microsoft-signed WDK NuGet toolchain; verify its INF with Windows Driver, Universal, and WHQL rules.
 
 ## In progress
 
 - [ ] Compile and run the Linux PTY helper and full interactive path on Linux.
 - [ ] Validate file copy and clipboard commands between a real Windows and Linux pair.
 - [ ] Validate clipboard sync on a physical Windows/Linux pair, including simultaneous edits and reconnect after sleep.
-- [ ] Build/sign/install the Windows IddCx driver with WDK; extend it as a second Windows monitor and validate native monitor identification.
+- [ ] Generate/sign an installable catalog, install the IddCx package, extend it as a second Windows monitor, and validate native monitor identification.
 - [ ] Build the Wayland portal/libei helper on Linux and validate compositor consent, absolute input, revocation, and release behavior.
 - [ ] Validate physical Windows cursor/keyboard handoff with X11 and Wayland receivers, including disconnect and emergency return.
 - [ ] Configure virtual display modes dynamically from Linux metadata; currently modes are fixed.

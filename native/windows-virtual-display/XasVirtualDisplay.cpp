@@ -1,4 +1,6 @@
+#define WIN32_NO_STATUS
 #include <windows.h>
+#undef WIN32_NO_STATUS
 #include <wdf.h>
 #include <iddcx.h>
 #include <d3d11.h>
