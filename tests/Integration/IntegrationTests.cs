@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
 using Xas.Cli;
@@ -32,10 +33,11 @@ public static class IntegrationTests
             var permissions = new PeerPermissionStore(Path.Combine(root, "server-trust"));
             permissions.SetAllowed(clientIdentity.DeviceId, Capability.Shell, true);
             permissions.SetAllowed(clientIdentity.DeviceId, Capability.FileSystem, true);
+            var inputBackend = new RecordingInputBackend();
 
             var port = ReservePort();
             using var stop = new CancellationTokenSource();
-            var daemon = new DaemonHost(serverIdentity, serverTrust, permissions, port);
+            var daemon = new DaemonHost(serverIdentity, serverTrust, permissions, port, inputBackend);
             var serverTask = daemon.RunAsync(stop.Token);
             try
             {
@@ -51,6 +53,25 @@ public static class IntegrationTests
                 Assert(device?.DeviceId == serverIdentity.DeviceId, "Info returned the wrong device.");
                 if (device is null) throw new Exception("Info response was empty.");
                 Assert(device.Capabilities.Any(c => c.Capability == Capability.Shell && c.Version >= 2), "Streaming shell capability was not advertised.");
+                Assert(device.Capabilities.Any(c => c.Capability == Capability.Input && c.Version == 1),
+                    "Available input backend was not advertised.");
+                try
+                {
+                    await peer.RequestAsync("input.open", []);
+                    throw new Exception("Input access succeeded without a grant.");
+                }
+                catch (RemoteProtocolException) { }
+                permissions.SetAllowed(clientIdentity.DeviceId, Capability.Input, true);
+                var inputOpen = await peer.RequestAsync("input.open", []);
+                var inputId = BinaryPrimitives.ReadUInt32BigEndian(inputOpen.Payload);
+                await peer.SendAsync(new ProtocolMessage(MessageKind.StreamData, 0, inputId, "input.event",
+                    InputWire.Encode([new InputEvent(InputEventKind.Key, 4, Down: true),
+                        new InputEvent(InputEventKind.Move, X: 11, Y: -5)])));
+                var inputCloseBytes = new byte[4];
+                BinaryPrimitives.WriteUInt32BigEndian(inputCloseBytes, inputId);
+                await peer.RequestAsync("input.close", inputCloseBytes);
+                Assert(inputBackend.Events.Count == 2 && inputBackend.ReleaseCount == 1,
+                    "Input events or cleanup failed through the network protocol.");
 
                 var shellRequest = new ShellRequest(ShellMode.Exec, null, "dotnet",
                     [typeof(IntegrationTests).Assembly.Location, "--echo-args", "hello world"]);
@@ -175,5 +196,16 @@ public static class IntegrationTests
     private static void Assert(bool condition, string message)
     {
         if (!condition) throw new Exception(message);
+    }
+
+    private sealed class RecordingInputBackend : IInputInjectionBackend
+    {
+        public bool IsAvailable => true;
+        public List<InputEvent> Events { get; } = [];
+        public int ReleaseCount { get; private set; }
+        public ValueTask InjectAsync(InputEvent inputEvent, CancellationToken cancellationToken)
+        { Events.Add(inputEvent); return ValueTask.CompletedTask; }
+        public ValueTask ReleaseAllAsync(CancellationToken cancellationToken)
+        { ReleaseCount++; return ValueTask.CompletedTask; }
     }
 }

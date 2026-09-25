@@ -16,13 +16,14 @@
 - [x] Authenticated interactive shell protocol, per-connection session cleanup, Windows networked ConPTY test, and local Windows/Linux raw terminal adapters.
 - [x] Explicit authenticated `xas cp` for streamed files and recursive directories, overwrite protection, timestamps, and separate FileSystem grants.
 - [x] Explicit plain-text clipboard push/pull, per-peer Clipboard grants, origin/version tracking, Windows native clipboard roundtrip, and Linux tool-based backend source.
+- [x] Manual Windows input capture, authenticated input protocol, Input grants, exclusive lease, disconnect/timeout release, Windows SendInput receiver, and opt-in X11 XTest receiver source.
 
 ## In progress
 
 - [ ] Compile and run the Linux PTY helper and full interactive path on Linux.
 - [ ] Validate file copy and clipboard commands between a real Windows and Linux pair.
 - [ ] Build automatic clipboard watch/reconnect without echo loops.
-- [ ] Implement Windows input capture and Linux Wayland portal/libei injection with emergency local takeover.
+- [ ] Validate physical Windows input handoff and X11 receiver on actual desktops; add Wayland portal/libei injection.
 - [ ] Reconnect long-lived sessions after sleep/network changes.
 - [ ] Complete capability negotiation for all services and per-peer grants.
 
@@ -30,7 +31,7 @@
 
 - [ ] Verify fully networked Linux PTY interactive shells on Linux.
 - [ ] Linux sudo and Windows elevated-user service broker.
-- [ ] Windows input capture, Linux portal/libei injection, and disconnect safety.
+- [ ] Linux Wayland portal/libei input injection and monitor-boundary handoff.
 - [ ] Windows IddCx virtual display.
 - [ ] Automatic clipboard synchronization and richer formats.
 - [ ] WinFsp and FUSE mounts, removable media, and transfer resume.

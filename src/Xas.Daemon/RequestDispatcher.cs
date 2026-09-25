@@ -9,7 +9,8 @@ using Xas.Daemon.Clipboard;
 
 namespace Xas.Daemon;
 
-public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionStore permissions)
+public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionStore permissions,
+    Func<bool>? inputAvailable = null)
 {
     private readonly ProcessShellBackend _shell = new();
     private readonly IInteractiveShellBackend _interactive = OperatingSystem.IsWindows()
@@ -24,13 +25,15 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
         {
             case "device.info":
             {
+                var capabilities = new List<CapabilityVersion>
+                {
+                    new(Capability.Shell, (ushort)(_interactive.IsAvailable ? 3 : 2)),
+                    new(Capability.FileSystem, 1)
+                };
+                if (_clipboard.IsAvailable) capabilities.Add(new(Capability.Clipboard, 1));
+                if (inputAvailable?.Invoke() == true) capabilities.Add(new(Capability.Input, 1));
                 var info = new DeviceInfo(identity.DeviceId, Environment.MachineName,
-                    RuntimeInformation.OSDescription, RuntimeInformation.ProcessArchitecture.ToString(),
-                    _clipboard.IsAvailable
-                        ? [new CapabilityVersion(Capability.Shell, (ushort)(_interactive.IsAvailable ? 3 : 2)),
-                            new CapabilityVersion(Capability.FileSystem, 1), new CapabilityVersion(Capability.Clipboard, 1)]
-                        : [new CapabilityVersion(Capability.Shell, (ushort)(_interactive.IsAvailable ? 3 : 2)),
-                            new CapabilityVersion(Capability.FileSystem, 1)]);
+                    RuntimeInformation.OSDescription, RuntimeInformation.ProcessArchitecture.ToString(), capabilities);
                 return Reply(request, JsonSerializer.SerializeToUtf8Bytes(info));
             }
             case "device.ping":

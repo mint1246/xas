@@ -14,6 +14,7 @@ public static class CliTests
         await InteractiveDefaultUsesClient();
         await CopyParsesFlagsAndOperands();
         await ClipboardParsesDirectionAndTarget();
+        await InputParsesTarget();
     }
 
     private static async Task CommandPreservesOneExactArgumentAndTarget()
@@ -93,6 +94,17 @@ public static class CliTests
         Equal(2, await cli.RunAsync(["clipboard", "paste"]));
     }
 
+    private static async Task InputParsesTarget()
+    {
+        var client = new FakeClient();
+        var cli = CreateCli(client);
+        Equal(17, await cli.RunAsync(["-d", "laptop", "input"]));
+        Equal("laptop", client.InputDeviceId);
+        Equal(17, await cli.RunAsync(["input", "desktop"]));
+        Equal("desktop", client.InputDeviceId);
+        Equal(2, await cli.RunAsync(["input", "one", "two"]));
+    }
+
     private static XasCommandLine CreateCli(FakeClient client) => new(client, TextWriter.Null, TextWriter.Null);
 
     private static void Equal<T>(T expected, T actual)
@@ -126,6 +138,7 @@ public static class CliTests
         public bool CopyOverwrite { get; private set; }
         public bool? ClipboardPush { get; private set; }
         public string? ClipboardDeviceId { get; private set; }
+        public string? InputDeviceId { get; private set; }
 
         public Task<IReadOnlyList<DeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<DeviceInfo>>([]);
         public Task<DeviceInfo?> GetDeviceInfoAsync(string? deviceId, CancellationToken cancellationToken)
@@ -164,6 +177,11 @@ public static class CliTests
             ClipboardPush = push;
             ClipboardDeviceId = deviceId;
             return Task.FromResult(13);
+        }
+        public Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken)
+        {
+            InputDeviceId = deviceId;
+            return Task.FromResult(17);
         }
     }
 }

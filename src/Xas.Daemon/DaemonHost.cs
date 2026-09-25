@@ -7,16 +7,23 @@ using Xas.Core.Security;
 using Xas.Core.Transport;
 using Xas.Daemon.Interactive;
 using Xas.Daemon.FileTransfer;
+using Xas.Daemon.Input;
 
 namespace Xas.Daemon;
 
 public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
-    PeerPermissionStore permissions, int port = XasProtocol.DefaultPort)
+    PeerPermissionStore permissions, int port = XasProtocol.DefaultPort,
+    IInputInjectionBackend? inputBackend = null)
 {
-    private readonly RequestDispatcher _dispatcher = new(identity, permissions);
+    private readonly InputControlService _input = new(permissions,
+        inputBackend ?? (OperatingSystem.IsWindows() ? new WindowsSendInputBackend() :
+            OperatingSystem.IsLinux() && Environment.GetEnvironmentVariable("XAS_ENABLE_X11_INPUT") == "1"
+                ? new LinuxX11InputBackend() : new UnavailableInputBackend()));
+    private RequestDispatcher? _dispatcher;
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
+        _dispatcher = new RequestDispatcher(identity, permissions, () => _input.IsAvailable);
         var listener = new TcpListener(IPAddress.Any, port);
         await using var discovery = new LanDiscoveryService(identity.DeviceId, Environment.MachineName, port);
         listener.Start();
@@ -37,7 +44,7 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
             }
             await Task.WhenAll(clients);
         }
-        finally { listener.Stop(); }
+        finally { listener.Stop(); await _input.DisposeAsync(); }
     }
 
     private async Task HandleClientAsync(TcpClient socket, CancellationToken cancellationToken)
@@ -50,16 +57,20 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
             await using var frames = new BinaryFrameConnection(tls.Stream, leaveOpen: true);
             await using var interactive = new InteractiveShellManager(tls.PeerDeviceId, permissions, frames.SendAsync);
             await using var files = new FileTransferServer(tls.PeerDeviceId, permissions, frames.SendAsync);
+            await using var input = _input.CreateSession(tls.PeerDeviceId);
             await using var peer = new MultiplexedProtocolPeer(frames,
                 (message, ct) => message.Method is "shell.open" or "shell.resize" or "shell.close"
                     ? interactive.HandleRequestAsync(message, ct)
                     : message.Method.StartsWith("file.", StringComparison.Ordinal)
                     ? files.HandleRequestAsync(message, ct)
-                    : _dispatcher.HandleAsync(tls.PeerDeviceId, message, frames.SendAsync, ct));
+                    : message.Method is "input.open" or "input.close"
+                    ? input.HandleRequestAsync(message, ct)
+                    : _dispatcher!.HandleAsync(tls.PeerDeviceId, message, frames.SendAsync, ct));
             peer.MessageReceived += message => message.Method switch
             {
                 "shell.input" => interactive.HandleMessageAsync(message),
                 "file.put.data" => files.HandleMessageAsync(message),
+                "input.event" => input.HandleMessageAsync(message),
                 _ => ValueTask.FromException(new InvalidDataException($"Unexpected stream message: {message.Method}"))
             };
             await peer.Completion;

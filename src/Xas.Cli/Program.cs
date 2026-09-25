@@ -40,6 +40,7 @@ public interface IXasClient
     Task<int> CopyAsync(string source, string destination, bool recursive, bool overwrite,
         CancellationToken cancellationToken);
     Task<int> SyncClipboardAsync(bool push, string? deviceId, CancellationToken cancellationToken);
+    Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken);
 }
 
 public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWriter error)
@@ -84,6 +85,9 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
                     return await CopyAsync(args, targetDevice, cancellationToken);
                 case "clipboard":
                     return await ClipboardAsync(args, targetDevice, cancellationToken);
+                case "input":
+                    if (args.Length > 2) { error.WriteLine("Usage: xas input [device-id]"); return 2; }
+                    return await client.RunInputAsync(ResolveTarget(targetDevice, args.Skip(1).ToArray()), cancellationToken);
                 case "--sudo":
                 case "--admin":
                     error.WriteLine("Privileged remote shells are unavailable: no platform privilege broker is installed.");
@@ -231,6 +235,7 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         writer.WriteLine("  exec [--] <exe> [args]  Run an executable on the selected/default device");
         writer.WriteLine("  cp [-r] [-f] <src> <dst>  Copy files to or from a paired device");
         writer.WriteLine("  clipboard push|pull [id]  Transfer plain text clipboard content");
+        writer.WriteLine("  input [device-id]       Capture Windows input manually (Ctrl+Alt+Esc releases)");
         writer.WriteLine("  (no arguments)          Open an interactive shell (requires PTY support)");
         writer.WriteLine("  identity                Show local device ID and fingerprint");
         writer.WriteLine("  pair <id> <fp> <host> [port] [name]  Approve a peer locally");

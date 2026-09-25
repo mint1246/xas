@@ -1,6 +1,6 @@
 # xas
 
-`xas` is an in-progress Windows/Linux workstation bridge. The working vertical slice is a mutually authenticated device connection, one-shot remote commands, and interactive shells backed by Windows ConPTY or the Linux PTY helper. The larger KVM, mount, clipboard, and control-panel experience is tracked in [docs/checklist.md](docs/checklist.md).
+`xas` is an in-progress Windows/Linux workstation bridge. It has mutually authenticated connections, remote shells, explicit file copy and text clipboard transfer, and manual mouse/keyboard control. The larger virtual monitor, mount, automatic sync, and control-panel experience is tracked in [docs/checklist.md](docs/checklist.md).
 
 ## Build and test
 
@@ -33,6 +33,7 @@ xas cp laptop:~/log.txt .
 xas cp -r ./project laptop:~/projects/
 xas clipboard push
 xas clipboard pull
+xas input
 ```
 
 Use `xas -d <id>` for an interactive shell on a specific peer, or add `-c "..."` or `exec ...` for one-shot work. `xas endpoint <id> <host> [port]` updates a changed address. `xas revoke <id>` removes local trust, grants, and endpoint. The daemon listens on TCP port 47821 by default; LAN multicast discovery also uses UDP port 47821. Network and host firewall rules must allow the needed ports. Interactive mode requires an attached terminal. The CLI restores its terminal mode when the session ends.
@@ -43,8 +44,10 @@ For `xas cp`, grant the caller separately with `xas allow <caller-id> filesystem
 
 For `xas clipboard push` or `pull`, grant the caller with `xas allow <caller-id> clipboard` on the receiving machine. This initial mode transfers plain text manually, up to 256 KiB. On Linux it needs `wl-copy`/`wl-paste` in a Wayland session or `xclip`/`xsel` in X11. Clipboard images, rich text, and automatic watching are pending.
 
+For manual input control, run `xas allow <caller-id> input` on the receiver and `xas input [device-id]` from a Windows desktop session. The sender captures physical keyboard and mouse input and confines its pointer while the session is active. Press **Ctrl+Alt+Esc** to return control locally. The receiver accepts one input session at a time, releases held keys and buttons when it closes or disconnects, and expires idle sessions after four seconds. Windows receivers use SendInput in an interactive user session; UAC secure desktops and higher-integrity applications may reject injected input. Linux X11 receivers can opt into the XTest backend with `XAS_ENABLE_X11_INPUT=1` in the daemon environment; this path still needs testing on a Linux desktop. Wayland input injection needs portal consent and is pending. See [docs/input-protocol.md](docs/input-protocol.md).
+
 ## Current limits
 
-Windows interactive shells pass a networked ConPTY integration test. Linux interactive code is connected to the same protocol, but the native PTY helper could not be built or exercised on this Windows host; compile it on Linux with `make -C native/linux-pty` and put the resulting `xas-linux-pty` on `PATH` or set `XAS_LINUX_PTY_HELPER` to its path. `--sudo` and `--admin` remain unsupported. Discovery can update a stale endpoint after pinned TLS authentication; long-lived reconnect state is pending. Automatic daemon startup, installers, mouse/keyboard handoff, virtual display, filesystem mounts, removable media, automatic clipboard sync, and web UI are pending.
+Windows interactive shells pass a networked ConPTY integration test. Linux interactive code is connected to the same protocol, but the native PTY helper could not be built or exercised on this Windows host; compile it on Linux with `make -C native/linux-pty` and put the resulting `xas-linux-pty` on `PATH` or set `XAS_LINUX_PTY_HELPER` to its path. `--sudo` and `--admin` remain unsupported. Discovery can update a stale endpoint after pinned TLS authentication; long-lived reconnect state is pending. Automatic daemon startup, installers, monitor-boundary handoff, virtual display, filesystem mounts, removable media, automatic clipboard sync, and web UI are pending.
 
 See [docs/prerequisites.md](docs/prerequisites.md) for platform components and current upstream references.

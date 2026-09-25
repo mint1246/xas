@@ -10,6 +10,7 @@ using Xas.Cli.Interactive;
 using Xas.Cli.Terminal;
 using Xas.Cli.FileTransfer;
 using Xas.Cli.Clipboard;
+using Xas.Cli.Input;
 
 namespace Xas.Cli;
 
@@ -197,6 +198,20 @@ public sealed class RemoteXasClient : IXasClient, IDisposable
         catch (Exception ex) when (ex is System.Net.Sockets.SocketException or
             System.Security.Authentication.AuthenticationException or TimeoutException)
         { throw new XasClientException($"Could not transfer clipboard text: {ex.Message}"); }
+    }
+
+    public async Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken)
+    {
+        var configured = Resolve(deviceId) ?? throw new XasClientException("No matching configured device.");
+        try
+        {
+            await InputControlClient.RunAsync(configured, _identity, _trust, cancellationToken).ConfigureAwait(false);
+            return 0;
+        }
+        catch (RemoteProtocolException ex) { throw new XasClientException(ex.Message); }
+        catch (Exception ex) when (ex is IOException or System.Net.Sockets.SocketException or
+            System.Security.Authentication.AuthenticationException or TimeoutException)
+        { throw new XasClientException($"Remote input ended: {ex.Message}"); }
     }
 
     private async Task<byte[]> ReadPipedInputAsync(CancellationToken cancellationToken)

@@ -25,6 +25,7 @@ public interface IShellBackend
 public interface IInputInjectionBackend
 {
     bool IsAvailable { get; }
+    ValueTask InjectAsync(InputEvent inputEvent, CancellationToken cancellationToken);
     ValueTask ReleaseAllAsync(CancellationToken cancellationToken);
 }
 
