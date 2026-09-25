@@ -117,32 +117,31 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
     {
         cancellationToken.ThrowIfCancellationRequested();
         await _activationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-        Process? process;
-        StreamReader? output;
-        lock (_gate)
-        {
-            if (_helper is null) { _activationGate.Release(); return; }
-            process = _helper;
-            output = _output;
-            try { _input!.WriteLine("R"); _input.Flush(); }
-            catch { StopHelper(); _activationGate.Release(); throw; }
-        }
         try
         {
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(1));
-            try { _ = await output!.ReadLineAsync(timeout.Token).ConfigureAwait(false); } catch (OperationCanceledException) { }
+            StreamWriter? input;
+            StreamReader? output;
+            lock (_gate) { input = _input; output = _output; }
+            if (input is null || output is null) return;
+            try
+            {
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(1));
+                await input.WriteLineAsync("R".AsMemory(), timeout.Token).ConfigureAwait(false);
+                await input.FlushAsync(timeout.Token).ConfigureAwait(false);
+                if (await output.ReadLineAsync(timeout.Token).ConfigureAwait(false) != "OK")
+                    throw new IOException("Wayland input helper did not release held input.");
+                // Keep the consented portal session for the next monitor crossing.
+            }
+            catch { lock (_gate) StopHelper(); throw; }
         }
-        finally
-        {
-            lock (_gate) StopHelper();
-            _activationGate.Release();
-        }
+        finally { _activationGate.Release(); }
     }
 
     private void StartHelper()
     {
         if (_helper is { HasExited: false }) { _ready = false; throw new InvalidOperationException("Wayland EIS helper is running without a completed activation."); }
+        if (_helper is not null) StopHelper();
         var path = FindHelper() ?? throw new PlatformNotSupportedException("Wayland input requires xas-wayland-eis built with libei and liboeffis and available in PATH or XAS_WAYLAND_EIS_HELPER.");
         var p = Process.Start(new ProcessStartInfo(path) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true })
             ?? throw new IOException("Could not start xas-wayland-eis.");

@@ -142,7 +142,8 @@ static int handle(char *line) {
         for (unsigned i=0;i<256;i++) if (held_keys[i]) { uint32_t key=hid_key((uint16_t)i); if(key) ei_device_keyboard_key(keyboard_device,key,false); held_keys[i]=0; }
         for (unsigned i=1;i<=8;i++) if (held_buttons[i]) { int b=button_code(i); if(b) ei_device_button_button(pointer_device,(uint32_t)b,false); held_buttons[i]=0; }
         ei_device_frame(pointer_device,ei_now(ctx)); ei_device_frame(keyboard_device,ei_now(ctx));
-        return 1;
+        puts("OK"); fflush(stdout);
+        return 0;
     }
     if (op == 'N') { puts("OK"); fflush(stdout); return 0; }
     if (op == 'M' && sscanf(line, "M %d %d", &x,&y)==2) ei_device_pointer_motion(pointer_device,x,y);
