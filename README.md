@@ -13,6 +13,16 @@ dotnet run --project tests/Xas.Tests/Xas.Tests.csproj
 
 On Windows, the TLS tests need normal access to the current user's certificate key store. The source uses only the .NET runtime and has no NuGet package dependencies.
 
+## Publish and install
+
+On Windows with the .NET 10 SDK and network access to nuget.org, create self-contained x64 packages for Windows and Linux with:
+
+```powershell
+.\scripts\package.ps1
+```
+
+The archives are `artifacts/release/xas-win-x64.zip` and `artifacts/release/xas-linux-x64.zip`. Extract the matching archive, then run `install-windows.ps1` in PowerShell or `sh install-linux.sh` on Linux. These scripts install `xas` and `Xas.Daemon` under the user's program/bin directory and add it to that user's PATH; open a new terminal afterward. The current Linux archive also includes the native PTY and Wayland helpers, built on Ubuntu 24.04 x64 in an isolated WSL distro. The Wayland helper needs the `libei1` and `liboeffis1` runtime packages and a compatible desktop portal; X11 input needs `libX11` and `libXtst`. The packages do not install or sign the Windows display driver.
+
 ## Pair two devices
 
 Run `dotnet run --project src/Xas.Cli -- <arguments>` during development, or publish the CLI as `xas`. On **both** machines, run `xas identity` and exchange the displayed device IDs and full fingerprints over a trusted channel.
@@ -49,6 +59,6 @@ For automatic handoff, install and extend the XAS virtual display on Windows, se
 
 ## Current limits
 
-Windows interactive shells pass a networked ConPTY integration test. Linux interactive code is connected to the same protocol, but the native PTY helper could not be built or exercised on this Windows host; compile it on Linux with `make -C native/linux-pty` and put the resulting `xas-linux-pty` on `PATH` or set `XAS_LINUX_PTY_HELPER` to its path. `--sudo` and `--admin` remain unsupported. Discovery can update a stale endpoint after pinned TLS authentication; reconnect for shell and input sessions is pending. The virtual display currently has three fixed modes, so matching Linux resolution and Windows display layout requires manual configuration. Automatic daemon startup, installers, driver signing, physical monitor-boundary validation, filesystem mounts, removable media, clipboard images and rich text, and web UI remain pending.
+Windows interactive shells pass a networked ConPTY integration test. The Linux PTY helper builds on Ubuntu 24.04 and passes a local framed-protocol smoke test; a networked Windows/Linux shell session still needs physical validation. The Wayland helper builds but has not been tested with a desktop portal. `--sudo` and `--admin` remain unsupported. Discovery can update a stale endpoint after pinned TLS authentication; reconnect for shell and input sessions is pending. The virtual display currently has three fixed modes, so matching Linux resolution and Windows display layout requires manual configuration. Automatic daemon startup, driver signing, physical monitor-boundary validation, filesystem mounts, removable media, clipboard images and rich text, and web UI remain pending. The PATH installer scripts do not configure daemon startup.
 
 See [docs/prerequisites.md](docs/prerequisites.md) for platform components and current upstream references.

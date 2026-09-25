@@ -24,11 +24,13 @@
 
 ## In progress
 
-- [ ] Compile and run the Linux PTY helper and full interactive path on Linux.
+- [x] Compile the Linux PTY helper on Ubuntu 24.04 and pass a local framed-protocol smoke test.
+- [ ] Validate the full interactive shell path between Windows and Linux.
 - [ ] Validate file copy and clipboard commands between a real Windows and Linux pair.
 - [ ] Validate clipboard sync on a physical Windows/Linux pair, including simultaneous edits and reconnect after sleep.
 - [ ] Generate/sign an installable catalog, install the IddCx package, extend it as a second Windows monitor, and validate native monitor identification.
-- [ ] Build the Wayland portal/libei helper on Linux and validate compositor consent, absolute input, revocation, and release behavior.
+- [x] Build the Wayland portal/libei helper on Ubuntu 24.04.
+- [ ] Validate compositor consent, absolute input, revocation, and release behavior on a real Wayland desktop.
 - [ ] Validate physical Windows cursor/keyboard handoff with X11 and Wayland receivers, including disconnect and emergency return.
 - [ ] Configure virtual display modes dynamically from Linux metadata; currently modes are fixed.
 - [ ] Reconnect long-lived sessions after sleep/network changes.
