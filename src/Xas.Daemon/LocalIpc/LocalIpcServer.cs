@@ -12,18 +12,21 @@ using Xas.Core.Security;
 using Xas.Core.Services;
 using Xas.Daemon.Pairing;
 using Xas.Daemon.Sessions;
+using Xas.Daemon.Clipboard;
 
 namespace Xas.Daemon.LocalIpc;
 
 /// <summary>Per-user command endpoint. It exposes trusted daemon state without exposing network credentials.</summary>
 public sealed class LocalIpcServer(PeerSessionManager sessions, PairingService pairing,
-    LocalConfiguration configuration, PeerTrustStore trust, PeerPermissionStore permissions)
+    LocalConfiguration configuration, PeerTrustStore trust, PeerPermissionStore permissions,
+    ClipboardService clipboard)
 {
     private readonly PeerSessionManager _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
     private readonly PairingService _pairing = pairing ?? throw new ArgumentNullException(nameof(pairing));
     private readonly LocalConfiguration _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
     private readonly PeerTrustStore _trust = trust ?? throw new ArgumentNullException(nameof(trust));
     private readonly PeerPermissionStore _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
+    private readonly ClipboardService _clipboard = clipboard ?? throw new ArgumentNullException(nameof(clipboard));
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -205,6 +208,52 @@ public sealed class LocalIpcServer(PeerSessionManager sessions, PairingService p
                     return Response(request, [ping.Kind == MessageKind.Response ? (byte)1 : (byte)0]);
                 }
                 catch (IOException) { return Response(request, [0]); }
+            }
+            case LocalIpcProtocol.ClipboardPush:
+            {
+                var target = Resolve(ReadTarget(request.Payload).DeviceId)
+                    ?? throw new InvalidOperationException("No matching paired device.");
+                var session = _sessions.GetSession(target.DeviceId)
+                    ?? throw new IOException($"Device {target.DeviceId} is offline.");
+                var local = await _clipboard.HandleAsync(target.DeviceId,
+                    new ProtocolMessage(MessageKind.Request, 1, 0, "clipboard.get", []), token).ConfigureAwait(false);
+                var remote = await session.RequestAsync(PeerLane.Control, "clipboard.set", local.Payload, token).ConfigureAwait(false);
+                if (remote.Payload.Length != 0) throw new InvalidDataException("Invalid remote clipboard.set response.");
+                return Response(request, []);
+            }
+            case LocalIpcProtocol.ClipboardPull:
+            {
+                var target = Resolve(ReadTarget(request.Payload).DeviceId)
+                    ?? throw new InvalidOperationException("No matching paired device.");
+                var session = _sessions.GetSession(target.DeviceId)
+                    ?? throw new IOException($"Device {target.DeviceId} is offline.");
+                var remote = await session.RequestAsync(PeerLane.Control, "clipboard.get", [], token).ConfigureAwait(false);
+                await _clipboard.ApplyChangedEventAsync(target.DeviceId,
+                    new ProtocolMessage(MessageKind.Event, 0, 0, "clipboard.changed", remote.Payload), token).ConfigureAwait(false);
+                return Response(request, []);
+            }
+            case LocalIpcProtocol.ClipboardStatus:
+            {
+                var target = Resolve(ReadTarget(request.Payload).DeviceId)
+                    ?? throw new InvalidOperationException("No matching paired device.");
+                var session = _sessions.GetSession(target.DeviceId);
+                if (session is null || !session.Online)
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(
+                        new LocalClipboardStatus(false, $"{target.Name} is offline."), LocalIpcProtocol.Json));
+                if (!_permissions.IsAllowed(target.DeviceId, Capability.Clipboard) || !_clipboard.IsAvailable)
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(
+                        new LocalClipboardStatus(false, "Local clipboard access is unavailable or not granted for this peer."), LocalIpcProtocol.Json));
+                try
+                {
+                    _ = await session.RequestAsync(PeerLane.Control, "clipboard.get", [], token).ConfigureAwait(false);
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(
+                        new LocalClipboardStatus(true, $"Background clipboard sync with {target.Name} is active."), LocalIpcProtocol.Json));
+                }
+                catch (Exception ex) when (ex is IOException or RemoteProtocolException or PlatformNotSupportedException)
+                {
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(
+                        new LocalClipboardStatus(false, $"Clipboard sync is unavailable: {ex.Message}"), LocalIpcProtocol.Json));
+                }
             }
             case LocalIpcProtocol.PairBegin:
             {

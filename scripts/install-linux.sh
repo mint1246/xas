@@ -16,6 +16,32 @@ for name in xas-linux-pty xas-wayland-eis xas-uinput; do
     if [ -f "$PACKAGE_DIR/$name" ]; then install -m 0755 "$PACKAGE_DIR/$name" "$BIN_DIR/$name"; fi
 done
 
+# Run xas inside the user's desktop session. This is deliberately a user service rather than a
+# system/root service so Wayland, portals, clipboard, PTY, and the normal user's home remain usable.
+if command -v systemctl >/dev/null 2>&1; then
+    UNIT_DIR="$HOME/.config/systemd/user"
+    mkdir -p "$UNIT_DIR"
+    cat > "$UNIT_DIR/xas-daemon.service" <<EOF
+[Unit]
+Description=xas user-session daemon
+After=graphical-session.target network-online.target
+
+[Service]
+Type=simple
+ExecStart=$BIN_DIR/Xas.Daemon serve
+Restart=on-failure
+RestartSec=2
+Environment=PATH=$BIN_DIR:/usr/local/bin:/usr/bin:/bin
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now xas-daemon.service
+else
+    echo 'systemctl not found; xas daemon autostart was not installed.' >&2
+fi
+
 case ":${PATH}:" in
     *":$BIN_DIR:"*) ;;
     *)

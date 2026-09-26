@@ -8,6 +8,7 @@ internal static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        LinuxSessionEnvironment.Ensure();
         if (args.Length is 0 || args[0] is "--help" or "help")
         {
             Console.WriteLine("Usage: Xas.Daemon serve [--port <1-65535>]");

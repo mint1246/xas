@@ -28,9 +28,10 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
     $projects = if ($rid -eq 'win-x64') { @('Xas.Cli', 'Xas.Daemon', 'Xas.PrivilegedService') } else { @('Xas.Cli', 'Xas.Daemon') }
     foreach ($project in $projects) {
         $out = Join-Path $stage $project
-        dotnet publish (Join-Path $root "src\$project\$project.csproj") -c $Configuration -r $rid --self-contained true `
-            -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
-            -p:RestoreSources=$nuget -o $out
+        $publishArgs = @('publish', (Join-Path $root "src\$project\$project.csproj"), '-c', $Configuration,
+            '-r', $rid, '--self-contained', 'true', '-p:PublishSingleFile=true',
+            '-p:IncludeNativeLibrariesForSelfExtract=true', "-p:RestoreSources=$nuget", '-o', $out)
+        & dotnet @publishArgs
         if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for $project ($rid)" }
     }
     $package = Join-Path $releaseRoot $rid
@@ -43,14 +44,14 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
     if ($rid -eq 'win-x64') {
         Copy-Item (Join-Path $stage 'Xas.PrivilegedService\Xas.PrivilegedService.exe') $package
         Copy-Item (Join-Path $PSScriptRoot 'install-windows.ps1') $package
-        @('xas Windows x64 package', '', 'Run install-windows.ps1 from an elevated PowerShell window. It installs the client, daemon, and XasAdminBroker service under %ProgramFiles%\xas, then adds the folder to your user PATH.', 'Open a new terminal after installation.', '', 'Installing the broker authorizes the daemon to run approved elevated commands as the active administrator user. Code already running as that user can also request the same elevation path.') | Set-Content -LiteralPath $readme
+        @('xas Windows x64 package', '', 'Run install-windows.ps1 from an elevated PowerShell window. It installs the client and background daemon under %ProgramFiles%\xas, registers the daemon to start silently at user logon, and installs the automatic XasAdminBroker Windows service.', 'Open a new terminal after installation if PATH was changed.', '', 'Only the installed Xas.Daemon process may connect to the privileged broker. Remote administrator execution still requires the peer PrivilegedShell grant.') | Set-Content -LiteralPath $readme
     } else {
         Copy-Item (Join-Path $PSScriptRoot 'install-linux.sh') $package
         foreach ($helper in @('xas-linux-pty', 'xas-wayland-eis', 'xas-uinput')) {
             $candidate = Join-Path $root "artifacts\native-linux\$helper"
             if (Test-Path -LiteralPath $candidate -PathType Leaf) { Copy-Item -LiteralPath $candidate -Destination $package }
         }
-        @('xas Linux x64 package', '', 'Run: chmod +x install-linux.sh && ./install-linux.sh', 'Installs both programs to ~/.local/bin and adds it to ~/.profile if missing from PATH.', 'Linux native helpers are included only if separately built and placed in artifacts/native-linux before packaging.') | Set-Content -LiteralPath $readme
+        @('xas Linux x64 package', '', 'Run: chmod +x install-linux.sh && ./install-linux.sh', 'Installs both programs to ~/.local/bin, registers/enables the per-user xas daemon with systemd when available, and adds the folder to your shell PATH if needed.', 'Linux native helpers are included only if separately built and placed in artifacts/native-linux before packaging.') | Set-Content -LiteralPath $readme
     }
     $archive = Join-Path $releaseRoot "xas-$rid.zip"
     if (Test-Path $archive) { Remove-Item -LiteralPath $archive -Force }

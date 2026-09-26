@@ -243,10 +243,23 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
             connection.Peer, progress, cancellationToken).ConfigureAwait(false);
         return 0;
     }
-    public Task<int> SyncClipboardAsync(bool push, string? deviceId, CancellationToken cancellationToken) =>
-        throw new NotSupportedException("Clipboard forwarding through the local daemon is not available yet.");
-    public Task<int> WatchClipboardAsync(string? deviceId, CancellationToken cancellationToken) =>
-        throw new NotSupportedException("Clipboard forwarding through the local daemon is not available yet.");
+    public async Task<int> SyncClipboardAsync(bool push, string? deviceId, CancellationToken cancellationToken)
+    {
+        var method = push ? LocalIpcProtocol.ClipboardPush : LocalIpcProtocol.ClipboardPull;
+        _ = await RequestAsync(method,
+            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        return 0;
+    }
+    public async Task<int> WatchClipboardAsync(string? deviceId, CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.ClipboardStatus,
+            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        var status = JsonSerializer.Deserialize<LocalClipboardStatus>(reply.Payload, LocalIpcProtocol.Json)
+            ?? throw new InvalidDataException("The daemon returned an invalid clipboard status.");
+        using var writer = new StreamWriter(output, Console.OutputEncoding, 1024, leaveOpen: true) { AutoFlush = true };
+        await writer.WriteLineAsync(status.Message).ConfigureAwait(false);
+        return status.Active ? 0 : 1;
+    }
     public Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken) =>
         throw new NotSupportedException("Manual input forwarding through the local daemon is not available yet.");
 

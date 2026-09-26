@@ -37,11 +37,12 @@ public static class IntegrationTests
             permissions.SetAllowed(clientIdentity.DeviceId, Capability.Clipboard, true);
             var inputBackend = new RecordingInputBackend();
             var remoteClipboard = new RecordingTextClipboard("remote initial");
+            var daemonConfiguration = new LocalConfiguration(Path.Combine(root, "daemon-config"));
 
             var port = ReservePort();
             using var stop = new CancellationTokenSource();
             var daemon = new DaemonHost(serverIdentity, serverTrust, permissions, port,
-                inputBackend, remoteClipboard);
+                inputBackend, remoteClipboard, configuration: daemonConfiguration, webPort: 0);
             var serverTask = daemon.RunAsync(stop.Token);
             try
             {
@@ -59,6 +60,18 @@ public static class IntegrationTests
                 Assert(device.Capabilities.Any(c => c.Capability == Capability.Shell && c.Version >= 2), "Streaming shell capability was not advertised.");
                 Assert(device.Capabilities.Any(c => c.Capability == Capability.Input && c.Version == 1),
                     "Available input backend was not advertised.");
+
+                daemonConfiguration.UpsertPeer(new ConfiguredPeer(clientIdentity.DeviceId, "client", "127.0.0.1", 9));
+                using (var localDaemon = new LocalDaemonClient(Stream.Null, Stream.Null, Stream.Null))
+                {
+                    var localDevices = await localDaemon.ListDevicesAsync(CancellationToken.None);
+                    Assert(localDevices.Any(d => d.DeviceId == clientIdentity.DeviceId),
+                        "The local daemon IPC device list did not expose configured daemon state.");
+                    await localDaemon.SetDefaultDeviceAsync(clientIdentity.DeviceId, CancellationToken.None);
+                    Assert(daemonConfiguration.DefaultDeviceId == clientIdentity.DeviceId,
+                        "The local daemon IPC default-device update did not mutate daemon configuration.");
+                }
+
                 try
                 {
                     await peer.RequestAsync("input.open", []);
@@ -213,11 +226,24 @@ public static class IntegrationTests
 
     private static int ReservePort()
     {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
+        for (var attempt = 0; attempt < 100; attempt++)
+        {
+            using var first = new TcpListener(IPAddress.Loopback, 0);
+            first.Start();
+            var port = ((IPEndPoint)first.LocalEndpoint).Port;
+            first.Stop();
+            if (port >= 65535) continue;
+            try
+            {
+                using var control = new TcpListener(IPAddress.Loopback, port);
+                using var pairing = new TcpListener(IPAddress.Loopback, port + 1);
+                control.Start(); pairing.Start();
+                control.Stop(); pairing.Stop();
+                return port;
+            }
+            catch (SocketException) { }
+        }
+        throw new IOException("Could not reserve consecutive loopback ports for the daemon integration test.");
     }
 
     private static void Assert(bool condition, string message)

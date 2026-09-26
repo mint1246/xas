@@ -30,6 +30,7 @@ public sealed class LocalConfiguration
     private readonly string _path;
     private readonly object _gate = new();
     private Settings _settings;
+    public event Action? Changed;
 
     public LocalConfiguration(string? root = null)
     {
@@ -66,16 +67,19 @@ public sealed class LocalConfiguration
             _settings = _settings with { Peers = peers };
             Save();
         }
+        Changed?.Invoke();
     }
 
     public void SetDefault(string idPrefix)
     {
         var peer = Resolve(idPrefix) ?? throw new InvalidOperationException("No matching paired device.");
         lock (_gate) { _settings = _settings with { DefaultDeviceId = peer.DeviceId }; Save(); }
+        Changed?.Invoke();
     }
 
     public bool RemovePeer(string deviceId)
     {
+        var removed = false;
         lock (_gate)
         {
             var peers = _settings.Peers.Where(p => p.DeviceId != deviceId).ToArray();
@@ -86,8 +90,10 @@ public sealed class LocalConfiguration
                 DefaultDeviceId = _settings.DefaultDeviceId == deviceId ? null : _settings.DefaultDeviceId
             };
             Save();
-            return true;
+            removed = true;
         }
+        if (removed) Changed?.Invoke();
+        return removed;
     }
 
     private void Save()

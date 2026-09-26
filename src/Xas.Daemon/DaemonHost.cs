@@ -23,23 +23,28 @@ public sealed class DaemonHost
     private readonly PeerTrustStore _trust;
     private readonly PeerPermissionStore _permissions;
     private readonly int _port;
+    private readonly int _webPort;
+    private readonly LocalConfiguration _configuration;
     private readonly InputControlService _input;
     private readonly RequestDispatcher _dispatcher;
     public PeerSessionManager PeerSessions { get; }
 
     public DaemonHost(DeviceIdentity identity, PeerTrustStore trust, PeerPermissionStore permissions,
         int port = XasProtocol.DefaultPort, IInputInjectionBackend? inputBackend = null,
-        ITextClipboardBackend? clipboardBackend = null, IInputPipelineMetrics? inputMetrics = null)
+        ITextClipboardBackend? clipboardBackend = null, IInputPipelineMetrics? inputMetrics = null,
+        LocalConfiguration? configuration = null, int webPort = 47832)
     {
         _identity = identity ?? throw new ArgumentNullException(nameof(identity));
         _trust = trust ?? throw new ArgumentNullException(nameof(trust));
         _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
         _port = port;
+        _webPort = webPort;
+        _configuration = configuration ?? new LocalConfiguration();
         _input = new InputControlService(permissions,
             inputBackend ?? (OperatingSystem.IsWindows() ? new WindowsSendInputBackend() :
                 OperatingSystem.IsLinux() ? CreateLinuxInputBackend() : new UnavailableInputBackend()), inputMetrics);
         _dispatcher = new RequestDispatcher(identity, permissions, () => _input.ProtocolVersion, clipboardBackend);
-        PeerSessions = new PeerSessionManager(identity, trust, permissions, _input, _dispatcher, port);
+        PeerSessions = new PeerSessionManager(identity, trust, permissions, _input, _dispatcher, _configuration, port);
     }
 
     /// <summary>
@@ -65,13 +70,12 @@ public sealed class DaemonHost
         var listener = new TcpListener(IPAddress.Any, _port);
         await using var sessions = PeerSessions;
         await using var pairing = new PairingService(_identity, _trust, checked(_port + 1), Environment.MachineName);
-        var configuration = new LocalConfiguration();
-        await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, configuration, pairing);
-        var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration, _trust, _permissions);
+        var configuration = _configuration;
+        await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, configuration, pairing, _webPort);
+        var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration, _trust, _permissions, _dispatcher.Clipboard);
         using var daemonStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        using var handoffStop = CancellationTokenSource.CreateLinkedTokenSource(daemonStop.Token);
         listener.Start();
-        Task handoff = Task.CompletedTask;
+        Task kvmCoordinator = Task.CompletedTask;
         Task localIpcTask = Task.CompletedTask;
         try
         {
@@ -80,9 +84,8 @@ public sealed class DaemonHost
             catch (SocketException ex) { Console.Error.WriteLine($"LAN discovery unavailable: {ex.Message}"); }
             await web.StartAsync(cancellationToken);
             localIpcTask = localIpc.RunAsync(daemonStop.Token);
-            if (OperatingSystem.IsWindows() && configuration.Resolve(null) is { } configured &&
-                PeerSessions.GetSession(configured.DeviceId) is { } hotPeer)
-                handoff = WindowsMonitorHandoff.RunAsync(hotPeer, handoffStop.Token,
+            if (OperatingSystem.IsWindows())
+                kvmCoordinator = WindowsKvmCoordinator.RunAsync(configuration, PeerSessions, daemonStop.Token,
                     message => Console.Error.WriteLine(message));
             Console.WriteLine($"xas daemon listening on TCP {_port}; device {_identity.DeviceId}");
             var clients = new HashSet<Task>();
@@ -101,9 +104,8 @@ public sealed class DaemonHost
         {
             listener.Stop();
             daemonStop.Cancel();
-            handoffStop.Cancel();
-            try { await handoff.ConfigureAwait(false); }
-            catch (OperationCanceledException) when (handoffStop.IsCancellationRequested) { }
+            try { await kvmCoordinator.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (daemonStop.IsCancellationRequested) { }
             try { await localIpcTask.ConfigureAwait(false); }
             catch (OperationCanceledException) when (daemonStop.IsCancellationRequested) { }
             await _input.DisposeAsync();

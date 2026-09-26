@@ -1,4 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <OutputType Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('win-'))">WinExe</OutputType>
+  </PropertyGroup>
   <ItemGroup><ProjectReference Include="../Xas.Core/Xas.Core.csproj" /><ProjectReference Include="../Xas.Input/Xas.Input.csproj" /></ItemGroup>
 </Project>

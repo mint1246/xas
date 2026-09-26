@@ -22,6 +22,9 @@ public static class LocalIpcProtocol
     public const string PairList = "local.pair.list";
     public const string PairApprove = "local.pair.approve";
     public const string PairPendingEvent = "local.pair.pending";
+    public const string ClipboardPush = "local.clipboard.push";
+    public const string ClipboardPull = "local.clipboard.pull";
+    public const string ClipboardStatus = "local.clipboard.status";
     public const string Bind = "local.bind";
     public const string ShellOpen = "local.shell.open";
     public const string ShellStdin = ShellExecWire.Stdin;
@@ -58,6 +61,7 @@ public enum PairPermissionPreset { None = 0, Kvm = 1, Personal = 2 }
 public sealed record LocalPairDecision(string PairingId, bool Approve, PairPermissionPreset Preset = PairPermissionPreset.Personal);
 public sealed record LocalPairPending(string PairingId, string DeviceId, string DisplayName,
     string Fingerprint, string Code, DateTimeOffset CreatedAtUtc, bool Incoming, string Address, int ControlPort);
+public sealed record LocalClipboardStatus(bool Active, string Message);
 
 /// <summary>Per-user endpoint. The network peer certificate is never exposed to local clients.</summary>
 public static class LocalIpcEndpoint

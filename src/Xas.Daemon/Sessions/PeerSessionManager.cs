@@ -25,6 +25,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
     private readonly PeerPermissionStore _permissions;
     private readonly InputControlService _input;
     private readonly RequestDispatcher _dispatcher;
+    private readonly LocalConfiguration _configuration;
     private readonly int _port;
     private readonly object _configGate = new();
     private IReadOnlyList<ConfiguredPeer> _configuredPeers;
@@ -38,14 +39,16 @@ public sealed class PeerSessionManager : IAsyncDisposable
     private int _disposed;
 
     public PeerSessionManager(DeviceIdentity identity, PeerTrustStore trust, PeerPermissionStore permissions,
-        InputControlService input, RequestDispatcher dispatcher, int port = XasProtocol.DefaultPort)
+        InputControlService input, RequestDispatcher dispatcher, LocalConfiguration configuration,
+        int port = XasProtocol.DefaultPort)
     {
         _identity = identity ?? throw new ArgumentNullException(nameof(identity));
         _trust = trust ?? throw new ArgumentNullException(nameof(trust));
         _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
         _input = input ?? throw new ArgumentNullException(nameof(input));
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
-        _configuredPeers = new LocalConfiguration().Peers;
+        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        _configuredPeers = _configuration.Peers;
         if (port is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
         _port = port;
     }
@@ -92,7 +95,10 @@ public sealed class PeerSessionManager : IAsyncDisposable
         }
         _maintenance = MaintainConnectionsAsync(_shutdown.Token);
         if (OperatingSystem.IsLinux()) _displayPublisher = PublishDisplayChangesAsync(_shutdown.Token);
+        _configuration.Changed += OnConfigurationChanged;
     }
+
+    private void OnConfigurationChanged() => UpdateConfiguredPeers(_configuration.Peers);
 
     /// <summary>Accept an inbound TCP transport. TLS identity is checked before any peer state is created.</summary>
     public async Task HandleClientAsync(TcpClient socket, CancellationToken cancellationToken = default)
@@ -377,6 +383,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        _configuration.Changed -= OnConfigurationChanged;
         _shutdown.Cancel();
         if (_maintenance is not null) { try { await _maintenance.ConfigureAwait(false); } catch (OperationCanceledException) { } }
         if (_displayPublisher is not null) { try { await _displayPublisher.ConfigureAwait(false); } catch (OperationCanceledException) { } }
