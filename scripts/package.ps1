@@ -4,6 +4,11 @@ $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $publishRoot = Join-Path $root 'artifacts\publish'
 $releaseRoot = Join-Path $root 'artifacts\release'
 $nuget = 'https://api.nuget.org/v3/index.json'
+$winFspVersion = '2.1.25156'
+$winFspFile = "winfsp-$winFspVersion.msi"
+$winFspUrl = "https://github.com/winfsp/winfsp/releases/download/v2.1/$winFspFile"
+$winFspSha256 = '073A70E00F77423E34BED98B86E600DEF93393BA5822204FAC57A29324DB9F7A'
+$dependencyRoot = Join-Path $root 'artifacts\dependencies'
 
 function Remove-WorkspaceTree([string]$path) {
     $full = [IO.Path]::GetFullPath($path)
@@ -19,6 +24,27 @@ function Remove-WorkspaceTree([string]$path) {
         }
         Remove-Item -LiteralPath $full -Recurse -Force
     }
+}
+
+function Get-VerifiedDependency([string]$name, [string]$url, [string]$sha256) {
+    New-Item -ItemType Directory -Force -Path $dependencyRoot | Out-Null
+    $path = Join-Path $dependencyRoot $name
+    $valid = $false
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        $valid = [string]::Equals($actual, $sha256, [StringComparison]::OrdinalIgnoreCase)
+        if (-not $valid) { Remove-Item -LiteralPath $path -Force }
+    }
+    if (-not $valid) {
+        Write-Host "Downloading pinned dependency $name"
+        Invoke-WebRequest -Uri $url -OutFile $path
+        $actual = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+        if (-not [string]::Equals($actual, $sha256, [StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            throw "SHA-256 verification failed for $name. Expected $sha256, got $actual."
+        }
+    }
+    return $path
 }
 
 foreach ($rid in @('win-x64', 'linux-x64')) {
@@ -42,9 +68,11 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
     Copy-Item (Join-Path $stage "Xas.Daemon\Xas.Daemon$exeExt") $package
     $readme = Join-Path $package 'INSTALL.txt'
     if ($rid -eq 'win-x64') {
+        $winFspMsi = Get-VerifiedDependency $winFspFile $winFspUrl $winFspSha256
         Copy-Item (Join-Path $stage 'Xas.PrivilegedService\Xas.PrivilegedService.exe') $package
         Copy-Item (Join-Path $PSScriptRoot 'install-windows.ps1') $package
-        @('xas Windows x64 package', '', 'Run install-windows.ps1 from an elevated PowerShell window. It installs the client and background daemon under %ProgramFiles%\xas, registers the daemon to start silently at user logon, and installs the automatic XasAdminBroker Windows service.', 'Open a new terminal after installation if PATH was changed.', '', 'Only the installed Xas.Daemon process may connect to the privileged broker. Remote administrator execution still requires the peer PrivilegedShell grant.') | Set-Content -LiteralPath $readme
+        Copy-Item -LiteralPath $winFspMsi -Destination $package
+        @('xas Windows x64 package', '', 'Run install-windows.ps1 from an elevated PowerShell window. It installs the client and background daemon under %ProgramFiles%\xas, installs the pinned WinFsp runtime when needed, registers the daemon to start silently at user logon, and installs the automatic XasAdminBroker Windows service.', 'Open a new terminal after installation if PATH was changed.', '', 'Only the installed Xas.Daemon process may connect to the privileged broker. Remote administrator execution still requires the peer PrivilegedShell grant.') | Set-Content -LiteralPath $readme
     } else {
         Copy-Item (Join-Path $PSScriptRoot 'install-linux.sh') $package
         foreach ($helper in @('xas-linux-pty', 'xas-wayland-eis', 'xas-uinput')) {

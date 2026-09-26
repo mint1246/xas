@@ -6,6 +6,6 @@
   <ItemGroup><ProjectReference Include="../Xas.Core/Xas.Core.csproj" /><ProjectReference Include="../Xas.Input/Xas.Input.csproj" /></ItemGroup>
   <ItemGroup><InternalsVisibleTo Include="Xas.Tests" /></ItemGroup>
   <ItemGroup>
-    <PackageReference Include="winfsp.net" Version="2.2.26215" />
+    <PackageReference Include="winfsp.net" Version="2.1.25156" />
   </ItemGroup>
 </Project>

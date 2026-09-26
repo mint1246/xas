@@ -9,6 +9,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $source = (Resolve-Path -LiteralPath $PackageDirectory).Path
 $target = Join-Path $env:ProgramFiles 'xas'
+$winFspVersion = [version]'2.1.25156'
+$winFspFile = 'winfsp-2.1.25156.msi'
+$winFspSha256 = '073A70E00F77423E34BED98B86E600DEF93393BA5822204FAC57A29324DB9F7A'
 $daemonTaskName = 'Xas User Daemon'
 $existingDaemonTask = Get-ScheduledTask -TaskName $daemonTaskName -ErrorAction SilentlyContinue
 if ($existingDaemonTask) {
@@ -19,10 +22,44 @@ if ($existing -and $existing.Status -ne 'Stopped') {
     Stop-Service -Name 'XasAdminBroker' -Force
     $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
 }
-foreach ($name in @('xas.exe', 'Xas.Daemon.exe', 'Xas.PrivilegedService.exe')) {
+foreach ($name in @('xas.exe', 'Xas.Daemon.exe', 'Xas.PrivilegedService.exe', $winFspFile)) {
     $file = Join-Path $source $name
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Package is missing ${name}: $file" }
 }
+
+function Get-InstalledWinFspVersion {
+    $versions = @()
+    foreach ($path in @(
+        'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )) {
+        foreach ($item in @(Get-ItemProperty $path -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like 'WinFsp*' })) {
+            try { if ($item.DisplayVersion) { $versions += [version]$item.DisplayVersion } } catch { }
+        }
+    }
+    if ($versions.Count -eq 0) { return $null }
+    return ($versions | Sort-Object -Descending | Select-Object -First 1)
+}
+
+$installedWinFsp = Get-InstalledWinFspVersion
+if ($null -eq $installedWinFsp -or $installedWinFsp -lt $winFspVersion) {
+    $winFspMsi = Join-Path $source $winFspFile
+    $actualHash = (Get-FileHash -LiteralPath $winFspMsi -Algorithm SHA256).Hash
+    if (-not [string]::Equals($actualHash, $winFspSha256, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "Bundled WinFsp installer failed SHA-256 verification. Expected $winFspSha256, got $actualHash."
+    }
+    Write-Host "Installing WinFsp $winFspVersion for remote-drive support..."
+    $msi = Start-Process -FilePath msiexec.exe -ArgumentList @('/i', "`"$winFspMsi`"", '/qn', '/norestart') -Wait -PassThru
+    if ($msi.ExitCode -notin @(0, 3010)) { throw "WinFsp installation failed with MSI exit code $($msi.ExitCode)." }
+    if ($msi.ExitCode -eq 3010) { Write-Warning 'WinFsp requested a reboot. XAS was installed, but remote drives may require a reboot before they can mount.' }
+    $installedWinFsp = Get-InstalledWinFspVersion
+    if ($null -eq $installedWinFsp -or $installedWinFsp -lt $winFspVersion) {
+        throw "WinFsp installation completed but version $winFspVersion or newer was not detected."
+    }
+} else {
+    Write-Host "WinFsp $installedWinFsp is already installed."
+}
+
 New-Item -ItemType Directory -Force -Path $target | Out-Null
 Copy-Item -LiteralPath (Join-Path $source 'xas.exe') -Destination $target -Force
 Copy-Item -LiteralPath (Join-Path $source 'Xas.Daemon.exe') -Destination $target -Force
