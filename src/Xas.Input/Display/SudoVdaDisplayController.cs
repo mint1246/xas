@@ -44,6 +44,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
     private readonly SemaphoreSlim _gate = new(1, 1);
     private SafeFileHandle? _device;
     private Guid? _ownedMonitorId;
+    private string? _ownedMonitorHardwareId;
     private CancellationTokenSource? _keepAlive;
     private Task? _keepAliveLoop;
 
@@ -65,13 +66,15 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
         if (!IsAvailable)
             throw new PlatformNotSupportedException(
                 "No virtual display driver is installed. Install SudoVDA, then restart the daemon.");
-        if (display.WidthPixels is < 1 or > SudoVdaDriver.MaxWidthPixels ||
-            display.HeightPixels is < 1 or > SudoVdaDriver.MaxHeightPixels)
+        var modeWidth = ResolveVirtualWidth(display);
+        var modeHeight = ResolveVirtualHeight(display);
+        if (modeWidth is < 1 or > SudoVdaDriver.MaxWidthPixels ||
+            modeHeight is < 1 or > SudoVdaDriver.MaxHeightPixels)
             throw new ArgumentOutOfRangeException(nameof(display),
                 "The remote display mode is outside the range SudoVDA can present.");
 
         var refreshHertz = ResolveRefreshHertz(display.RefreshMilliHertz);
-        var monitorId = MonitorIdentity.For(display.Id, display.WidthPixels, display.HeightPixels, refreshHertz);
+        var monitorId = MonitorIdentity.For(display.Id, modeWidth, modeHeight, refreshHertz);
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -79,13 +82,15 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
             // driver tears a monitor down asynchronously, so remember which panels we are about to drop and
             // wait for those specific ones to leave the desktop before asking for another. A monitor owned
             // by another application is left alone rather than waited on.
-            var departing = VirtualMonitorIds();
+            var departing = _ownedMonitorHardwareId is { } ownedHardwareId
+                ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ownedHardwareId }
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             await DetachCoreAsync().ConfigureAwait(false);
             await WaitForRemovalAsync(departing, cancellationToken).ConfigureAwait(false);
             var device = _device ??= SudoVdaDriver.Open() ?? throw new PlatformNotSupportedException(
                 "The SudoVDA control device disappeared; restart the Windows session.");
             ResolveAdapterDeviceName(cancellationToken);
-            ReclaimAbandoned(device);
+            await ReclaimAbandonedAsync(device, cancellationToken).ConfigureAwait(false);
 
             // Each monitor on the adapter gets its own GDI device name, so the new one has to be identified by
             // what appeared rather than by the adapter name. Without this, a re-attach onto an adapter that
@@ -100,29 +105,32 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
                 ?? await CreateAsync(device, display, refreshHertz, Guid.NewGuid(), cancellationToken)
                     .ConfigureAwait(false)
                 ?? throw new TimeoutException(
-                    $"Windows did not publish a {display.WidthPixels}x{display.HeightPixels} virtual monitor.");
+                    $"Windows did not publish a {modeWidth}x{modeHeight} virtual monitor.");
             monitorId = created.MonitorId;
+            _ownedMonitorHardwareId = created.MonitorHardwareId;
             Remember(created);
             StartKeepAlive();
             log?.Invoke($"Virtual display {created.DeviceName} active at " +
-                $"{display.WidthPixels}x{display.HeightPixels}@{refreshHertz}.");
+                $"{modeWidth}x{modeHeight}@{refreshHertz}.");
             return created with { RefreshHertz = refreshHertz };
         }
         finally { _gate.Release(); }
     }
 
     /// <summary>Removes monitors a previous run of this daemon created but never got to detach.</summary>
-    private void ReclaimAbandoned(SafeFileHandle device)
+    private async Task ReclaimAbandonedAsync(SafeFileHandle device, CancellationToken cancellationToken)
     {
         var records = ReadRecords();
         if (records.Count == 0) return;
         var kept = new List<AttachmentRecord>();
+        var removed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var record in records)
         {
             if (!WindowsMonitorTopology.Exists(record.HardwareId)) continue; // Already gone; drop the record.
             try
             {
                 SudoVdaDriver.Remove(device, record.MonitorId);
+                removed.Add(record.HardwareId);
                 log?.Invoke($"Removed a virtual display abandoned by an earlier run ({record.DeviceName}).");
             }
             catch (Win32Exception)
@@ -131,7 +139,17 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
                 kept.Add(record);
             }
         }
-        WriteRecords(kept);
+        try
+        {
+            await WaitForRemovalAsync(removed, cancellationToken).ConfigureAwait(false);
+            WriteRecords(kept);
+        }
+        catch
+        {
+            // Keep identities in durable state until Windows confirms the corresponding monitors are gone.
+            WriteRecords([.. kept, .. records.Where(r => removed.Contains(r.HardwareId))]);
+            throw;
+        }
     }
 
     private static List<AttachmentRecord> ReadRecords()
@@ -171,27 +189,15 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
         int refreshHertz, Guid monitorId, CancellationToken cancellationToken)
     {
         var before = VirtualMonitorIds();
-        try
-        {
-            SudoVdaDriver.Add(device, monitorId, display.WidthPixels, display.HeightPixels,
+        // Only claim identities after Add succeeds. A failed Add can mean another application owns a
+        // monitor on this adapter; adopting it would make DetachAsync remove someone else's display.
+            SudoVdaDriver.Add(device, monitorId, ResolveVirtualWidth(display), ResolveVirtualHeight(display),
                 refreshHertz, MonitorDeviceName);
-        }
-        catch (Win32Exception) when (TryAdoptStale(display))
-        {
-            // A hard-killed daemon can leave its monitor behind, and the driver has no list-monitors
-            // request, so its identity cannot be recovered. Reuse a matching monitor rather than failing.
-            log?.Invoke($"Reused an existing {display.WidthPixels}x{display.HeightPixels} virtual display.");
-            var adopted = VirtualMonitors().FirstOrDefault(m =>
-                m.Region.Right - m.Region.Left == display.WidthPixels &&
-                m.Region.Bottom - m.Region.Top == display.HeightPixels);
-            return adopted is null ? null : new(adopted.DeviceName, adopted.HardwareId, monitorId,
-                display.WidthPixels, display.HeightPixels, refreshHertz);
-        }
         _ownedMonitorId = monitorId;
         var published = await TryWaitForMonitorAsync(before, display, cancellationToken).ConfigureAwait(false);
         if (published is not null)
             return new(published.DeviceName, published.HardwareId, monitorId,
-                display.WidthPixels, display.HeightPixels, refreshHertz);
+                ResolveVirtualWidth(display), ResolveVirtualHeight(display), refreshHertz);
         // Leave nothing half-created behind before the next attempt uses a different identity.
         await DetachCoreAsync().ConfigureAwait(false);
         return null;
@@ -234,6 +240,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
             catch (Win32Exception ex) { log?.Invoke($"Virtual display removal failed: {ex.Message}"); }
         }
         _ownedMonitorId = null;
+        _ownedMonitorHardwareId = null;
     }
 
     private void StartKeepAlive()
@@ -280,7 +287,9 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
         while (true)
         {
             var present = VirtualMonitorIds();
-            if (!departing.Overlaps(present) || DateTime.UtcNow >= deadline) return;
+            if (!departing.Overlaps(present)) return;
+            if (DateTime.UtcNow >= deadline)
+                throw new TimeoutException("The owned virtual display did not leave the desktop after removal.");
             cancellationToken.ThrowIfCancellationRequested();
             await Task.Delay(50, cancellationToken).ConfigureAwait(false);
         }
@@ -289,13 +298,8 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
     /// <summary>Finds a monitor on the virtual adapter that was not present before the request.</summary>
     private static WindowsMonitor? FindNewMonitor(HashSet<string> before, DisplayMetadata display) =>
         VirtualMonitors().FirstOrDefault(m => !before.Contains(m.HardwareId) &&
-            m.Region.Right - m.Region.Left == display.WidthPixels &&
-            m.Region.Bottom - m.Region.Top == display.HeightPixels);
-
-    /// <summary>Reports whether a matching virtual monitor already exists, used to recover a stale attach.</summary>
-    private static bool TryAdoptStale(DisplayMetadata display) =>
-        VirtualMonitors().Any(m => m.Region.Right - m.Region.Left == display.WidthPixels &&
-            m.Region.Bottom - m.Region.Top == display.HeightPixels);
+            m.Region.Right - m.Region.Left == ResolveVirtualWidth(display) &&
+            m.Region.Bottom - m.Region.Top == ResolveVirtualHeight(display));
 
     /// <summary>Every monitor currently published by a virtual display adapter, tolerant of a transient failure.</summary>
     private static List<WindowsMonitor> VirtualMonitors()
@@ -327,6 +331,21 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
     /// <summary>Converts the remote panel's reported refresh rate to the whole Hertz the driver accepts.</summary>
     internal static int ResolveRefreshHertz(int? refreshMilliHertz) =>
         refreshMilliHertz is > 0 ? Math.Clamp(refreshMilliHertz.Value / 1000, 1, 500) : SudoVdaDriver.DefaultRefreshHertz;
+
+    /// <summary>
+    /// The Windows virtual panel mirrors the remote output's physical mode, oriented as the user sees it.
+    /// Input coordinates are separately scaled from that panel rectangle into the compositor's logical size.
+    /// Metadata from older peers may omit the native mode, in which case WidthPixels remains the fallback.
+    /// </summary>
+    internal static int ResolveVirtualWidth(DisplayMetadata display) =>
+        display.NativeWidthPixels is > 0 && display.NativeHeightPixels is > 0
+            ? display.RotationDegrees is 90 or 270 ? display.NativeHeightPixels.Value : display.NativeWidthPixels.Value
+            : display.WidthPixels;
+
+    internal static int ResolveVirtualHeight(DisplayMetadata display) =>
+        display.NativeWidthPixels is > 0 && display.NativeHeightPixels is > 0
+            ? display.RotationDegrees is 90 or 270 ? display.NativeWidthPixels.Value : display.NativeHeightPixels.Value
+            : display.HeightPixels;
 }
 
 /// <summary>Derives the driver monitor identity that Windows remembers display layouts against.</summary>
@@ -342,7 +361,7 @@ internal static class MonitorIdentity
     public static Guid For(string remoteDisplayId, int widthPixels, int heightPixels, int refreshHertz)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(
-            $"{remoteDisplayId} {widthPixels}x{heightPixels}@{refreshHertz}"));
+            $"{remoteDisplayId}\u0000{widthPixels}x{heightPixels}@{refreshHertz}"));
         return new Guid(hash.AsSpan(0, 16));
     }
 }

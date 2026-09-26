@@ -10,14 +10,14 @@ namespace Xas.Daemon.Input;
 /// one-to-one instead of running it through pointer acceleration.
 /// </summary>
 public sealed class LinuxUinputInputBackend(Func<DisplayMetadata?>? resolveDisplay = null) :
-    IAbsoluteInputInjectionBackend, IInputActivationBackend, IDisposable
+    IAbsoluteInputInjectionBackend, IInputBatchInjectionBackend, IInputActivationBackend, IDisposable
 {
     /// <summary>Environment override, mirroring the Wayland helper's, for unusual install locations.</summary>
     public const string HelperVariable = "XAS_UINPUT_HELPER";
 
     private readonly object _gate = new();
     private Process? _helper;
-    private StreamWriter? _input;
+    private Stream? _input;
     private string? _lastError;
     private bool _ready;
     private bool _disposed;
@@ -79,7 +79,7 @@ public sealed class LinuxUinputInputBackend(Func<DisplayMetadata?>? resolveDispl
         }) ?? throw new IOException("Could not start xas-uinput.");
         lock (_gate)
         {
-            _helper = p; _input = p.StandardInput; _width = width; _height = height; _ready = false;
+            _helper = p; _input = p.StandardInput.BaseStream; _width = width; _height = height; _ready = false;
         }
         // Drain stderr so the helper can never block writing to a full pipe mid-stream.
         _ = Task.Run(async () =>
@@ -108,32 +108,26 @@ public sealed class LinuxUinputInputBackend(Func<DisplayMetadata?>? resolveDispl
 
     public async ValueTask InjectAsync(InputEvent inputEvent, CancellationToken cancellationToken)
     {
+        await InjectBatchAsync([inputEvent], cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask InjectBatchAsync(IReadOnlyList<InputEvent> events, CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
+        if (events.Count == 0) return;
         if (!IsAvailable) throw new PlatformNotSupportedException("The uinput helper is unavailable.");
         await ActivateAsync(cancellationToken).ConfigureAwait(false);
-        var line = inputEvent.Kind switch
-        {
-            InputEventKind.KeepAlive => "N",
-            InputEventKind.Move => $"M {inputEvent.X} {inputEvent.Y}",
-            InputEventKind.MoveAbsolute => $"A {inputEvent.X} {inputEvent.Y}",
-            InputEventKind.Button => $"B {inputEvent.Code} {(inputEvent.Down ? 1 : 0)}",
-            InputEventKind.Scroll => $"S {inputEvent.X} {inputEvent.Y}",
-            InputEventKind.Key => $"K {inputEvent.Code} {(inputEvent.Down ? 1 : 0)} {(inputEvent.Repeat ? 1 : 0)}",
-            _ => throw new ArgumentOutOfRangeException(nameof(inputEvent))
-        };
-        // Fire and forget: the helper applies each event as it reads it, so waiting for an acknowledgement
-        // per event would put a round trip in the input path.
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(2));
         try
         {
-            StreamWriter input;
+            Stream input;
             lock (_gate)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 input = _input ?? throw new IOException("The uinput helper is not running.");
             }
-            await input.WriteLineAsync(line.AsMemory(), timeout.Token).ConfigureAwait(false);
+            await input.WriteAsync(LinuxInputHelperWire.Encode(events), timeout.Token).ConfigureAwait(false);
             await input.FlushAsync(timeout.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException)
@@ -146,14 +140,14 @@ public sealed class LinuxUinputInputBackend(Func<DisplayMetadata?>? resolveDispl
     public async ValueTask ReleaseAllAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        StreamWriter? input;
+        Stream? input;
         lock (_gate) { input = _input; }
         if (input is null) return;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(2));
         try
         {
-            await input.WriteLineAsync("R".AsMemory(), timeout.Token).ConfigureAwait(false);
+            await input.WriteAsync(LinuxInputHelperWire.Release, timeout.Token).ConfigureAwait(false);
             await input.FlushAsync(timeout.Token).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is IOException or ObjectDisposedException) { StopHelper(); }

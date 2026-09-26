@@ -4,12 +4,12 @@ using Xas.Core;
 namespace Xas.Daemon.Input;
 
 /// <summary>Wayland input injection through an XDG RemoteDesktop portal EIS session.</summary>
-public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, IInputActivationBackend, IDisposable
+public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, IInputBatchInjectionBackend, IInputActivationBackend, IDisposable
 {
     private readonly object _gate = new();
     private readonly SemaphoreSlim _activationGate = new(1, 1);
     private Process? _helper;
-    private StreamWriter? _input;
+    private Stream? _input;
     private StreamReader? _output;
     private bool _ready;
     private bool _disposed;
@@ -88,26 +88,22 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
 
     public async ValueTask InjectAsync(InputEvent inputEvent, CancellationToken cancellationToken)
     {
+        await InjectBatchAsync([inputEvent], cancellationToken).ConfigureAwait(false);
+    }
+
+    public async ValueTask InjectBatchAsync(IReadOnlyList<InputEvent> events, CancellationToken cancellationToken)
+    {
         cancellationToken.ThrowIfCancellationRequested();
+        if (events.Count == 0) return;
         await ActivateAsync(cancellationToken).ConfigureAwait(false);
         await _activationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var line = inputEvent.Kind switch
-            {
-                InputEventKind.KeepAlive => "N",
-                InputEventKind.Move => $"M {inputEvent.X} {inputEvent.Y}",
-                InputEventKind.MoveAbsolute => $"A {inputEvent.X} {inputEvent.Y}",
-                InputEventKind.Button => $"B {inputEvent.Code} {(inputEvent.Down ? 1 : 0)}",
-                InputEventKind.Scroll => $"S {inputEvent.X} {inputEvent.Y}",
-                InputEventKind.Key => $"K {inputEvent.Code} {(inputEvent.Down ? 1 : 0)} {(inputEvent.Repeat ? 1 : 0)}",
-                _ => throw new ArgumentOutOfRangeException(nameof(inputEvent))
-            };
             try
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(2));
-                StreamWriter input;
+                Stream input;
                 lock (_gate)
                 {
                     ObjectDisposedException.ThrowIf(_disposed, this);
@@ -116,7 +112,7 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
                 // Fire and forget. Waiting for a per-event acknowledgement put a full round trip in the
                 // input path, and the resulting timeouts tore the session down and re-prompted for consent.
                 // The helper applies each event as it reads it and reports trouble on stderr instead.
-                await input.WriteLineAsync(line.AsMemory(), timeout.Token).ConfigureAwait(false);
+                await input.WriteAsync(LinuxInputHelperWire.Encode(events), timeout.Token).ConfigureAwait(false);
                 await input.FlushAsync(timeout.Token).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is IOException or ObjectDisposedException)
@@ -135,7 +131,7 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
         await _activationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            StreamWriter? input;
+            Stream? input;
             StreamReader? output;
             lock (_gate) { input = _input; output = _output; }
             if (input is null || output is null) return;
@@ -143,7 +139,7 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
             {
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(1));
-                await input.WriteLineAsync("R".AsMemory(), timeout.Token).ConfigureAwait(false);
+                await input.WriteAsync(LinuxInputHelperWire.Release, timeout.Token).ConfigureAwait(false);
                 await input.FlushAsync(timeout.Token).ConfigureAwait(false);
                 if (await output.ReadLineAsync(timeout.Token).ConfigureAwait(false) == "OK") return;
                 // Keep the consented portal session for the next monitor crossing; a failed release is
@@ -162,7 +158,7 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
         var path = FindHelper() ?? throw new PlatformNotSupportedException("Wayland input requires xas-wayland-eis built with libei and liboeffis and available in PATH or XAS_WAYLAND_EIS_HELPER.");
         var p = Process.Start(new ProcessStartInfo(path) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true })
             ?? throw new IOException("Could not start xas-wayland-eis.");
-        _helper = p; _input = p.StandardInput; _output = p.StandardOutput;
+        _helper = p; _input = p.StandardInput.BaseStream; _output = p.StandardOutput;
         _ready = false;
         // Drain stderr continuously. The helper reports per-event problems there, and an unread pipe would
         // fill and block the helper mid-stream, which shows up as the cursor stalling.

@@ -20,6 +20,21 @@ public static class SecurityTests
                 PairingFingerprint.ConfirmationCode(reloaded.Fingerprint, identity.Fingerprint))
                 throw new InvalidOperationException("Pairing code is not symmetric.");
 
+            var leftNonce = Enumerable.Range(0, PairingVerification.NonceBytes).Select(i => (byte)i).ToArray();
+            var rightNonce = Enumerable.Range(0, PairingVerification.NonceBytes).Select(i => (byte)(255 - i)).ToArray();
+            using var peerIdentity = DeviceIdentity.LoadOrCreate(Path.Combine(directory, "peer"), "peer device");
+            var code = PairingVerification.Code(identity.Fingerprint, leftNonce, peerIdentity.Fingerprint, rightNonce);
+            if (code != PairingVerification.Code(peerIdentity.Fingerprint, rightNonce, identity.Fingerprint, leftNonce))
+                throw new InvalidOperationException("Pairing code differs between the two peers.");
+            var changedNonce = rightNonce.ToArray();
+            changedNonce[0] ^= 0x80;
+            if (code == PairingVerification.Code(identity.Fingerprint, leftNonce, peerIdentity.Fingerprint, changedNonce))
+                throw new InvalidOperationException("Pairing code did not bind the fresh handshake nonces.");
+            if (PairingVerification.DeviceId(identity.Fingerprint) != identity.DeviceId)
+                throw new InvalidOperationException("Device ID is not derived from the public key.");
+            if (!PairingVerification.IsProvisionalCertificate(identity.Certificate))
+                throw new InvalidOperationException("A generated identity certificate is not valid for provisional pairing.");
+
             var trust = new PeerTrustStore(directory);
             if (trust.IsTrusted(identity.Certificate)) throw new InvalidOperationException("A peer was trusted before approval.");
             trust.Approve(identity.DeviceId, identity.Fingerprint, "test device");

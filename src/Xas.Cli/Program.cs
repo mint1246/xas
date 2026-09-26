@@ -10,7 +10,9 @@ internal static class Program
         {
             var localResult = await LocalSetupCommands.TryRunAsync(args);
             if (localResult is not null) return localResult.Value;
-            using var client = new RemoteXasClient(Console.OpenStandardOutput(), Console.OpenStandardError());
+            using var client = new LocalDaemonClient(
+                Console.IsInputRedirected ? Console.OpenStandardInput() : Stream.Null,
+                Console.OpenStandardOutput(), Console.OpenStandardError());
             return await new XasCommandLine(client, Console.Out, Console.Error).RunAsync(args);
         }
         catch (OperationCanceledException)
@@ -31,12 +33,12 @@ internal static class Program
 /// <summary>Transport boundary for the command line. A daemon transport can implement this without changing parsing.</summary>
 public interface IXasClient
 {
-    Task<IReadOnlyList<DeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<KnownDeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken);
     Task<DeviceInfo?> GetDeviceInfoAsync(string? deviceId, CancellationToken cancellationToken);
     Task SetDefaultDeviceAsync(string deviceId, CancellationToken cancellationToken);
     Task<bool> PingAsync(string? deviceId, CancellationToken cancellationToken);
     Task<int> RunShellAsync(ShellRequest request, string? deviceId, CancellationToken cancellationToken);
-    Task<int> RunInteractiveAsync(string? deviceId, CancellationToken cancellationToken);
+    Task<int> RunInteractiveAsync(string? deviceId, bool elevated, CancellationToken cancellationToken);
     Task<int> CopyAsync(string source, string destination, bool recursive, bool overwrite,
         CancellationToken cancellationToken);
     Task<int> SyncClipboardAsync(bool push, string? deviceId, CancellationToken cancellationToken);
@@ -49,6 +51,7 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
     public async Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)
     {
         string? targetDevice = null;
+        var elevated = false;
         if (args.Length > 0 && args[0] == "-d")
         {
             if (args.Length < 2 || string.IsNullOrWhiteSpace(args[1]) || args[1].StartsWith('-'))
@@ -60,10 +63,22 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
             args = args.Skip(2).ToArray();
         }
 
+        if (args.Length > 0 && args[0] is "--sudo" or "--admin")
+        {
+            elevated = true;
+            args = args.Skip(1).ToArray();
+        }
+
         if (args.Length == 0)
         {
-            try { return await client.RunInteractiveAsync(targetDevice, cancellationToken); }
+            try { return await client.RunInteractiveAsync(targetDevice, elevated, cancellationToken); }
             catch (XasClientException ex) { error.WriteLine(ex.Message); return 1; }
+        }
+
+        if (elevated && args[0].ToLowerInvariant() is not ("-c" or "exec"))
+        {
+            error.WriteLine("--sudo is only available for shell commands and interactive shells.");
+            return 2;
         }
 
         try
@@ -79,9 +94,9 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
                 case "ping":
                     return await PingAsync(ResolveTarget(targetDevice, args.Skip(1).ToArray()), cancellationToken);
                 case "-c":
-                    return await RunCommandAsync(args, targetDevice, cancellationToken);
+                    return await RunCommandAsync(args, targetDevice, elevated, cancellationToken);
                 case "exec":
-                    return await RunExecutableAsync(args, targetDevice, cancellationToken);
+                    return await RunExecutableAsync(args, targetDevice, elevated, cancellationToken);
                 case "cp":
                     return await CopyAsync(args, targetDevice, cancellationToken);
                 case "clipboard":
@@ -89,10 +104,6 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
                 case "input":
                     if (args.Length > 2) { error.WriteLine("Usage: xas input [device-id]"); return 2; }
                     return await client.RunInputAsync(ResolveTarget(targetDevice, args.Skip(1).ToArray()), cancellationToken);
-                case "--sudo":
-                case "--admin":
-                    error.WriteLine("Privileged remote shells are unavailable: no platform privilege broker is installed.");
-                    return 3;
                 case "-h":
                 case "--help":
                 case "help":
@@ -115,7 +126,12 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
     {
         var devices = await client.ListDevicesAsync(ct);
         foreach (var device in devices)
-            output.WriteLine($"{device.DeviceId}\t{device.Name}\t{device.Os} {device.Architecture}");
+        {
+            var capabilities = string.Join(',', device.Capabilities.Select(c => $"{c.Capability}:v{c.Version}"));
+            var lastSeen = device.LastSeen?.ToString("u", System.Globalization.CultureInfo.InvariantCulture) ?? "never";
+            var latency = device.RoundTripMilliseconds is { } rtt ? $"{rtt:0.0}ms" : "unknown";
+            output.WriteLine($"{device.DeviceId}\t{device.Name}\t{device.Os} {device.Architecture}\t{(device.Online ? "online" : "offline")}\tlast-seen={lastSeen}\trtt={latency}\tcapabilities={capabilities}");
+        }
         if (devices.Count == 0) output.WriteLine("No devices found.");
         return 0;
     }
@@ -157,25 +173,30 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         return ok ? 0 : 1;
     }
 
-    private async Task<int> RunCommandAsync(string[] args, string? deviceId, CancellationToken ct)
+    private async Task<int> RunCommandAsync(string[] args, string? deviceId, bool elevated, CancellationToken ct)
     {
         if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1]))
         {
             error.WriteLine("Usage: xas -c <command>");
             return 2;
         }
-        return await client.RunShellAsync(new ShellRequest(ShellMode.Command, args[1], null, Array.Empty<string>()), deviceId, ct);
+        return await client.RunShellAsync(new ShellRequest(ShellMode.Command, args[1], null, Array.Empty<string>(), Elevated: elevated), deviceId, ct);
     }
 
-    private async Task<int> RunExecutableAsync(string[] args, string? deviceId, CancellationToken ct)
+    private async Task<int> RunExecutableAsync(string[] args, string? deviceId, bool elevated, CancellationToken ct)
     {
+        if (args.Length > 1 && args[1] == "--sudo")
+        {
+            elevated = true;
+            args = [args[0], .. args.Skip(2)];
+        }
         var executableIndex = args.Length > 1 && args[1] == "--" ? 2 : 1;
         if (args.Length <= executableIndex)
         {
             error.WriteLine("Usage: xas exec [--] <executable> [arguments...]");
             return 2;
         }
-        return await client.RunShellAsync(new ShellRequest(ShellMode.Exec, null, args[executableIndex], args.Skip(executableIndex + 1).ToArray()), deviceId, ct);
+        return await client.RunShellAsync(new ShellRequest(ShellMode.Exec, null, args[executableIndex], args.Skip(executableIndex + 1).ToArray(), Elevated: elevated), deviceId, ct);
     }
 
     private async Task<int> CopyAsync(string[] args, string? targetDevice, CancellationToken ct)
@@ -234,8 +255,8 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         writer.WriteLine("  info [device-id]        Show device information (default device if omitted)");
         writer.WriteLine("  default <device-id>     Select the default device");
         writer.WriteLine("  ping [device-id]        Check device connectivity");
-        writer.WriteLine("  -c <command>            Run a shell command on the selected/default device");
-        writer.WriteLine("  exec [--] <exe> [args]  Run an executable on the selected/default device");
+        writer.WriteLine("  [--sudo] -c <command>  Run a shell command (optionally elevated)");
+        writer.WriteLine("  exec [--sudo] [--] <exe> [args]  Run an executable (optionally elevated)");
         writer.WriteLine("  cp [-r] [-f] <src> <dst>  Copy files to or from a paired device");
         writer.WriteLine("  clipboard push|pull|sync [id]  Transfer or continuously sync plain text");
         writer.WriteLine("  input [device-id]       Capture Windows input manually (Ctrl+Alt+Esc releases)");

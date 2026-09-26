@@ -20,8 +20,37 @@ public sealed class LinuxPtyBackend : IInteractiveShellBackend
 
     public async Task<IInteractiveShellSession> StartAsync(bool elevated, short columns, short rows,
         CancellationToken cancellationToken)
+        => await StartHelperAsync(elevated, columns, rows, null, null, cancellationToken).ConfigureAwait(false);
+
+    internal async Task<LinuxPtySession> StartCommandAsync(ShellRequest request, CancellationToken cancellationToken)
     {
-        if (elevated) throw new NotSupportedException("Elevated interactive shells are not supported.");
+        ArgumentNullException.ThrowIfNull(request);
+        if (!request.Elevated) throw new ArgumentException("A sudo PTY requires an elevated request.", nameof(request));
+        string executable;
+        IReadOnlyList<string> arguments;
+        switch (request.Mode)
+        {
+            case ShellMode.Command:
+                if (string.IsNullOrWhiteSpace(request.Command)) throw new ArgumentException("A command string is required.", nameof(request));
+                executable = "/bin/sh";
+                arguments = ["-c", request.Command];
+                break;
+            case ShellMode.Exec:
+                if (string.IsNullOrWhiteSpace(request.Executable)) throw new ArgumentException("An executable is required.", nameof(request));
+                executable = request.Executable;
+                arguments = request.Arguments ?? Array.Empty<string>();
+                break;
+            default:
+                throw new NotSupportedException("Elevated one-shot requests must use Command or Exec mode.");
+        }
+        return await StartHelperAsync(true, 80, 24, (executable, arguments), request.WorkingDirectory, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<LinuxPtySession> StartHelperAsync(bool elevated, short columns, short rows,
+        (string Executable, IReadOnlyList<string> Arguments)? command, string? workingDirectory,
+        CancellationToken cancellationToken)
+    {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux PTY sessions are available only on Linux.");
         if (columns < 1 || rows < 1) throw new ArgumentOutOfRangeException(nameof(columns), "Terminal dimensions must be positive.");
         cancellationToken.ThrowIfCancellationRequested();
@@ -30,6 +59,14 @@ public sealed class LinuxPtyBackend : IInteractiveShellBackend
         var info = new ProcessStartInfo(_helperPath) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true };
         info.ArgumentList.Add("--cols"); info.ArgumentList.Add(columns.ToString(System.Globalization.CultureInfo.InvariantCulture));
         info.ArgumentList.Add("--rows"); info.ArgumentList.Add(rows.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        if (elevated) info.ArgumentList.Add("--sudo");
+        if (workingDirectory is not null) { info.ArgumentList.Add("--cwd"); info.ArgumentList.Add(workingDirectory); }
+        if (command is { } invocation)
+        {
+            info.ArgumentList.Add("--exec"); info.ArgumentList.Add(invocation.Executable);
+            info.ArgumentList.Add("--");
+            foreach (var argument in invocation.Arguments) info.ArgumentList.Add(argument);
+        }
         var process = new Process { StartInfo = info, EnableRaisingEvents = true };
         try
         {
@@ -101,6 +138,9 @@ internal sealed class LinuxPtySession : IInteractiveShellSession
         var payload = new byte[] { (byte)(columns >> 8), (byte)columns, (byte)(rows >> 8), (byte)rows };
         await WriteFrameAsync(0x02, payload, cancellationToken).ConfigureAwait(false);
     }
+
+    internal Task CompleteInputAsync(CancellationToken cancellationToken) =>
+        WriteFrameAsync(0x04, ReadOnlyMemory<byte>.Empty, cancellationToken);
 
     private async Task WriteFrameAsync(byte type, ReadOnlyMemory<byte> payload, CancellationToken token)
     {

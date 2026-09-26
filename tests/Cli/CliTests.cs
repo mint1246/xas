@@ -150,7 +150,7 @@ public static class CliTests
         public string? InputDeviceId { get; private set; }
         public string? WatchDeviceId { get; private set; }
 
-        public Task<IReadOnlyList<DeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<DeviceInfo>>([]);
+        public Task<IReadOnlyList<KnownDeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<KnownDeviceInfo>>([]);
         public Task<DeviceInfo?> GetDeviceInfoAsync(string? deviceId, CancellationToken cancellationToken)
         {
             InfoDeviceId = deviceId;
@@ -168,7 +168,7 @@ public static class CliTests
             ShellDeviceId = deviceId;
             return Task.FromResult(7);
         }
-        public Task<int> RunInteractiveAsync(string? deviceId, CancellationToken cancellationToken)
+        public Task<int> RunInteractiveAsync(string? deviceId, bool elevated, CancellationToken cancellationToken)
         {
             InteractiveDeviceId = deviceId;
             return Task.FromResult(9);

@@ -69,7 +69,7 @@ public sealed class LinuxDisplayMetadataService
                 physicalWidth = physical.Success ? ParsePositive(physical.Groups[1].Value) : 0;
                 physicalHeight = physical.Success ? ParsePositive(physical.Groups[2].Value) : 0;
                 rotation = RotationFromText(line);
-                var geometry = Regex.Match(output.Groups[3].Value, @"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)");
+                var geometry = Regex.Match(output.Groups[3].Value, @"(\d+)x(\d+)([+-]\d+)([+-]\d+)");
                 geometryWidth = geometry.Success ? int.Parse(geometry.Groups[1].Value) : null;
                 geometryHeight = geometry.Success ? int.Parse(geometry.Groups[2].Value) : null;
                 originX = geometry.Success ? int.Parse(geometry.Groups[3].Value) : null;

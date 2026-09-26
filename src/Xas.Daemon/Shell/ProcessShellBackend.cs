@@ -17,7 +17,31 @@ public sealed class ProcessShellBackend : IShellBackend
         ArgumentNullException.ThrowIfNull(stderr);
 
         if (request.Elevated)
-            throw new NotSupportedException("Elevated shell execution requires a platform privilege broker.");
+        {
+            if (!OperatingSystem.IsLinux())
+                throw new NotSupportedException("Elevated shell execution is supported only on Linux, where sudo can authenticate through a PTY.");
+            await using var pty = await new LinuxPtyBackend().StartCommandAsync(request, cancellationToken).ConfigureAwait(false);
+            using var inputStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            var ptyInputTask = CopyPtyInputAsync(stdin, pty, inputStop.Token);
+            var outputTask = pty.Output.CopyToAsync(stdout, cancellationToken);
+            try
+            {
+                var exitCode = await pty.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+                inputStop.Cancel();
+                try { await ptyInputTask.ConfigureAwait(false); }
+                catch (OperationCanceledException) when (inputStop.IsCancellationRequested) { }
+                await outputTask.ConfigureAwait(false);
+                return exitCode;
+            }
+            catch
+            {
+                inputStop.Cancel();
+                try { await ptyInputTask.ConfigureAwait(false); } catch (Exception) { }
+                try { await outputTask.ConfigureAwait(false); } catch (Exception) { }
+                throw;
+            }
+            finally { inputStop.Cancel(); }
+        }
 
         var startInfo = CreateStartInfo(request);
         startInfo.RedirectStandardInput = true;
@@ -113,5 +137,12 @@ public sealed class ProcessShellBackend : IShellBackend
         {
             await destination.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    private static async Task CopyPtyInputAsync(Stream source, LinuxPtySession destination,
+        CancellationToken cancellationToken)
+    {
+        await source.CopyToAsync(destination.Input, cancellationToken).ConfigureAwait(false);
+        await destination.CompleteInputAsync(cancellationToken).ConfigureAwait(false);
     }
 }

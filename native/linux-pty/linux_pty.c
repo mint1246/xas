@@ -84,14 +84,28 @@ static int queue_bytes(unsigned char *queue, size_t *used, const unsigned char *
 
 int main(int argc, char **argv) {
     const char *shell = NULL;
+    const char *executable = NULL;
+    const char *working_directory = NULL;
     unsigned long cols = 80, rows = 24;
+    int use_sudo = 0, command_args_index = -1;
     for (int i = 1; i < argc; ++i) {
         if (!strcmp(argv[i], "--shell") && i + 1 < argc) shell = argv[++i];
+        else if (!strcmp(argv[i], "--sudo")) use_sudo = 1;
+        else if (!strcmp(argv[i], "--cwd") && i + 1 < argc) working_directory = argv[++i];
+        else if (!strcmp(argv[i], "--exec") && i + 1 < argc && command_args_index < 0) {
+            executable = argv[++i];
+        } else if (!strcmp(argv[i], "--") && executable) {
+            command_args_index = i + 1;
+            break;
+        }
         else if (!strcmp(argv[i], "--cols") && i + 1 < argc) {
             if (parse_uint(argv[++i], 1, 65535, &cols) < 0) { fprintf(stderr, "invalid --cols\n"); return 2; }
         } else if (!strcmp(argv[i], "--rows") && i + 1 < argc) {
             if (parse_uint(argv[++i], 1, 65535, &rows) < 0) { fprintf(stderr, "invalid --rows\n"); return 2; }
-        } else { fprintf(stderr, "usage: %s [--shell PATH] [--cols N] [--rows N]\n", argv[0]); return 2; }
+        } else { fprintf(stderr, "usage: %s [--shell PATH] [--sudo] [--exec PATH -- ARG...] [--cwd PATH] [--cols N] [--rows N]\n", argv[0]); return 2; }
+    }
+    if ((executable && command_args_index < 0) || (!executable && command_args_index >= 0)) {
+        fprintf(stderr, "invalid --exec arguments\n"); return 2;
     }
     if (!shell || !*shell) shell = getenv("SHELL");
     if (!shell || !*shell) shell = "/bin/sh";
@@ -104,6 +118,40 @@ int main(int argc, char **argv) {
     if (child < 0) { send_error("forkpty failed"); return 1; }
     if (child == 0) {
         signal(SIGPIPE, SIG_DFL);
+        if (working_directory && chdir(working_directory) < 0) {
+            dprintf(STDERR_FILENO, "chdir %s failed: %s\n", working_directory, strerror(errno));
+            _exit(126);
+        }
+        if (use_sudo) {
+            unsetenv("SUDO_ASKPASS");
+            unsetenv("SSH_ASKPASS");
+            if (!executable) {
+                char *const sudo_argv[] = { "sudo", "-i", NULL };
+                execvp("sudo", sudo_argv);
+                dprintf(STDERR_FILENO, "exec sudo failed: %s\n", strerror(errno));
+                _exit(127);
+            }
+            size_t extra = (size_t)(argc - command_args_index);
+            char **sudo_argv = calloc(extra + 4, sizeof(char *));
+            if (!sudo_argv) _exit(127);
+            sudo_argv[0] = "sudo";
+            sudo_argv[1] = "--";
+            sudo_argv[2] = (char *)executable;
+            for (size_t j = 0; j < extra; ++j) sudo_argv[j + 3] = argv[command_args_index + (int)j];
+            execvp("sudo", sudo_argv);
+            dprintf(STDERR_FILENO, "exec sudo failed: %s\n", strerror(errno));
+            _exit(127);
+        }
+        if (executable) {
+            size_t extra = (size_t)(argc - command_args_index);
+            char **command_argv = calloc(extra + 2, sizeof(char *));
+            if (!command_argv) _exit(127);
+            command_argv[0] = (char *)executable;
+            for (size_t j = 0; j < extra; ++j) command_argv[j + 1] = argv[command_args_index + (int)j];
+            execvp(executable, command_argv);
+            dprintf(STDERR_FILENO, "exec %s failed: %s\n", executable, strerror(errno));
+            _exit(127);
+        }
         const char *base = strrchr(shell, '/');
         base = base ? base + 1 : shell;
         size_t n = strlen(base);
@@ -187,6 +235,11 @@ int main(int argc, char **argv) {
             } else if (incoming[0] == 0x03 && len == 0) {
                 forced = 1;
                 break;
+            } else if (incoming[0] == 0x04 && len == 0) {
+                struct termios settings;
+                if (tcgetattr(master, &settings) < 0 || write(master, &settings.c_cc[VEOF], 1) != 1) {
+                    send_error("could not send PTY end-of-input"); forced = 1; break;
+                }
             } else {
                 send_error("unknown frame type or invalid frame length");
                 forced = 1;

@@ -52,11 +52,12 @@ public sealed class RemoteXasClient : IXasClient, IDisposable
         _ownsIdentity = ownsIdentity;
     }
 
-    public Task<IReadOnlyList<DeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken)
+    public Task<IReadOnlyList<KnownDeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        IReadOnlyList<DeviceInfo> peers = _configuration.Peers
-            .Select(p => new DeviceInfo(p.DeviceId, p.Name, "Unknown", "Unknown", Array.Empty<CapabilityVersion>()))
+        IReadOnlyList<KnownDeviceInfo> peers = _configuration.Peers
+            .Select(p => new KnownDeviceInfo(p.DeviceId, p.Name, "Unknown", "Unknown", Array.Empty<CapabilityVersion>(),
+                false, $"{p.Host}:{p.Port}", null, null))
             .ToArray();
         return Task.FromResult(peers);
     }
@@ -146,7 +147,7 @@ public sealed class RemoteXasClient : IXasClient, IDisposable
         return result.ExitCode;
     }
 
-    public async Task<int> RunInteractiveAsync(string? deviceId, CancellationToken cancellationToken)
+    public async Task<int> RunInteractiveAsync(string? deviceId, bool elevated, CancellationToken cancellationToken)
     {
         var configured = Resolve(deviceId) ?? throw new XasClientException("No matching configured device.");
         if (Console.IsInputRedirected || Console.IsOutputRedirected)
@@ -156,7 +157,7 @@ public sealed class RemoteXasClient : IXasClient, IDisposable
         {
             return await InteractiveShellClient.RunAsync(configured, _identity, _trust,
                 Console.OpenStandardInput(), _output, (ushort)terminal.Columns, (ushort)terminal.Rows,
-                cancellationToken, TerminalMode.CurrentSize).ConfigureAwait(false);
+                cancellationToken, TerminalMode.CurrentSize, elevated).ConfigureAwait(false);
         }
         catch (RemoteProtocolException ex) { throw new XasClientException(ex.Message); }
         catch (Exception ex) when (ex is IOException or System.Net.Sockets.SocketException or

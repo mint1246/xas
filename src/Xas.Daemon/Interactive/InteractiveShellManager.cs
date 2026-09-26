@@ -3,6 +3,7 @@ using System.Text.Json;
 using Xas.Core;
 using Xas.Core.Security;
 using Xas.Daemon.Shell;
+using Xas.Core.Privileged;
 
 namespace Xas.Daemon.Interactive;
 
@@ -86,8 +87,12 @@ public sealed class InteractiveShellManager : IAsyncDisposable
             throw new InvalidDataException("shell.open requires integer columns, integer rows, and boolean elevated fields.");
         if (columns is < 1 or > short.MaxValue || rows is < 1 or > short.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(request), "Terminal dimensions must be from 1 through 32767.");
-        if (e.GetBoolean()) throw new NotSupportedException("Elevated interactive shells are not supported.");
-        if (!_backend.IsAvailable) throw new PlatformNotSupportedException("A real PTY/ConPTY backend is unavailable.");
+        var elevated = e.GetBoolean();
+        if (elevated && !_permissions.IsAllowed(_peerId, Capability.PrivilegedShell))
+            throw new UnauthorizedAccessException("Privileged shell access is not granted on this device for this peer.");
+        IInteractiveShellBackend backend = elevated && OperatingSystem.IsWindows()
+            ? new WindowsAdminBrokerInteractiveBackend() : _backend;
+        if (!backend.IsAvailable) throw new PlatformNotSupportedException("A real PTY/ConPTY backend is unavailable.");
 
         lock (_gate)
         {
@@ -97,7 +102,7 @@ public sealed class InteractiveShellManager : IAsyncDisposable
             _opening++;
         }
         IInteractiveShellSession pty;
-        try { pty = await _backend.StartAsync(false, (short)columns, (short)rows, cancellationToken).ConfigureAwait(false); }
+        try { pty = await backend.StartAsync(elevated, (short)columns, (short)rows, cancellationToken).ConfigureAwait(false); }
         catch { lock (_gate) _opening--; throw; }
         Session session;
         lock (_gate)

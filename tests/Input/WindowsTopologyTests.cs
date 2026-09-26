@@ -15,6 +15,8 @@ public static class WindowsTopologyTests
         if (virtualMonitor.Region.MapToRemote(1920, 0, 2560, 1440) != (0, 0) ||
             virtualMonitor.Region.MapToRemote(3839, 1079, 2560, 1440) != (2559, 1439))
             throw new Exception("Monitor coordinates must scale to the remote display without leaving bounds.");
+        if (new WindowsCaptureRegion(0, 0, 1920, 1080).MapToRemote(1919, 1079, 1536, 864) != (1535, 863))
+            throw new Exception("A native-mode monitor rectangle must map its last physical pixel to the logical desktop edge.");
         if (WindowsMonitorTopology.FindRemote([physical, virtualMonitor]) != virtualMonitor)
             throw new Exception("The XAS virtual monitor was not found.");
 

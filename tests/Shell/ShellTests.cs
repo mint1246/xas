@@ -55,7 +55,10 @@ public static class ShellTests
         await Throws<NotSupportedException>(() => backend.RunAsync(
             new ShellRequest(ShellMode.Interactive, null, null, []), Stream.Null, Stream.Null, Stream.Null, default));
         await Throws<NotSupportedException>(() => backend.RunAsync(
-            new ShellRequest(ShellMode.Exec, null, "echo", [], Elevated: true), Stream.Null, Stream.Null, Stream.Null, default));
+            new ShellRequest(ShellMode.Interactive, null, null, [], Elevated: true), Stream.Null, Stream.Null, Stream.Null, default));
+        if (!OperatingSystem.IsLinux())
+            await Throws<NotSupportedException>(() => backend.RunAsync(
+                new ShellRequest(ShellMode.Exec, null, "echo", [], Elevated: true), Stream.Null, Stream.Null, Stream.Null, default));
     }
 
     private static async Task CancellationStopsTheChildAsync()

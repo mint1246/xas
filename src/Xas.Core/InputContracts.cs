@@ -9,6 +9,24 @@ public enum InputEventKind : byte { KeepAlive = 0, Move = 1, Button = 2, Scroll 
 public readonly record struct InputEvent(InputEventKind Kind, ushort Code = 0,
     bool Down = false, bool Repeat = false, int X = 0, int Y = 0);
 
+/// <summary>Stage markers for opt-in input-pipeline timing. Timestamps are Stopwatch ticks local to each process.</summary>
+public enum InputPipelineStage : byte { Capture = 0, Enqueue = 1, Send = 2, Receive = 3, Inject = 4 }
+
+/// <summary>A batch-level pipeline sample; consumers can derive durations between stages in the same process.</summary>
+public readonly record struct InputPipelineMetric(InputPipelineStage Stage, long Timestamp, int EventCount);
+
+/// <summary>Optional observer. Keep Record nonblocking; a null observer avoids per-event timestamp work.</summary>
+public interface IInputPipelineMetrics
+{
+    void Record(in InputPipelineMetric metric);
+}
+
+/// <summary>Allows an input backend to preserve a received batch through its local injection path.</summary>
+public interface IInputBatchInjectionBackend
+{
+    ValueTask InjectBatchAsync(IReadOnlyList<InputEvent> events, CancellationToken cancellationToken);
+}
+
 /// <summary>Fixed-width 12-byte encoding for batches of input events.</summary>
 public static class InputWire
 {

@@ -6,14 +6,8 @@
  * absolute axis range, which makes the compositor map it to the screen one-to-one instead of running it
  * through pointer acceleration; that is what keeps remote motion feeling like the physical mouse.
  *
- * The line protocol on stdin is unchanged from the EIS helper, so the daemon's backend is nearly identical:
- *   M <dx> <dy>            relative motion
- *   A <x> <y>              absolute motion in display pixels
- *   B <button> <down>      button, 1 left, 2 right, 3 middle
- *   S <dx> <dy>            scroll
- *   K <code> <down> <rep>  key, using a Linux evdev code
- *   R                      release everything held
- *   N                      keepalive
+ * Stdin uses a 2-byte big-endian event count followed by 12-byte InputWire records.
+ * A zero count releases everything held. Keyboard codes are USB HID usages mapped to evdev here.
  */
 
 #include <errno.h>
@@ -24,6 +18,8 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
+#include "../linux-hid-key.h"
+#include "../linux-input-wire.h"
 
 #define XAS_VENDOR 0x7861
 #define XAS_PRODUCT 0x0001
@@ -32,7 +28,7 @@
 
 static int pointer_fd = -1, keyboard_fd = -1;
 static int abs_max_x = DEFAULT_WIDTH - 1, abs_max_y = DEFAULT_HEIGHT - 1;
-static unsigned char held_keys[768], held_buttons[8];
+static unsigned char held_keys[768], held_buttons[9];
 
 static void emit(int fd, int type, int code, int value) {
     struct input_event ev = { .type = (unsigned short)type, .code = (unsigned short)code, .value = value };
@@ -136,22 +132,10 @@ static int setup_keyboard(void) {
     bit(fd, UI_SET_EVBIT, EV_KEY);
     bit(fd, UI_SET_EVBIT, EV_SYN);
 
-    static const int keys[] = {
-        KEY_ESC, KEY_ENTER, KEY_TAB, KEY_BACKSPACE, KEY_SPACE, KEY_DELETE, KEY_INSERT,
-        KEY_HOME, KEY_END, KEY_PAGEUP, KEY_PAGEDOWN, KEY_LEFT, KEY_RIGHT, KEY_UP, KEY_DOWN,
-        KEY_CAPSLOCK, KEY_LEFTCTRL, KEY_LEFTALT, KEY_LEFTMETA, KEY_RIGHTSHIFT, KEY_RIGHTCTRL,
-        KEY_RIGHTALT, KEY_RIGHTMETA, KEY_MENU, KEY_COMMA, KEY_DOT, KEY_MINUS, KEY_EQUAL,
-        KEY_SEMICOLON, KEY_APOSTROPHE, KEY_GRAVE, KEY_BACKSLASH, KEY_LEFTBRACE, KEY_RIGHTBRACE,
-        KEY_SLASH, KEY_BACKSLASH, KEY_FN, KEY_MENU, KEY_PAUSE, KEY_SYSRQ, KEY_SCROLLLOCK,
-        KEY_F1, KEY_F2, KEY_F3, KEY_F4, KEY_F5, KEY_F6, KEY_F7, KEY_F8, KEY_F9, KEY_F10, KEY_F11, KEY_F12
-    };
-    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++) bit(fd, UI_SET_KEYBIT, keys[i]);
-    for (int c = KEY_1; c <= KEY_0; c++) bit(fd, UI_SET_KEYBIT, c);      /* digits are not contiguous */
-    for (int c = KEY_Q; c <= KEY_P; c++) bit(fd, UI_SET_KEYBIT, c);      /* top row */
-    for (int c = KEY_A; c <= KEY_L; c++) bit(fd, UI_SET_KEYBIT, c);
-    for (int c = KEY_Z; c <= KEY_M; c++) bit(fd, UI_SET_KEYBIT, c);
-    for (int c = KEY_KP0; c <= KEY_KP9; c++) bit(fd, UI_SET_KEYBIT, c);
-    for (int c = KEY_KPDOT; c <= KEY_KPENTER; c++) bit(fd, UI_SET_KEYBIT, c);
+    for (unsigned usage = 4; usage <= 231; usage++) {
+        uint32_t key = xas_hid_key((uint16_t)usage);
+        if (key) bit(fd, UI_SET_KEYBIT, key);
+    }
     if (ioctl(fd, UI_DEV_CREATE) < 0) {
         fprintf(stderr, "keyboard UI_DEV_CREATE failed: %s\n", strerror(errno));
         close(fd);
@@ -169,15 +153,12 @@ static void release_all(void) {
     commit(keyboard_fd);
 }
 
-static int handle(char *line) {
-    char op; int x = 0, y = 0, down = 0, repeat = 0; unsigned code = 0;
-    if (sscanf(line, "%c", &op) != 1) return -1;
-    /* Traces what actually arrives, which distinguishes "no events sent" from "events ignored". */
-    if (getenv("XAS_UINPUT_DEBUG")) fprintf(stderr, "in: %s", line);
-
-    if (op == 'R') { release_all(); return 0; }
-    if (op == 'N') return 0;
-    if (op == 'A' && sscanf(line, "A %d %d", &x, &y) == 2) {
+static int handle_event(const unsigned char *event) {
+    unsigned kind = event[0]; unsigned code = xas_u16(event + 1);
+    int flags = event[3], down = flags & 1, repeat = flags & 2;
+    int x = xas_i32(event + 4), y = xas_i32(event + 8);
+    if (kind == 0) return 0;
+    if (kind == 5) {
         /* Clamp rather than reject: a stale coordinate must not stall the stream. */
         if (x < 0) x = 0;
         if (x > abs_max_x) x = abs_max_x;
@@ -185,26 +166,25 @@ static int handle(char *line) {
         if (y > abs_max_y) y = abs_max_y;
         emit(pointer_fd, EV_ABS, ABS_X, x);
         emit(pointer_fd, EV_ABS, ABS_Y, y);
-    } else if (op == 'M' && sscanf(line, "M %d %d", &x, &y) == 2) {
+    } else if (kind == 1) {
         emit(pointer_fd, EV_REL, REL_X, x);
         emit(pointer_fd, EV_REL, REL_Y, y);
-    } else if (op == 'B' && sscanf(line, "B %u %d", &code, &down) == 2) {
+    } else if (kind == 2) {
         int b = button_code((int)code);
         if (!b) return 0;
         emit(pointer_fd, EV_KEY, b, down != 0);
         if (down) held_buttons[code & 7] = 1; else held_buttons[code & 7] = 0;
-    } else if (op == 'K' && sscanf(line, "K %u %d %d", &code, &down, &repeat) == 3) {
-        if (code >= sizeof held_keys) return 0;
-        if (repeat) { emit(keyboard_fd, EV_KEY, (int)code, 1); emit(keyboard_fd, EV_KEY, (int)code, 2); }
-        else emit(keyboard_fd, EV_KEY, (int)code, down != 0);
-        if (!(down || repeat)) held_keys[code] = 0;
-    } else if (op == 'S' && sscanf(line, "S %d %d", &x, &y) == 2) {
+    } else if (kind == 4) {
+        uint32_t key = xas_hid_key((uint16_t)code);
+        if (!key || key >= sizeof held_keys) return -1;
+        if (repeat) { emit(keyboard_fd, EV_KEY, key, 1); emit(keyboard_fd, EV_KEY, key, 2); }
+        else emit(keyboard_fd, EV_KEY, key, down != 0);
+        if (down || repeat) held_keys[key] = 1; else held_keys[key] = 0;
+    } else if (kind == 3) {
         emit(pointer_fd, EV_REL, REL_WHEEL, -y);
         if (x) emit(pointer_fd, EV_REL, REL_HWHEEL, x);
     } else return -1;
 
-    commit(pointer_fd);
-    commit(keyboard_fd);
     return 0;
 }
 
@@ -229,10 +209,18 @@ int main(int argc, char **argv) {
     puts("READY");
     fflush(stdout);
 
-    char *line = NULL;
-    size_t cap = 0;
-    while (getline(&line, &cap, stdin) > 0) handle(line);
-    free(line);
+    unsigned char *events = malloc(XAS_INPUT_MAX_EVENTS * XAS_INPUT_EVENT_BYTES);
+    if (!events) return 1;
+    for (;;) {
+        unsigned count = 0;
+        int status = xas_read_frame(events, &count);
+        if (status <= 0) break;
+        if (count == 0) { release_all(); continue; }
+        for (unsigned i = 0; i < count; i++) if (handle_event(events + i * XAS_INPUT_EVENT_BYTES) < 0) fprintf(stderr, "unsupported input event in batch\n");
+        commit(pointer_fd);
+        commit(keyboard_fd);
+    }
+    free(events);
     release_all();
     ioctl(pointer_fd, UI_DEV_DESTROY);
     ioctl(keyboard_fd, UI_DEV_DESTROY);

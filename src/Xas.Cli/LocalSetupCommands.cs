@@ -1,5 +1,6 @@
 using Xas.Core;
 using Xas.Core.Configuration;
+using Xas.Core.LocalIpc;
 using Xas.Core.Security;
 
 namespace Xas.Cli;
@@ -23,24 +24,28 @@ internal static class LocalSetupCommands
                 if (args.Length is < 4 or > 6 || !int.TryParse(args.ElementAtOrDefault(4) ?? XasProtocol.DefaultPort.ToString(), out var port)
                     || port is < 1 or > 65535)
                     return Usage("Usage: xas pair <device-id> <fingerprint> <host> [port] [name]");
-                using (var local = DeviceIdentity.LoadOrCreate(AppPaths.IdentityDirectory, Environment.MachineName))
+                using (var client = new LocalDaemonClient(Stream.Null, Console.OpenStandardOutput(), Console.OpenStandardError()))
                 {
-                    var id = args[1];
-                    var fingerprint = args[2];
-                    var code = PairingFingerprint.ConfirmationCode(local.Fingerprint, fingerprint);
-                    Console.WriteLine($"Verification code: {code}");
+                    LocalPairPending pending;
+                    try { pending = await client.BeginPairingAsync(args[3], checked(port + 1), args[1], CancellationToken.None); }
+                    catch (OverflowException) { return Usage("The control port must leave room for the pairing port."); }
+                    if (!FingerprintsMatch(args[2], pending.Fingerprint))
+                    {
+                        Console.Error.WriteLine("The device fingerprint does not match the supplied fingerprint.");
+                        await client.ApprovePairingAsync(pending.PairingId, false, CancellationToken.None);
+                        return 1;
+                    }
+                    Console.WriteLine($"Verification code: {pending.Code}");
                     Console.WriteLine("Compare this code on both machines before approving the peer.");
                     Console.Write("Approve this peer locally? Type YES: ");
                     if (!string.Equals(await Console.In.ReadLineAsync(), "YES", StringComparison.Ordinal))
                     {
                         Console.Error.WriteLine("Pairing not approved.");
+                        await client.ApprovePairingAsync(pending.PairingId, false, CancellationToken.None);
                         return 1;
                     }
-                    var name = args.ElementAtOrDefault(5) ?? id;
-                    var trust = new PeerTrustStore(AppPaths.TrustDirectory);
-                    trust.Approve(id, fingerprint, name);
-                    new LocalConfiguration().UpsertPeer(new ConfiguredPeer(id, name, args[3], port));
-                    Console.WriteLine($"Paired {id}. Grant individual permissions with 'xas allow {id} shell'.");
+                    await client.ApprovePairingAsync(pending.PairingId, true, CancellationToken.None);
+                    Console.WriteLine($"Paired {pending.DeviceId}. Grant individual permissions with 'xas allow {pending.DeviceId} shell'.");
                 }
                 return 0;
             case "allow":
@@ -83,4 +88,12 @@ internal static class LocalSetupCommands
     }
 
     private static int Usage(string message) { Console.Error.WriteLine(message); return 2; }
+
+    private static bool FingerprintsMatch(string left, string right)
+    {
+        static string Normalize(string value) => new(value.Where(Uri.IsHexDigit).Select(char.ToUpperInvariant).ToArray());
+        var a = Normalize(left);
+        var b = Normalize(right);
+        return a.Length == 64 && b.Length == 64 && string.Equals(a, b, StringComparison.Ordinal);
+    }
 }

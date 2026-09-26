@@ -1,10 +1,13 @@
 # Linux PTY helper
 
 `xas-linux-pty` is a small Linux subprocess that owns one pseudo-terminal. It
-runs the selected shell with the current process credentials (it never changes
-uid, uses `sudo`, or requests privileged mode). The parent application should
-launch it as the logged-in user and communicate using the framed protocol
-below. Raw terminal bytes never share a stream with control messages.
+runs the selected shell with the current process credentials, or starts the
+normal `sudo` client when explicitly requested. In sudo mode, authentication
+uses sudo's ordinary controlling-terminal prompt inside the PTY. The helper
+never reads, stores, or forwards a password through its control protocol. The
+parent application should launch it as the logged-in user and communicate
+using the framed protocol below. Raw terminal bytes never share a stream with
+control messages.
 
 ## Build and launch
 
@@ -12,14 +15,17 @@ Build on Linux with `make` (requires a C compiler and the platform `libutil`;
 glibc systems provide `forkpty` there). Launch as:
 
 ```text
-xas-linux-pty [--shell PATH] [--cols N] [--rows N]
+xas-linux-pty [--shell PATH] [--sudo] [--exec PATH -- ARG...] [--cwd PATH] [--cols N] [--rows N]
 ```
 
 When `--shell` is omitted, `$SHELL` is used, then `/bin/sh`. The shell is
 executed directly with no `-c` command string; its `argv[0]` is prefixed with
 `-` to request login-shell behavior. Initial dimensions default to 80 columns
-by 24 rows. Standard input and output are reserved for the protocol; helper
-diagnostics go to standard error.
+by 24 rows. `--sudo` starts `sudo -i` for interactive sessions. With `--exec`,
+the helper executes the provided argument vector directly, prefixed with
+`sudo --` when sudo mode is enabled. `--cwd` changes the child working
+directory before launch. Standard input and output are reserved for the
+protocol; helper diagnostics go to standard error.
 
 ## Framing
 
@@ -34,6 +40,7 @@ Parent to helper (stdin):
 | `0x01` | 1–65,536 bytes | Write these bytes to the PTY master. |
 | `0x02` | 4 bytes: columns then rows, each unsigned big-endian 16-bit | Resize the PTY. Zero dimensions are invalid. |
 | `0x03` | empty | Terminate the shell process group and close the session. |
+| `0x04` | empty | Send the PTY's configured end-of-input character to the child. |
 
 Helper to parent (stdout):
 

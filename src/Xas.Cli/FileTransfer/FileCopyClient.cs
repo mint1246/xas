@@ -17,6 +17,15 @@ public static class FileCopyClient
     private const int MaxPathLength = 4096;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    public static string ResolveTargetDeviceId(string source, string destination, LocalConfiguration config)
+    {
+        var from = Operand.Parse(source, config);
+        var to = Operand.Parse(destination, config);
+        if (from.Remote == to.Remote) throw new ArgumentException("Exactly one copy operand must be remote.");
+        return (from.Remote ? from.Peer : to.Peer)?.DeviceId
+            ?? throw new InvalidOperationException("Copy operand does not resolve to a paired device.");
+    }
+
     public static async Task CopyAsync(string source, string destination, bool recursive, bool overwrite,
         LocalConfiguration config, DeviceIdentity identity, PeerTrustStore trust, TextWriter progress,
         CancellationToken token)
@@ -41,6 +50,32 @@ public static class FileCopyClient
         await using (var protocol = new MultiplexedProtocolPeer(frames, (_, _) =>
             ValueTask.FromException<ProtocolMessage>(new NotSupportedException("The file copy client does not accept requests."))))
         {
+            await CopyResolvedAsync(protocol, from, to, remotePath, localPath, sourceName, recursive, overwrite, progress, token).ConfigureAwait(false);
+        }
+    }
+
+    public static async Task CopyWithPeerAsync(string source, string destination, bool recursive, bool overwrite,
+        LocalConfiguration config, MultiplexedProtocolPeer protocol, TextWriter progress, CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(protocol);
+        ArgumentNullException.ThrowIfNull(progress);
+        token.ThrowIfCancellationRequested();
+        var from = Operand.Parse(source, config);
+        var to = Operand.Parse(destination, config);
+        if (from.Remote == to.Remote) throw new ArgumentException("Exactly one copy operand must be remote.");
+        var remotePath = ValidateRemotePath(from.Remote ? from.Path : to.Path);
+        var localPath = Path.GetFullPath(from.Remote ? to.Path : from.Path);
+        ValidateLocalPath(localPath, allowMissing: from.Remote);
+        var sourceName = SafeBaseName(from.Remote ? from.Path : Path.GetFullPath(from.Path));
+        await CopyResolvedAsync(protocol, from, to, remotePath, localPath, sourceName, recursive, overwrite, progress, token)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task CopyResolvedAsync(MultiplexedProtocolPeer protocol, Operand from, Operand to,
+        string remotePath, string localPath, string sourceName, bool recursive, bool overwrite,
+        TextWriter progress, CancellationToken token)
+    {
             var destinationIsDirectory = from.Remote
                 ? Directory.Exists(localPath) || HasTrailingSeparator(to.Path)
                 : await IsRemoteDirectoryAsync(protocol, remotePath, HasTrailingSeparator(to.Path), token).ConfigureAwait(false);
@@ -66,7 +101,6 @@ public static class FileCopyClient
                 }
                 else await UploadFileAsync(protocol, localPath, remotePath, overwrite, progress, token).ConfigureAwait(false);
             }
-        }
     }
 
     private static async Task UploadDirectoryAsync(MultiplexedProtocolPeer peer, string local, string remote,

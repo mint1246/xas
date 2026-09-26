@@ -18,6 +18,7 @@ public static class VirtualDisplayTests
         CheckMonitorIdentity();
         CheckRefreshConversion();
         CheckModeRange();
+        CheckNativeAndLogicalModes();
         CheckAttachmentShape();
         return Task.CompletedTask;
     }
@@ -104,6 +105,26 @@ public static class VirtualDisplayTests
         if (attachment.DeviceName != @"\\.\DISPLAY2" || attachment.MonitorHardwareId != hardwareId ||
             attachment.WidthPixels != 2560 || attachment.RefreshHertz != 60)
             throw new Exception("The attachment must report the GDI device name, monitor ID, and mode.");
+    }
+
+    private static void CheckNativeAndLogicalModes()
+    {
+        var scaled = new DisplayMetadata
+        {
+            Id = "eDP-1", Name = "Built-in display", NativeWidthPixels = 1920, NativeHeightPixels = 1080,
+            LogicalWidth = 1536, LogicalHeight = 864, WidthPixels = 1536, HeightPixels = 864, Scale = 1.25
+        };
+        if (SudoVdaDisplayController.ResolveVirtualWidth(scaled) != 1920 ||
+            SudoVdaDisplayController.ResolveVirtualHeight(scaled) != 1080)
+            throw new Exception("SudoVDA must mirror the physical panel mode when logical scale is present.");
+        var rotated = scaled with { RotationDegrees = 90, LogicalWidth = 864, LogicalHeight = 1536,
+            WidthPixels = 864, HeightPixels = 1536 };
+        if (SudoVdaDisplayController.ResolveVirtualWidth(rotated) != 1080 ||
+            SudoVdaDisplayController.ResolveVirtualHeight(rotated) != 1920)
+            throw new Exception("SudoVDA must orient the physical mode to match the rotated desktop.");
+        if (SudoVdaDisplayController.ResolveVirtualWidth(new DisplayMetadata
+            { Id = "old", Name = "old", WidthPixels = 1280, HeightPixels = 720 }) != 1280)
+            throw new Exception("Older peers without native dimensions must retain the logical mode fallback.");
     }
 
     private static bool IsSupported(DisplayMetadata display) =>

@@ -9,18 +9,37 @@ using Xas.Core.Transport;
 using Xas.Daemon.Interactive;
 using Xas.Daemon.FileTransfer;
 using Xas.Daemon.Input;
+using Xas.Daemon.Sessions;
+using Xas.Daemon.Pairing;
+using Xas.Daemon.Web;
 using Xas.Input;
 
 namespace Xas.Daemon;
 
-public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
-    PeerPermissionStore permissions, int port = XasProtocol.DefaultPort,
-    IInputInjectionBackend? inputBackend = null, ITextClipboardBackend? clipboardBackend = null)
+public sealed class DaemonHost
 {
-    private readonly InputControlService _input = new(permissions,
-        inputBackend ?? (OperatingSystem.IsWindows() ? new WindowsSendInputBackend() :
-            OperatingSystem.IsLinux() ? CreateLinuxInputBackend() : new UnavailableInputBackend()));
-    private RequestDispatcher? _dispatcher;
+    private readonly DeviceIdentity _identity;
+    private readonly PeerTrustStore _trust;
+    private readonly PeerPermissionStore _permissions;
+    private readonly int _port;
+    private readonly InputControlService _input;
+    private readonly RequestDispatcher _dispatcher;
+    public PeerSessionManager PeerSessions { get; }
+
+    public DaemonHost(DeviceIdentity identity, PeerTrustStore trust, PeerPermissionStore permissions,
+        int port = XasProtocol.DefaultPort, IInputInjectionBackend? inputBackend = null,
+        ITextClipboardBackend? clipboardBackend = null, IInputPipelineMetrics? inputMetrics = null)
+    {
+        _identity = identity ?? throw new ArgumentNullException(nameof(identity));
+        _trust = trust ?? throw new ArgumentNullException(nameof(trust));
+        _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
+        _port = port;
+        _input = new InputControlService(permissions,
+            inputBackend ?? (OperatingSystem.IsWindows() ? new WindowsSendInputBackend() :
+                OperatingSystem.IsLinux() ? CreateLinuxInputBackend() : new UnavailableInputBackend()), inputMetrics);
+        _dispatcher = new RequestDispatcher(identity, permissions, () => _input.ProtocolVersion, clipboardBackend);
+        PeerSessions = new PeerSessionManager(identity, trust, permissions, _input, _dispatcher, port);
+    }
 
     /// <summary>
     /// Picks a Linux injection backend. uinput comes first because it needs no portal, so handoff never
@@ -42,27 +61,31 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
-        _dispatcher = new RequestDispatcher(identity, permissions, () => _input.ProtocolVersion, clipboardBackend);
-        var listener = new TcpListener(IPAddress.Any, port);
-        await using var discovery = new LanDiscoveryService(identity.DeviceId, Environment.MachineName, port);
+        var listener = new TcpListener(IPAddress.Any, _port);
+        await using var sessions = PeerSessions;
+        await using var pairing = new PairingService(_identity, _trust, checked(_port + 1), Environment.MachineName);
+        await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, pairing);
         using var handoffStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         listener.Start();
-        var handoff = OperatingSystem.IsWindows()
-            ? WindowsMonitorHandoff.RunAsync(() => new LocalConfiguration().Resolve(null),
-                identity, trust, Console.Error, handoffStop.Token)
-            : Task.CompletedTask;
+        Task handoff = Task.CompletedTask;
         try
         {
-            try { await discovery.StartAsync(cancellationToken); }
+            await pairing.StartAsync(cancellationToken);
+            try { await PeerSessions.StartAsync(cancellationToken); }
             catch (SocketException ex) { Console.Error.WriteLine($"LAN discovery unavailable: {ex.Message}"); }
-            Console.WriteLine($"xas daemon listening on TCP {port}; device {identity.DeviceId}");
+            await web.StartAsync(cancellationToken);
+            if (OperatingSystem.IsWindows() && new LocalConfiguration().Resolve(null) is { } configured &&
+                PeerSessions.GetSession(configured.DeviceId) is { } hotPeer)
+                handoff = WindowsMonitorHandoff.RunAsync(hotPeer, handoffStop.Token,
+                    message => Console.Error.WriteLine(message));
+            Console.WriteLine($"xas daemon listening on TCP {_port}; device {_identity.DeviceId}");
             var clients = new HashSet<Task>();
             while (!cancellationToken.IsCancellationRequested)
             {
                 TcpClient socket;
                 try { socket = await listener.AcceptTcpClientAsync(cancellationToken); }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
-                var task = HandleClientAsync(socket, cancellationToken);
+                var task = PeerSessions.HandleClientAsync(socket, cancellationToken);
                 clients.Add(task);
                 clients.RemoveWhere(t => t.IsCompleted);
             }
@@ -78,35 +101,4 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
         }
     }
 
-    private async Task HandleClientAsync(TcpClient socket, CancellationToken cancellationToken)
-    {
-        using var shutdownRegistration = cancellationToken.Register(static state => ((TcpClient)state!).Dispose(), socket);
-        try
-        {
-            await using var tls = await MutualTlsTransport.AcceptAsync(socket, identity, trust,
-                TimeSpan.FromSeconds(10), cancellationToken);
-            await using var frames = new BinaryFrameConnection(tls.Stream, leaveOpen: true);
-            await using var interactive = new InteractiveShellManager(tls.PeerDeviceId, permissions, frames.SendAsync);
-            await using var files = new FileTransferServer(tls.PeerDeviceId, permissions, frames.SendAsync);
-            await using var input = _input.CreateSession(tls.PeerDeviceId);
-            await using var peer = new MultiplexedProtocolPeer(frames,
-                (message, ct) => message.Method is "shell.open" or "shell.resize" or "shell.close"
-                    ? interactive.HandleRequestAsync(message, ct)
-                    : message.Method.StartsWith("file.", StringComparison.Ordinal)
-                    ? files.HandleRequestAsync(message, ct)
-                    : message.Method is "input.open" or "input.close"
-                    ? input.HandleRequestAsync(message, ct)
-                    : _dispatcher!.HandleAsync(tls.PeerDeviceId, message, frames.SendAsync, ct));
-            peer.MessageReceived += message => message.Method switch
-            {
-                "shell.input" => interactive.HandleMessageAsync(message),
-                "file.put.data" => files.HandleMessageAsync(message),
-                "input.event" => input.HandleMessageAsync(message),
-                _ => ValueTask.FromException(new InvalidDataException($"Unexpected stream message: {message.Method}"))
-            };
-            await peer.Completion;
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-        catch (Exception ex) { Console.Error.WriteLine($"Peer connection ended: {ex.Message}"); }
-    }
 }

@@ -25,7 +25,8 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
     $stage = Join-Path $publishRoot $rid
     Remove-WorkspaceTree $stage
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
-    foreach ($project in @('Xas.Cli', 'Xas.Daemon')) {
+    $projects = if ($rid -eq 'win-x64') { @('Xas.Cli', 'Xas.Daemon', 'Xas.PrivilegedService') } else { @('Xas.Cli', 'Xas.Daemon') }
+    foreach ($project in $projects) {
         $out = Join-Path $stage $project
         dotnet publish (Join-Path $root "src\$project\$project.csproj") -c $Configuration -r $rid --self-contained true `
             -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true `
@@ -40,8 +41,9 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
     Copy-Item (Join-Path $stage "Xas.Daemon\Xas.Daemon$exeExt") $package
     $readme = Join-Path $package 'INSTALL.txt'
     if ($rid -eq 'win-x64') {
+        Copy-Item (Join-Path $stage 'Xas.PrivilegedService\Xas.PrivilegedService.exe') $package
         Copy-Item (Join-Path $PSScriptRoot 'install-windows.ps1') $package
-        @('xas Windows x64 package', '', 'Run install-windows.ps1 from PowerShell to install both programs under %LOCALAPPDATA%\Programs\xas and add that folder to your user PATH.', 'Open a new terminal after installation.') | Set-Content -LiteralPath $readme
+        @('xas Windows x64 package', '', 'Run install-windows.ps1 from an elevated PowerShell window. It installs the client, daemon, and XasAdminBroker service under %ProgramFiles%\xas, then adds the folder to your user PATH.', 'Open a new terminal after installation.', '', 'Installing the broker authorizes the daemon to run approved elevated commands as the active administrator user. Code already running as that user can also request the same elevation path.') | Set-Content -LiteralPath $readme
     } else {
         Copy-Item (Join-Path $PSScriptRoot 'install-linux.sh') $package
         foreach ($helper in @('xas-linux-pty', 'xas-wayland-eis', 'xas-uinput')) {

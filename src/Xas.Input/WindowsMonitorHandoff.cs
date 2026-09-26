@@ -1,134 +1,122 @@
+using System.Threading.Channels;
 using Xas.Core;
-using Xas.Core.Configuration;
-using Xas.Core.Security;
 using Xas.Input.Display;
 
 namespace Xas.Input;
 
-/// <summary>
-/// Follows the native Windows cursor into the XAS virtual monitor and hands input back on exit. The monitor
-/// is created automatically at the paired Linux display's own mode, so no display configuration, driver
-/// setup, or environment variable is needed before handoff works.
-/// </summary>
+/// <summary>Owns the XAS virtual monitor and routes native input over an already authenticated peer session.</summary>
 public static class WindowsMonitorHandoff
 {
-    /// <summary>How long to wait before retrying a failed or missing virtual display attach.</summary>
-    private static readonly TimeSpan AttachRetryInterval = TimeSpan.FromSeconds(5);
-
-    public static async Task RunAsync(Func<ConfiguredPeer?> resolvePeer, DeviceIdentity identity,
-        PeerTrustStore trust, TextWriter status, CancellationToken token)
+    public static async Task RunAsync(IHotInputPeer peer, CancellationToken token, Action<string>? log = null)
     {
+        ArgumentNullException.ThrowIfNull(peer);
         if (!OperatingSystem.IsWindows() || !Environment.UserInteractive) return;
-        // Attach is retried on a timer, so report each distinct condition once instead of every retry.
-        var lastNotice = string.Empty;
-        void Notice(string message)
+
+        await using var controller = new SudoVdaDisplayController(log);
+        if (!controller.IsAvailable)
         {
-            lastNotice = message;
-            status.WriteLine($"[{DateTime.Now:HH:mm:ss.fff}] {message}");
+            log?.Invoke("No virtual display driver is installed; install SudoVDA to enable automatic handoff.");
+            return;
         }
 
-        IVirtualDisplayController? controller = null;
+        var changes = Channel.CreateBounded<byte>(new BoundedChannelOptions(1)
+        { FullMode = BoundedChannelFullMode.DropWrite, SingleReader = true, SingleWriter = false });
+        var topologyChanged = false;
+        void Changed() => changes.Writer.TryWrite(0);
+        void TopologyChanged() { topologyChanged = true; changes.Writer.TryWrite(0); }
+        peer.Changed += Changed;
+        DisplayMetadata? attachedDisplay = null;
+        VirtualDisplayAttachment? attachment = null;
         try
         {
-            var nextAttachAttempt = DateTime.MinValue;
-            // The monitor this daemon created is the handoff boundary. Pinning it by hardware ID keeps a
-            // monitor left on the adapter by another owner, or by an earlier crash, from taking input
-            // ownership, and it is what lets a reattach be detected. Null until the first successful attach.
-            string? ownedMonitorId = null;
             while (!token.IsCancellationRequested)
             {
-                // Own the boundary first. Waiting for an unowned monitor to appear first would mean never
-                // attaching at all while another application already holds a virtual monitor on the adapter.
-                if (ownedMonitorId is not null && !WindowsMonitorTopology.Exists(ownedMonitorId))
+                var display = peer.Display;
+                if (display is null)
                 {
-                    Notice("The virtual display was removed; recreating it.");
-                    ownedMonitorId = null;
-                }
-                if (ownedMonitorId is null && DateTime.UtcNow >= nextAttachAttempt)
-                {
-                    nextAttachAttempt = DateTime.UtcNow + AttachRetryInterval;
-                    controller ??= CreateController(Notice);
-                    if (controller is not null)
-                        ownedMonitorId = await TryAttachAsync(controller, resolvePeer, identity, trust,
-                            Notice, token).ConfigureAwait(false);
-                }
-
-                WindowsMonitor? remote = null;
-                try { remote = WindowsMonitorTopology.FindRemote(ownedMonitorId); }
-                catch (Exception ex) { Notice($"Virtual monitor discovery failed: {ex.Message}"); }
-
-                if (remote is null)
-                {
-                    await Task.Delay(1000, token).ConfigureAwait(false);
+                    await WaitForChangeAsync(changes.Reader, token).ConfigureAwait(false);
                     continue;
                 }
-                lastNotice = string.Empty;
-                if (!WindowsMonitorTopology.TryGetPointer(out var x, out var y) || !remote.Region.Contains(x, y))
-                { await Task.Delay(20, token).ConfigureAwait(false); continue; }
 
-                try
+                if (!Equals(display, attachedDisplay) || attachment is null ||
+                    !WindowsMonitorTopology.Exists(attachment.MonitorHardwareId))
                 {
-                    var peer = resolvePeer() ?? throw new InvalidOperationException(
-                        "No default paired device is configured for the virtual monitor.");
-                    Notice($"Input handoff starting on {remote.DeviceName} region " +
-                        $"({remote.Region.Left},{remote.Region.Top})-({remote.Region.Right},{remote.Region.Bottom}).");
-                    await InputControlClient.RunAsync(peer, identity, trust, token, remote.Region,
-                        ownedMonitorId, Notice).ConfigureAwait(false);
-                    Notice("Input handoff finished.");
+                    log?.Invoke($"Attaching virtual display for {display.Name} at {display.WidthPixels}x{display.HeightPixels}.");
+                    attachment = await controller.AttachAsync(display, token).ConfigureAwait(false);
+                    attachedDisplay = display;
                 }
-                catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
-                catch (Exception ex) { Notice($"Virtual monitor input handoff ended: {ex.Message}"); }
-                finally { WindowsMonitorTopology.ReturnToLocal(remote); }
-                await Task.Delay(150, token).ConfigureAwait(false);
+
+                var monitor = FindOwnedRemote(attachment);
+                if (monitor is null)
+                {
+                    log?.Invoke("The owned virtual display is not available in the Windows desktop topology.");
+                    await WaitForChangeAsync(changes.Reader, token).ConfigureAwait(false);
+                    continue;
+                }
+
+                using var run = CancellationTokenSource.CreateLinkedTokenSource(token);
+                topologyChanged = false;
+                var router = HotInputRouter.RunAsync(peer, monitor.Region, run.Token, TopologyChanged);
+                var refresh = false;
+                while (!token.IsCancellationRequested && !refresh)
+                {
+                    var changed = changes.Reader.WaitToReadAsync(token).AsTask();
+                    var completed = await Task.WhenAny(router, changed).ConfigureAwait(false);
+                    if (completed == router)
+                    {
+                        await router.ConfigureAwait(false);
+                        // The hot router only completes normally for the emergency return or peer disconnect.
+                        if (!token.IsCancellationRequested)
+                        {
+                            WindowsMonitorTopology.ReturnToLocal(monitor);
+                            log?.Invoke("Input returned to the local desktop.");
+                        }
+                        break;
+                    }
+                    await changed.ConfigureAwait(false);
+                    while (changes.Reader.TryRead(out _)) { }
+                    if (topologyChanged || !Equals(peer.Display, attachedDisplay)) refresh = true;
+                }
+                run.Cancel();
+                try { await router.ConfigureAwait(false); }
+                catch (OperationCanceledException) when (run.IsCancellationRequested) { }
+                if (token.IsCancellationRequested) break;
+                if (refresh)
+                {
+                    log?.Invoke("Remote display metadata changed; refreshing the virtual monitor.");
+                    var updatedDisplay = peer.Display;
+                    if (updatedDisplay is null)
+                    {
+                        await controller.DetachAsync(token).ConfigureAwait(false);
+                        attachment = null;
+                        attachedDisplay = null;
+                    }
+                    else
+                    {
+                        attachment = await controller.AttachAsync(updatedDisplay, token).ConfigureAwait(false);
+                        attachedDisplay = updatedDisplay;
+                    }
+                }
             }
         }
         finally
         {
-            if (controller is not null)
-            {
-                try { await controller.DisposeAsync().ConfigureAwait(false); }
-                catch (Exception ex) { status.WriteLine($"Virtual display shutdown failed: {ex.Message}"); }
-            }
+            peer.Changed -= Changed;
+            changes.Writer.TryComplete();
         }
     }
 
-    private static IVirtualDisplayController? CreateController(Action<string> notice)
+    private static WindowsMonitor? FindOwnedRemote(VirtualDisplayAttachment attachment)
     {
-        var controller = new SudoVdaDisplayController(notice);
-        if (controller.IsAvailable) return controller;
-        notice("No virtual display driver is installed; install SudoVDA to enable automatic handoff.");
-        return null;
+        var monitors = WindowsMonitorTopology.Enumerate();
+        var owned = monitors.FirstOrDefault(m => m.HardwareId.Equals(attachment.MonitorHardwareId,
+            StringComparison.OrdinalIgnoreCase));
+        return owned is null ? null : WindowsMonitorTopology.FindRemote(monitors, owned.HardwareId);
     }
 
-    /// <summary>Creates the virtual monitor, returning its hardware ID so handoff can be pinned to it.</summary>
-    private static async Task<string?> TryAttachAsync(IVirtualDisplayController controller,
-        Func<ConfiguredPeer?> resolvePeer, DeviceIdentity identity, PeerTrustStore trust,
-        Action<string> notice, CancellationToken token)
+    private static async Task WaitForChangeAsync(ChannelReader<byte> changes, CancellationToken token)
     {
-        if (resolvePeer() is not { } peer)
-        {
-            notice("No default paired Linux device; the virtual display stays detached.");
-            return null;
-        }
-        DisplayMetadata? display;
-        try { display = await RemoteDisplayProbe.TryFetchAsync(peer, identity, trust, token).ConfigureAwait(false); }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { return null; }
-        catch (Exception ex)
-        {
-            notice($"Could not read the remote display mode: {ex.Message}");
-            return null;
-        }
-        if (display is null)
-        {
-            notice("The paired device does not expose a usable display mode; grant Input access.");
-            return null;
-        }
-        try
-        {
-            var attached = await controller.AttachAsync(display, token).ConfigureAwait(false);
-            return attached.MonitorHardwareId;
-        }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { return null; }
-        catch (Exception ex) { notice($"Virtual display attach failed: {ex.Message}"); return null; }
+        await changes.WaitToReadAsync(token).ConfigureAwait(false);
+        while (changes.TryRead(out _)) { }
     }
 }

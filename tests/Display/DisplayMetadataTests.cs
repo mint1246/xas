@@ -17,6 +17,15 @@ public static class DisplayMetadataTests
             LogicalX: 1920, LogicalY: 0, LogicalWidth: 2560, LogicalHeight: 1440,
             WidthPixels: 2560, HeightPixels: 1440, RefreshMilliHertz: 59950, PhysicalWidthMillimeters: 600, RotationDegrees: 0 }, "XRandR primary and mode parsing");
 
+        var negativeX = LinuxDisplayMetadataService.ParseXrandr("""
+            Screen 0: minimum 8 x 8, current 3840 x 1080, maximum 32767 x 32767
+            eDP-1 connected 1920x1080-1920+0 (normal left inverted right x axis y axis) 309mm x 174mm
+               1920x1080 60.00*+
+            """);
+        Check(negativeX is { NativeWidthPixels: 1920, NativeHeightPixels: 1080,
+            LogicalX: -1920, LogicalY: 0, LogicalWidth: 1920, LogicalHeight: 1080 },
+            "XRandR negative desktop origin");
+
         var portrait = LinuxDisplayMetadataService.ParseWlrRandr("""
             eDP-1 "Panel" (focused)
               Physical size: 309x174 mm

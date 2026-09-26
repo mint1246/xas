@@ -1,5 +1,6 @@
 using Xas.Core;
 using Xas.Core.Security;
+using System.Diagnostics;
 
 namespace Xas.Daemon.Input;
 
@@ -8,16 +9,19 @@ public sealed class InputControlService : IAsyncDisposable
 {
     private readonly PeerPermissionStore _permissions;
     private readonly IInputInjectionBackend _backend;
+    private readonly IInputPipelineMetrics? _metrics;
     private readonly object _gate = new();
     private ConnectionInputSession? _lease;
     private uint _nextId;
     private bool _releasing;
     private bool _disposed;
 
-    public InputControlService(PeerPermissionStore permissions, IInputInjectionBackend backend)
+    public InputControlService(PeerPermissionStore permissions, IInputInjectionBackend backend,
+        IInputPipelineMetrics? metrics = null)
     {
         _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
+        _metrics = metrics;
     }
 
     public bool IsAvailable => !_disposed && _backend.IsAvailable;
@@ -64,6 +68,13 @@ public sealed class InputControlService : IAsyncDisposable
 
     internal PeerPermissionStore Permissions => _permissions;
     internal IInputInjectionBackend Backend => _backend;
+
+    internal void RecordMetric(InputPipelineStage stage, int eventCount)
+    {
+        if (_metrics is not { } metrics) return;
+        var sample = new InputPipelineMetric(stage, Stopwatch.GetTimestamp(), eventCount);
+        metrics.Record(in sample);
+    }
 
     public async ValueTask DisposeAsync()
     {

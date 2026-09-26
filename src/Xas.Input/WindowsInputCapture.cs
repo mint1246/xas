@@ -1,8 +1,12 @@
 using System.Runtime.InteropServices;
+using System.Diagnostics;
 using System.Threading.Channels;
 using Xas.Core;
 
 namespace Xas.Input;
+
+/// <summary>An input event with optional monotonic capture/enqueue timestamps.</summary>
+public readonly record struct CapturedInput(InputEvent Event, long CaptureTimestamp, long EnqueueTimestamp);
 
 /// <summary>Rectangle occupied by a remote virtual monitor in Windows desktop coordinates.</summary>
 public readonly record struct WindowsCaptureRegion(int Left, int Top, int Right, int Bottom)
@@ -25,6 +29,7 @@ public sealed class WindowsInputCapture : IAsyncDisposable
 {
     private const int WhKeyboardLl = 13, WhMouseLl = 14;
     private const uint WmQuit = 0x0012, WmInput = 0x00FF;
+    private const uint WmDisplayChange = 0x007E, WmDeviceChange = 0x0219;
     private const uint RidInput = 0x10000003, RidevInputSink = 0x00000100;
     private const uint HcAction = 0;
     private const uint WmKeyDown = 0x0100, WmKeyUp = 0x0101, WmSysKeyDown = 0x0104, WmSysKeyUp = 0x0105;
@@ -35,11 +40,11 @@ public sealed class WindowsInputCapture : IAsyncDisposable
     private const uint RiMouse = 0, RiKeyboard = 1;
     private const ushort RidevPage = 0x01, RidevUsageMouse = 0x02, RidevUsageKeyboard = 0x06;
     private const uint WmAppStop = 0x8001;
-    private static readonly IntPtr HwndMessage = new(-3);
     private static readonly WindowProc WindowCallback = WindowProcedure;
 
-    private readonly Channel<InputEvent> _events = Channel.CreateBounded<InputEvent>(new BoundedChannelOptions(512)
+    private readonly Channel<CapturedInput> _events = Channel.CreateBounded<CapturedInput>(new BoundedChannelOptions(512)
     { FullMode = BoundedChannelFullMode.Wait, SingleReader = true, SingleWriter = true });
+    private readonly IInputPipelineMetrics? _metrics;
     private readonly CancellationTokenSource _stop = new();
     private readonly TaskCompletionSource _started = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource _finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -49,6 +54,11 @@ public sealed class WindowsInputCapture : IAsyncDisposable
     private HookProc? _keyboardProc, _mouseProc;
     private readonly HashSet<ushort> _heldKeys = [];
     private readonly WindowsCaptureRegion? _region;
+    private readonly bool _hotMode;
+    private int _routingEnabled;
+    private int _routingRemote;
+    private int _pointerInsideRegion;
+    private int _resetHeldKeys;
     private readonly int _remoteWidth, _remoteHeight;
     private Rect _previousClip;
     private bool _cursorClipped;
@@ -56,20 +66,57 @@ public sealed class WindowsInputCapture : IAsyncDisposable
     private int _disposeStarted;
     private int _stopStarted;
 
-    private WindowsInputCapture(WindowsCaptureRegion? region, int remoteWidth, int remoteHeight)
-    { _region = region; _remoteWidth = remoteWidth; _remoteHeight = remoteHeight; }
+    private WindowsInputCapture(WindowsCaptureRegion? region, int remoteWidth, int remoteHeight, bool hotMode,
+        IInputPipelineMetrics? metrics)
+    { _region = region; _remoteWidth = remoteWidth; _remoteHeight = remoteHeight; _hotMode = hotMode; _metrics = metrics; }
     public static bool IsAvailable => OperatingSystem.IsWindows();
-    public ChannelReader<InputEvent> Events => _events.Reader;
+    public ChannelReader<CapturedInput> Events => _events.Reader;
     public Task Completion => _finished.Task;
+    public bool IsRoutingRemote => Volatile.Read(ref _routingRemote) != 0;
+    public event Action<bool>? RoutingChanged;
+    /// <summary>Raised when the native cursor crosses the hot monitor boundary, whether or not a peer is ready.</summary>
+    public event Action<bool>? PointerRegionChanged;
+    /// <summary>Raised for the emergency Ctrl+Alt+Esc chord while hot routing is active.</summary>
+    public event Action? EmergencyReturnRequested;
+    public event Action? DisplayTopologyChanged;
 
-    public static async Task<WindowsInputCapture> StartAsync(CancellationToken cancellationToken = default,
-        WindowsCaptureRegion? region = null, int remoteWidth = 0, int remoteHeight = 0)
+    /// <summary>Enables routing only after the remote input lease and realtime lane are ready.</summary>
+    public void SetRoutingEnabled(bool enabled)
+    {
+        if (!_hotMode) throw new InvalidOperationException("This capture is not a hot monitor router.");
+        Volatile.Write(ref _routingEnabled, enabled ? 1 : 0);
+        if (!enabled) SetRoutingRemote(false);
+        else if (GetCursorPos(out var pointer) && _region is { } region)
+        {
+            var inside = region.Contains(pointer.X, pointer.Y);
+            SetRoutingRemote(inside);
+            if (inside)
+            {
+                var (x, y) = region.MapToRemote(pointer.X, pointer.Y, _remoteWidth, _remoteHeight);
+                Publish(new InputEvent(InputEventKind.MoveAbsolute, X: x, Y: y));
+            }
+        }
+    }
+
+    public static Task<WindowsInputCapture> StartHotAsync(WindowsCaptureRegion region,
+        int remoteWidth, int remoteHeight, CancellationToken cancellationToken = default,
+        IInputPipelineMetrics? metrics = null) =>
+        StartCoreAsync(cancellationToken, region, remoteWidth, remoteHeight, hotMode: true, metrics);
+
+    public static Task<WindowsInputCapture> StartAsync(CancellationToken cancellationToken = default,
+        WindowsCaptureRegion? region = null, int remoteWidth = 0, int remoteHeight = 0,
+        IInputPipelineMetrics? metrics = null)
+        => StartCoreAsync(cancellationToken, region, remoteWidth, remoteHeight, hotMode: false, metrics);
+
+    private static async Task<WindowsInputCapture> StartCoreAsync(CancellationToken cancellationToken,
+        WindowsCaptureRegion? region, int remoteWidth, int remoteHeight, bool hotMode,
+        IInputPipelineMetrics? metrics)
     {
         if (!IsAvailable) throw new PlatformNotSupportedException("Windows input capture is available only on Windows.");
         if (region is not null && (remoteWidth <= 0 || remoteHeight <= 0))
             throw new ArgumentOutOfRangeException(nameof(remoteWidth), "Monitor capture requires remote display dimensions.");
         cancellationToken.ThrowIfCancellationRequested();
-        var capture = new WindowsInputCapture(region, remoteWidth, remoteHeight);
+        var capture = new WindowsInputCapture(region, remoteWidth, remoteHeight, hotMode, metrics);
         if (Interlocked.CompareExchange(ref _active, capture, null) is not null)
             throw new InvalidOperationException("Input capture is already active in this process.");
         capture._thread = new Thread(capture.Run) { IsBackground = true, Name = "xas input capture" };
@@ -108,7 +155,9 @@ public sealed class WindowsInputCapture : IAsyncDisposable
             var instance = GetModuleHandle(null);
             var klass = new WndClass { WindowProc = WindowCallback, ClassName = "XasInputCaptureMessageWindow", Instance = instance };
             RegisterClass(ref klass);
-            _window = CreateWindowEx(0, klass.ClassName, string.Empty, 0, 0, 0, 0, 0, HwndMessage, IntPtr.Zero, instance, IntPtr.Zero);
+            // This invisible top-level window receives Windows display/device broadcasts, which lets the
+            // handoff refresh an owned monitor after a hotplug without polling the topology.
+            _window = CreateWindowEx(0, klass.ClassName, string.Empty, 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
             if (_window == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
             if (_region is null)
             {
@@ -135,7 +184,7 @@ public sealed class WindowsInputCapture : IAsyncDisposable
                 if (!ClipCursor(ref onePixel)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
                 _cursorClipped = true;
             }
-            else
+            else if (!_hotMode)
             {
                 if (!GetCursorPos(out var pointer) || !_region.Value.Contains(pointer.X, pointer.Y))
                     throw new InvalidOperationException("Pointer left the virtual monitor before input capture started.");
@@ -165,7 +214,9 @@ public sealed class WindowsInputCapture : IAsyncDisposable
     private IntPtr OnKeyboard(int code, IntPtr wParam, IntPtr lParam)
     {
         if (code < 0 || _stop.IsCancellationRequested) return CallNextHookEx(_keyboardHook, code, wParam, lParam);
-        if (_region is { } region && GetCursorPos(out var pointer) && !region.Contains(pointer.X, pointer.Y))
+        if (Interlocked.Exchange(ref _resetHeldKeys, 0) != 0) _heldKeys.Clear();
+        if (_hotMode && !IsRoutingRemote) return CallNextHookEx(_keyboardHook, code, wParam, lParam);
+        if (!_hotMode && _region is { } region && GetCursorPos(out var pointer) && !region.Contains(pointer.X, pointer.Y))
         { Stop(); return CallNextHookEx(_keyboardHook, code, wParam, lParam); }
         var data = Marshal.PtrToStructure<KeyboardData>(lParam);
         if ((data.Flags & 0x10) != 0) return CallNextHookEx(_keyboardHook, code, wParam, lParam);
@@ -179,7 +230,13 @@ public sealed class WindowsInputCapture : IAsyncDisposable
         if (down && usage == 0x29 && HasCtrl() && HasAlt())
         {
             // Always let the emergency chord reach the local machine, then tear down capture.
-            Stop();
+            if (_hotMode)
+            {
+                try { EmergencyReturnRequested?.Invoke(); }
+                catch (Exception ex) { _failure = ex; Stop(); }
+                SetRoutingEnabled(false);
+            }
+            else Stop();
             return CallNextHookEx(_keyboardHook, code, wParam, lParam);
         }
         var repeat = down && wasDown;
@@ -195,7 +252,19 @@ public sealed class WindowsInputCapture : IAsyncDisposable
         if (code < 0 || _stop.IsCancellationRequested) return CallNextHookEx(_mouseHook, code, wParam, lParam);
         var msg = unchecked((uint)wParam.ToInt64());
         var data = Marshal.PtrToStructure<MouseHookData>(lParam);
-        if (_region is { } region && !region.Contains(data.Point.X, data.Point.Y))
+        if (_hotMode && msg == WmMouseMove && _region is { } hotRegion)
+        {
+            var inside = hotRegion.Contains(data.Point.X, data.Point.Y);
+            var wasInside = Interlocked.Exchange(ref _pointerInsideRegion, inside ? 1 : 0) != 0;
+            if (inside != wasInside)
+            {
+                try { PointerRegionChanged?.Invoke(inside); }
+                catch (Exception ex) { _failure = ex; Stop(); }
+            }
+            SetRoutingRemote(Volatile.Read(ref _routingEnabled) != 0 && inside);
+        }
+        if (_hotMode && !IsRoutingRemote) return CallNextHookEx(_mouseHook, code, wParam, lParam);
+        if (!_hotMode && _region is { } region && !region.Contains(data.Point.X, data.Point.Y))
         { Stop(); return CallNextHookEx(_mouseHook, code, wParam, lParam); }
         if ((data.Flags & 0x0001) != 0) return CallNextHookEx(_mouseHook, code, wParam, lParam);
         var eventHandled = true;
@@ -225,9 +294,33 @@ public sealed class WindowsInputCapture : IAsyncDisposable
 
     private bool Publish(InputEvent item)
     {
-        if (_events.Writer.TryWrite(item)) return true;
+        if (_metrics is null)
+        {
+            if (_events.Writer.TryWrite(new CapturedInput(item, 0, 0))) return true;
+        }
+        else
+        {
+            var captureTimestamp = Stopwatch.GetTimestamp();
+            if (_events.Writer.TryWrite(new CapturedInput(item, captureTimestamp, Stopwatch.GetTimestamp())))
+            {
+                _metrics.Record(new(InputPipelineStage.Capture, captureTimestamp, 1));
+                _metrics.Record(new(InputPipelineStage.Enqueue, Stopwatch.GetTimestamp(), 1));
+                return true;
+            }
+        }
+        if (_hotMode && item.Kind is InputEventKind.Move or InputEventKind.MoveAbsolute)
+            return true; // Movement can be superseded by the next position; key/button edges cannot.
         Stop(); // Never lose an up event while continuing to suppress local input.
         return false;
+    }
+
+    private void SetRoutingRemote(bool remote)
+    {
+        var value = remote ? 1 : 0;
+        if (Interlocked.Exchange(ref _routingRemote, value) == value) return;
+        if (!remote) Volatile.Write(ref _resetHeldKeys, 1);
+        try { RoutingChanged?.Invoke(remote); }
+        catch (Exception ex) { _failure = ex; Stop(); }
     }
 
     private static ushort ScanToHid(ushort scan, bool extended)
@@ -268,6 +361,11 @@ public sealed class WindowsInputCapture : IAsyncDisposable
         if (active is not null && message == WmInput)
         {
             try { active.OnRawInput(lParam); }
+            catch (Exception ex) { active._failure = ex; active.Stop(); }
+        }
+        else if (active is not null && message is WmDisplayChange or WmDeviceChange)
+        {
+            try { active.DisplayTopologyChanged?.Invoke(); }
             catch (Exception ex) { active._failure = ex; active.Stop(); }
         }
         return DefWindowProc(hwnd, message, wParam, lParam);

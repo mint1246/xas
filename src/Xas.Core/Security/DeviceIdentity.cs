@@ -51,8 +51,11 @@ public sealed class DeviceIdentity : IDisposable
         return FromCertificate(X509CertificateLoader.LoadPkcs12(cert.Export(X509ContentType.Pfx), (string?)null, KeyStorageFlags));
     }
 
+    // Schannel cannot use an ephemeral private key for TLS authentication on Windows. The encrypted
+    // PFX remains the durable identity, but the runtime certificate must be imported into the current
+    // user's key store so SslStream can acquire its private key. Linux can keep the key ephemeral.
     private static X509KeyStorageFlags KeyStorageFlags => OperatingSystem.IsWindows()
-        ? X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.PersistKeySet | X509KeyStorageFlags.Exportable
+        ? X509KeyStorageFlags.UserKeySet | X509KeyStorageFlags.Exportable
         : X509KeyStorageFlags.EphemeralKeySet | X509KeyStorageFlags.Exportable;
 
     private static DeviceIdentity FromCertificate(X509Certificate2 cert)

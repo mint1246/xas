@@ -51,6 +51,13 @@ public sealed class ConnectionInputSession : IAsyncDisposable
                         throw new InvalidDataException("input.close requires this connection's active four-byte session ID.");
                     await CloseCoreAsync().ConfigureAwait(false);
                     return new ProtocolMessage(MessageKind.Response, request.RequestId, 0, request.Method, []);
+                case "input.release":
+                    if (request.Payload.Length != 4 || _id == 0 || BinaryPrimitives.ReadUInt32BigEndian(request.Payload) != _id)
+                        throw new InvalidDataException("input.release requires this connection's active four-byte session ID.");
+                    await _owner.Backend.ReleaseAllAsync(cancellationToken).ConfigureAwait(false);
+                    _keys.Clear(); _buttons.Clear();
+                    _lastActivity = DateTime.UtcNow;
+                    return new ProtocolMessage(MessageKind.Response, request.RequestId, 0, request.Method, []);
                 default: throw new NotSupportedException($"Unknown input request: {request.Method}");
             }
         }
@@ -77,6 +84,7 @@ public sealed class ConnectionInputSession : IAsyncDisposable
             InputEvent[] events;
             try { events = InputWire.Decode(message.Payload); }
             catch { await FailClosedAsync().ConfigureAwait(false); throw; }
+            _owner.RecordMetric(InputPipelineStage.Receive, events.Length);
             _lastActivity = DateTime.UtcNow;
             try
             {
@@ -85,9 +93,19 @@ public sealed class ConnectionInputSession : IAsyncDisposable
                     if (e.Kind == InputEventKind.MoveAbsolute && _owner.ProtocolVersion < 2)
                         throw new NotSupportedException("The active input backend cannot position the pointer absolutely.");
                     Track(e);
-                    if (e.Kind != InputEventKind.KeepAlive)
-                        await _owner.Backend.InjectAsync(e, _shutdown.Token).ConfigureAwait(false);
                 }
+                if (_owner.Backend is IInputBatchInjectionBackend batchBackend)
+                {
+                    // Keep the packet order intact; the backend writes one local pipe frame for the batch.
+                    await batchBackend.InjectBatchAsync(events, _shutdown.Token).ConfigureAwait(false);
+                }
+                else
+                {
+                    foreach (var e in events)
+                        if (e.Kind != InputEventKind.KeepAlive)
+                            await _owner.Backend.InjectAsync(e, _shutdown.Token).ConfigureAwait(false);
+                }
+                _owner.RecordMetric(InputPipelineStage.Inject, events.Length);
             }
             catch { await FailClosedAsync().ConfigureAwait(false); throw; }
         }

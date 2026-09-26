@@ -28,17 +28,22 @@ public static class InputControlTests
             await Throws<InvalidOperationException>(() => other.HandleRequestAsync(Request("input.open"), default).AsTask());
             await peer.HandleMessageAsync(new ProtocolMessage(MessageKind.StreamData, 0, id, "input.event",
                 InputWire.Encode([new InputEvent(InputEventKind.Key, 4, Down: true)])));
+            var leaseId = new byte[4];
+            BinaryPrimitives.WriteUInt32BigEndian(leaseId, id);
+            await peer.HandleRequestAsync(new ProtocolMessage(MessageKind.Request, 2, 0, "input.release", leaseId), default);
+            Assert(backend.ReleaseCalls == 1, "Returning to the local monitor must release held remote input.");
+            await Throws<InvalidOperationException>(() => other.HandleRequestAsync(Request("input.open"), default).AsTask());
             backend.BlockRelease = true;
             var disconnect = peer.DisposeAsync().AsTask();
             await backend.ReleaseStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-            Assert(backend.ReleaseCalls == 1, "Closing a held lease must release backend input.");
+            Assert(backend.ReleaseCalls == 2, "Closing a held lease must release backend input.");
             await Throws<InvalidOperationException>(() => other.HandleRequestAsync(Request("input.open"), default).AsTask());
             backend.FinishRelease();
             await disconnect;
             var reopened = await other.HandleRequestAsync(Request("input.open"), default);
             Assert(BinaryPrimitives.ReadUInt32BigEndian(reopened.Payload) != 0, "A subsequent peer must acquire the released lease.");
             await Task.Delay(TimeSpan.FromSeconds(5));
-            Assert(backend.ReleaseCalls == 2, "The inactivity watchdog did not release the second lease.");
+            Assert(backend.ReleaseCalls == 3, "The inactivity watchdog did not release the second lease.");
             await using var third = service.CreateSession("third");
             permissions.SetAllowed("third", Capability.Input, true);
             var thirdOpen = await third.HandleRequestAsync(Request("input.open"), default);
@@ -46,7 +51,7 @@ public static class InputControlTests
             await Throws<NotSupportedException>(() => third.HandleMessageAsync(new ProtocolMessage(
                 MessageKind.StreamData, 0, thirdId, "input.event",
                 InputWire.Encode([new InputEvent(InputEventKind.MoveAbsolute, X: 1, Y: 2)]))).AsTask());
-            Assert(backend.ReleaseCalls == 3, "Unsupported absolute input did not release the lease.");
+            Assert(backend.ReleaseCalls == 4, "Unsupported absolute input did not release the lease.");
         }
         finally { Directory.Delete(directory, true); }
     }

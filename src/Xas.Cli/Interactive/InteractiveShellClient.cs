@@ -19,7 +19,7 @@ public static class InteractiveShellClient
     public static async Task<int> RunAsync(ConfiguredPeer configuredPeer, DeviceIdentity identity,
         PeerTrustStore trustStore, Stream input, Stream output, ushort columns, ushort rows,
         CancellationToken cancellationToken = default,
-        Func<(ushort Columns, ushort Rows)>? currentSize = null)
+        Func<(ushort Columns, ushort Rows)>? currentSize = null, bool elevated = false)
     {
         ArgumentNullException.ThrowIfNull(configuredPeer);
         ArgumentNullException.ThrowIfNull(identity);
@@ -35,6 +35,22 @@ public static class InteractiveShellClient
         await using var frames = new BinaryFrameConnection(connection.Stream, leaveOpen: true);
         await using var peer = new MultiplexedProtocolPeer(frames, (_, _) =>
             ValueTask.FromException<ProtocolMessage>(new NotSupportedException("Interactive shell client does not accept remote requests.")));
+
+        return await RunOnPeerAsync(peer, input, output, columns, rows, cancellationToken, currentSize, elevated)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>Runs an interactive shell over an already authenticated multiplexed protocol peer.</summary>
+    public static async Task<int> RunOnPeerAsync(MultiplexedProtocolPeer peer, Stream input, Stream output,
+        ushort columns, ushort rows, CancellationToken cancellationToken = default,
+        Func<(ushort Columns, ushort Rows)>? currentSize = null, bool elevated = false)
+    {
+        ArgumentNullException.ThrowIfNull(peer);
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(output);
+        if (!input.CanRead) throw new ArgumentException("Input stream must be readable.", nameof(input));
+        if (!output.CanWrite) throw new ArgumentException("Output stream must be writable.", nameof(output));
+        if (columns == 0 || rows == 0) throw new ArgumentOutOfRangeException(nameof(columns), "Terminal dimensions must be positive.");
 
         var exit = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         uint sessionId = 0;
@@ -58,7 +74,7 @@ public static class InteractiveShellClient
             finally { sessionGate.Release(); }
         };
 
-        var openPayload = JsonSerializer.SerializeToUtf8Bytes(new OpenRequest(columns, rows, false));
+        var openPayload = JsonSerializer.SerializeToUtf8Bytes(new OpenRequest(columns, rows, elevated));
         var openReply = await peer.RequestAsync("shell.open", openPayload, cancellationToken: cancellationToken).ConfigureAwait(false);
         if (openReply.Payload.Length != sizeof(uint)) throw new InvalidDataException("Invalid shell.open response.");
         await sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);

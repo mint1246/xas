@@ -8,6 +8,10 @@ public sealed record CapabilityVersion(Capability Capability, ushort Version);
 public sealed record DeviceInfo(string DeviceId, string Name, string Os, string Architecture,
     IReadOnlyList<CapabilityVersion> Capabilities);
 
+public sealed record KnownDeviceInfo(string DeviceId, string Name, string Os, string Architecture,
+    IReadOnlyList<CapabilityVersion> Capabilities, bool Online, string? Endpoint,
+    DateTimeOffset? LastSeen, double? RoundTripMilliseconds);
+
 public sealed record PeerGrant(string DeviceId, IReadOnlySet<Capability> AllowedCapabilities);
 
 public sealed record ShellRequest(ShellMode Mode, string? Command, string? Executable,

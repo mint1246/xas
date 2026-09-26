@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Text.Json;
 using Xas.Core;
 using Xas.Core.Configuration;
@@ -13,7 +14,8 @@ public static class InputControlClient
 {
     public static async Task RunAsync(ConfiguredPeer configured, DeviceIdentity identity,
         PeerTrustStore trust, CancellationToken cancellationToken, WindowsCaptureRegion? region = null,
-        string? monitorHint = null, Action<string>? trace = null)
+        string? monitorHint = null, Action<string>? trace = null,
+        IInputPipelineMetrics? metrics = null)
     {
         ArgumentNullException.ThrowIfNull(configured);
         if (!WindowsInputCapture.IsAvailable)
@@ -61,14 +63,14 @@ public static class InputControlClient
                 var (targetX, targetY) = bounds.MapToRemote(x, y,
                     display.WidthPixels, display.HeightPixels);
                 await SendWithTimeoutAsync(peer, sessionId,
-                    [new InputEvent(InputEventKind.MoveAbsolute, X: targetX, Y: targetY)],
+                    [new CapturedInput(new InputEvent(InputEventKind.MoveAbsolute, X: targetX, Y: targetY), 0, 0)],
                     setup.Token).ConfigureAwait(false);
             }
             if (region is null) Console.Error.WriteLine("Remote input is active. Press Ctrl+Alt+Esc to return control locally.");
             await using var capture = await WindowsInputCapture.StartAsync(cancellationToken, region,
-                display?.WidthPixels ?? 0, display?.HeightPixels ?? 0).ConfigureAwait(false);
+                display?.WidthPixels ?? 0, display?.HeightPixels ?? 0, metrics).ConfigureAwait(false);
             using var active = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var sendTask = SendEventsAsync(peer, capture, sessionId, active.Token, () => sent++);
+            var sendTask = SendEventsAsync(peer, capture, sessionId, active.Token, () => sent++, metrics);
             var heartbeatTask = SendHeartbeatAsync(peer, sessionId, active.Token);
             var boundaryTask = region is null ? Task.Delay(Timeout.Infinite, active.Token) :
                 WatchBoundaryAsync(capture, region.Value, monitorHint, active.Token);
@@ -110,15 +112,16 @@ public static class InputControlClient
     }
 
     private static async Task SendEventsAsync(MultiplexedProtocolPeer peer, WindowsInputCapture capture,
-        uint sessionId, CancellationToken token, Action onSent)
+        uint sessionId, CancellationToken token, Action onSent, IInputPipelineMetrics? metrics)
     {
-        var batch = new List<InputEvent>(InputWire.MaxEventsPerFrame);
+        var batch = new List<CapturedInput>(InputWire.MaxEventsPerFrame);
         await foreach (var input in capture.Events.ReadAllAsync(token).ConfigureAwait(false))
         {
             batch.Add(input);
             while (batch.Count < InputWire.MaxEventsPerFrame && capture.Events.TryRead(out var next))
                 batch.Add(next);
             await SendWithTimeoutAsync(peer, sessionId, batch, token).ConfigureAwait(false);
+            if (metrics is not null) metrics.Record(new(InputPipelineStage.Send, Stopwatch.GetTimestamp(), batch.Count));
             onSent();
             batch.Clear();
         }
@@ -130,18 +133,19 @@ public static class InputControlClient
         while (true)
         {
             await Task.Delay(TimeSpan.FromMilliseconds(500), token).ConfigureAwait(false);
-            await SendWithTimeoutAsync(peer, sessionId, [new InputEvent(InputEventKind.KeepAlive)], token)
+            await SendWithTimeoutAsync(peer, sessionId,
+                [new CapturedInput(new InputEvent(InputEventKind.KeepAlive), 0, 0)], token)
                 .ConfigureAwait(false);
         }
     }
 
     private static async Task SendWithTimeoutAsync(MultiplexedProtocolPeer peer, uint sessionId,
-        IReadOnlyList<InputEvent> events, CancellationToken token)
+        IReadOnlyList<CapturedInput> events, CancellationToken token)
     {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(TimeSpan.FromSeconds(3));
         await peer.SendAsync(new ProtocolMessage(MessageKind.StreamData, 0, sessionId,
-            "input.event", InputWire.Encode(events)), timeout.Token).ConfigureAwait(false);
+            "input.event", InputWire.Encode(events.Select(item => item.Event).ToArray())), timeout.Token).ConfigureAwait(false);
     }
 
     private static async Task ObserveCancelledAsync(Task task)
