@@ -10,6 +10,10 @@ public sealed record WindowsMonitor(string DeviceName, string FriendlyName, stri
 /// <summary>Reads Windows' native extended-desktop monitor rectangles and identifies the XAS IDD.</summary>
 public static class WindowsMonitorTopology
 {
+    private const int EnumCurrentSettings = -1;
+    private const uint DmPosition = 0x00000020;
+    private const uint CdsUpdateRegistry = 0x00000001;
+    private const int DispChangeSuccessful = 0;
     public static IReadOnlyList<WindowsMonitor> Enumerate()
     {
         if (!OperatingSystem.IsWindows()) return [];
@@ -134,6 +138,24 @@ public static class WindowsMonitorTopology
         return locals.Length != 0 && SetCursorPos(locals[0].X, locals[0].Y);
     }
 
+    /// <summary>Moves one extended-desktop display to an exact desktop origin and persists the layout in Windows.</summary>
+    public static bool TryMove(string deviceName, int left, int top)
+    {
+        if (!OperatingSystem.IsWindows() || string.IsNullOrWhiteSpace(deviceName)) return false;
+        var mode = new DevMode
+        {
+            DeviceName = string.Empty,
+            FormName = string.Empty,
+            Size = (ushort)Marshal.SizeOf<DevMode>()
+        };
+        if (!EnumDisplaySettingsEx(deviceName, EnumCurrentSettings, ref mode, 0)) return false;
+        mode.Fields |= DmPosition;
+        mode.PositionX = left;
+        mode.PositionY = top;
+        return ChangeDisplaySettingsEx(deviceName, ref mode, IntPtr.Zero, CdsUpdateRegistry, IntPtr.Zero)
+            == DispChangeSuccessful;
+    }
+
     private static bool Overlaps(WindowsCaptureRegion a, WindowsCaptureRegion b) =>
         a.Left < b.Right && b.Left < a.Right && a.Top < b.Bottom && b.Top < a.Bottom;
 
@@ -157,6 +179,19 @@ public static class WindowsMonitorTopology
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceId;
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
     }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct DevMode
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
+        public ushort SpecVersion, DriverVersion, Size, DriverExtra;
+        public uint Fields;
+        public int PositionX, PositionY;
+        public uint DisplayOrientation, DisplayFixedOutput;
+        public short Color, Duplex, YResolution, TTOption, Collate;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string FormName;
+        public ushort LogPixels;
+        public uint BitsPerPel, PelsWidth, PelsHeight, DisplayFlags, DisplayFrequency,
+            IcmMethod, IcmIntent, MediaType, DitherType, Reserved1, Reserved2, PanningWidth, PanningHeight;
+    }
     [DllImport("user32.dll", SetLastError = true)] private static extern bool EnumDisplayMonitors(
         IntPtr hdc, IntPtr rect, MonitorEnum callback, IntPtr data);
     [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW", SetLastError = true, CharSet = CharSet.Unicode)]
@@ -165,6 +200,12 @@ public static class WindowsMonitorTopology
     [DllImport("user32.dll", EntryPoint = "EnumDisplayDevicesW", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool EnumDisplayDevices([MarshalAs(UnmanagedType.LPWStr)] string? deviceName, uint index,
         ref DisplayDevice device, uint flags);
+    [DllImport("user32.dll", EntryPoint = "EnumDisplaySettingsExW", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool EnumDisplaySettingsEx([MarshalAs(UnmanagedType.LPWStr)] string deviceName,
+        int modeNum, ref DevMode mode, uint flags);
+    [DllImport("user32.dll", EntryPoint = "ChangeDisplaySettingsExW", CharSet = CharSet.Unicode)]
+    private static extern int ChangeDisplaySettingsEx([MarshalAs(UnmanagedType.LPWStr)] string deviceName,
+        ref DevMode mode, IntPtr hwnd, uint flags, IntPtr lParam);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool GetCursorPos(out Point point);
     [DllImport("user32.dll", SetLastError = true)] private static extern bool SetCursorPos(int x, int y);
 }

@@ -47,6 +47,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
     private string? _ownedMonitorHardwareId;
     private CancellationTokenSource? _keepAlive;
     private Task? _keepAliveLoop;
+    private (int Left, int Top)? _preferredPosition;
 
     /// <summary>
     /// Monitors this daemon created, persisted so a later run can reclaim them. SudoVDA has no request that
@@ -55,7 +56,8 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
     /// </summary>
     private static string StatePath => Path.Combine(AppPaths.Root, "virtual-display.json");
 
-    private sealed record AttachmentRecord(Guid MonitorId, string HardwareId, string DeviceName);
+    private sealed record AttachmentRecord(Guid MonitorId, string HardwareId, string DeviceName,
+        int? Left = null, int? Top = null);
 
     public bool IsAvailable => OperatingSystem.IsWindows() && DriverPresent.Value;
 
@@ -108,6 +110,16 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
                     $"Windows did not publish a {modeWidth}x{modeHeight} virtual monitor.");
             monitorId = created.MonitorId;
             _ownedMonitorHardwareId = created.MonitorHardwareId;
+            if (_preferredPosition is { } position)
+            {
+                if (WindowsMonitorTopology.TryMove(created.DeviceName, position.Left, position.Top))
+                {
+                    log?.Invoke($"Restored virtual display position to ({position.Left},{position.Top}).");
+                    await WaitForPositionAsync(created.DeviceName, position.Left, position.Top, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                else log?.Invoke($"Could not restore virtual display position to ({position.Left},{position.Top}).");
+            }
             Remember(created);
             StartKeepAlive();
             log?.Invoke($"Virtual display {created.DeviceName} active at " +
@@ -126,7 +138,12 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
         var removed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var record in records)
         {
-            if (!WindowsMonitorTopology.Exists(record.HardwareId)) continue; // Already gone; drop the record.
+            var current = VirtualMonitors().FirstOrDefault(m =>
+                m.HardwareId.Equals(record.HardwareId, StringComparison.OrdinalIgnoreCase));
+            if (current is not null) _preferredPosition = (current.Region.Left, current.Region.Top);
+            else if (record.Left is not null && record.Top is not null)
+                _preferredPosition = (record.Left.Value, record.Top.Value);
+            if (current is null) continue; // Already gone; drop the record after preserving its last saved position.
             try
             {
                 SudoVdaDriver.Remove(device, record.MonitorId);
@@ -178,8 +195,14 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
         }
     }
 
-    private static void Remember(VirtualDisplayAttachment attachment) =>
-        WriteRecords([new(attachment.MonitorId, attachment.MonitorHardwareId, attachment.DeviceName)]);
+    private void Remember(VirtualDisplayAttachment attachment)
+    {
+        var monitor = VirtualMonitors().FirstOrDefault(m =>
+            m.HardwareId.Equals(attachment.MonitorHardwareId, StringComparison.OrdinalIgnoreCase));
+        if (monitor is not null) _preferredPosition = (monitor.Region.Left, monitor.Region.Top);
+        WriteRecords([new(attachment.MonitorId, attachment.MonitorHardwareId, attachment.DeviceName,
+            _preferredPosition?.Left, _preferredPosition?.Top)]);
+    }
 
     private static void Forget(Guid monitorId) =>
         WriteRecords([.. ReadRecords().Where(record => record.MonitorId != monitorId)]);
@@ -256,8 +279,36 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
                 catch (OperationCanceledException) { return; }
                 if (!SudoVdaDriver.Ping(device))
                     log?.Invoke("SudoVDA keepalive ping failed; the driver may drop the virtual display.");
+                RememberCurrentPosition();
             }
         });
+    }
+
+    private void RememberCurrentPosition()
+    {
+        if (_ownedMonitorId is not { } monitorId || _ownedMonitorHardwareId is not { } hardwareId) return;
+        var monitor = VirtualMonitors().FirstOrDefault(m =>
+            m.HardwareId.Equals(hardwareId, StringComparison.OrdinalIgnoreCase));
+        if (monitor is null) return;
+        var position = (monitor.Region.Left, monitor.Region.Top);
+        if (_preferredPosition == position) return;
+        _preferredPosition = position;
+        WriteRecords([new(monitorId, hardwareId, monitor.DeviceName, position.Left, position.Top)]);
+        log?.Invoke($"Remembered virtual display position ({position.Left},{position.Top}).");
+    }
+
+    private static async Task WaitForPositionAsync(string deviceName, int left, int top,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var monitor = WindowsMonitorTopology.Enumerate().FirstOrDefault(m =>
+                m.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase));
+            if (monitor is not null && monitor.Region.Left == left && monitor.Region.Top == top) return;
+            await Task.Delay(50, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>Waits for Windows to publish a monitor at the requested mode on the virtual adapter.</summary>

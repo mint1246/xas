@@ -83,16 +83,25 @@ public static class WindowsMonitorHandoff
                 if (token.IsCancellationRequested) break;
                 if (refresh)
                 {
-                    log?.Invoke("Remote display metadata changed; refreshing the virtual monitor.");
                     var updatedDisplay = peer.Display;
-                    if (updatedDisplay is null)
+                    var metadataChanged = !Equals(updatedDisplay, attachedDisplay);
+                    if (!metadataChanged && topologyChanged)
                     {
+                        // Moving/rearranging monitors in Windows must only rebind the capture rectangle.
+                        // Recreating SudoVDA here makes ordinary layout edits destroy the monitor and loses
+                        // the user's chosen desktop position.
+                        log?.Invoke("Windows display topology changed; rebinding input to the existing virtual monitor.");
+                    }
+                    else if (updatedDisplay is null)
+                    {
+                        log?.Invoke("Remote display disappeared; removing the virtual monitor.");
                         await controller.DetachAsync(token).ConfigureAwait(false);
                         attachment = null;
                         attachedDisplay = null;
                     }
-                    else
+                    else if (metadataChanged)
                     {
+                        log?.Invoke("Remote display metadata changed; refreshing the virtual monitor.");
                         attachment = await controller.AttachAsync(updatedDisplay, token).ConfigureAwait(false);
                         attachedDisplay = updatedDisplay;
                     }
