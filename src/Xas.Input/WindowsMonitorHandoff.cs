@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using System.Diagnostics;
 using Xas.Core;
 using Xas.Input.Display;
 
@@ -10,7 +11,16 @@ public static class WindowsMonitorHandoff
     public static async Task RunAsync(IHotInputPeer peer, CancellationToken token, Action<string>? log = null)
     {
         ArgumentNullException.ThrowIfNull(peer);
-        if (!OperatingSystem.IsWindows() || !Environment.UserInteractive) return;
+        if (!OperatingSystem.IsWindows()) return;
+        // XAS is launched into the logged-in user's desktop by the background Windows service. In that
+        // arrangement Environment.UserInteractive is not a reliable indicator: the process may inherit
+        // service-style launch characteristics even though it is genuinely running in the interactive
+        // user's session. Session 0 is the actual boundary that cannot own desktop input/display state.
+        if (Process.GetCurrentProcess().SessionId == 0)
+        {
+            log?.Invoke("KVM handoff is unavailable from Windows Session 0.");
+            return;
+        }
 
         await using var controller = new SudoVdaDisplayController(log);
         if (!controller.IsAvailable)

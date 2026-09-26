@@ -55,6 +55,14 @@ internal static class WindowsKvmCoordinator
                 activeStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 log?.Invoke($"KVM handoff targeting {configured!.Name} ({session.DeviceId}).");
                 activeTask = WindowsMonitorHandoff.RunAsync(session, activeStop.Token, log);
+                _ = activeTask.ContinueWith(_ => Signal(), CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
+                // A failed attach must not strand the daemon forever waiting for an unrelated peer/config
+                // event. The completion continuation wakes this loop; throttle retries so a persistent
+                // driver failure cannot become a tight attach loop.
+                if (activeTask.IsCompleted)
+                    await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
