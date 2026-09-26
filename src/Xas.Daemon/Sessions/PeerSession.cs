@@ -27,6 +27,7 @@ public sealed class PeerSession(string deviceId, string name) : IHotInputPeer, I
     public string DeviceId { get; } = deviceId;
     public DisplayMetadata? Display { get { lock (_gate) return _display; } }
     public bool RealtimeReady { get { lock (_gate) return _lanes.ContainsKey(PeerLane.Realtime); } }
+    public bool BulkReady { get { lock (_gate) return _lanes.ContainsKey(PeerLane.Bulk); } }
     public bool Online { get { lock (_gate) return _lanes.ContainsKey(PeerLane.Control); } }
     public event Action? Changed;
     public event Action? Disconnected;

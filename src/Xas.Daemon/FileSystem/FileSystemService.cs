@@ -11,6 +11,8 @@ public sealed class FileSystemService(PeerPermissionStore permissions, LocalConf
 {
     private readonly LocalFileSystemBackend _backend = new(configuration);
 
+    internal RemoteVolume[] GetVolumesSnapshot() => _backend.GetVolumes();
+
     public async ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
         CancellationToken cancellationToken)
     {

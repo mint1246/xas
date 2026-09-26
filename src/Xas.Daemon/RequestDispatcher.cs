@@ -26,6 +26,7 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
     private readonly FileSystemService _fileSystem = new(permissions, configuration ?? new LocalConfiguration());
 
     internal ClipboardService Clipboard => _clipboard;
+    internal FileSystemService FileSystem => _fileSystem;
 
     public async ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, CancellationToken cancellationToken)

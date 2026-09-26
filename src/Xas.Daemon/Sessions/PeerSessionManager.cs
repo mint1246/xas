@@ -14,6 +14,7 @@ using Xas.Daemon.Input;
 using Xas.Daemon.Interactive;
 using Xas.Daemon.Shell;
 using Xas.Daemon.Display;
+using Xas.Core.FileSystem;
 
 namespace Xas.Daemon.Sessions;
 
@@ -37,6 +38,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
     private LanDiscoveryService? _discovery;
     private Task? _maintenance;
     private Task? _displayPublisher;
+    private Task? _volumePublisher;
     private int _disposed;
 
     public PeerSessionManager(DeviceIdentity identity, PeerTrustStore trust, PeerPermissionStore permissions,
@@ -56,6 +58,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
 
     public event Action<PeerSessionSnapshot>? SessionChanged;
     public event Action<string>? SessionRemoved;
+    public event Action<string, IReadOnlyList<RemoteVolume>>? RemoteVolumesChanged;
 
     public IReadOnlyList<PeerSessionSnapshot> GetSnapshots() => _sessions.Values
         .Select(s => s.Snapshot).OrderBy(s => s.DeviceId, StringComparer.Ordinal).ToArray();
@@ -113,6 +116,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
         }
         _maintenance = MaintainConnectionsAsync(_shutdown.Token);
         if (OperatingSystem.IsLinux()) _displayPublisher = PublishDisplayChangesAsync(_shutdown.Token);
+        _volumePublisher = PublishVolumeChangesAsync(_shutdown.Token);
         _configuration.Changed += OnConfigurationChanged;
     }
 
@@ -300,6 +304,16 @@ public sealed class PeerSessionManager : IAsyncDisposable
             }
             if (selected == PeerLane.Control && message.Method == "clipboard.changed" && message.Kind == MessageKind.Event)
                 return _dispatcher.Clipboard.ApplyChangedEventAsync(deviceId, message, token);
+            if (selected == PeerLane.Control && message.Method == "fs.volumes.changed" && message.Kind == MessageKind.Event &&
+                message.RequestId == 0 && message.StreamId == 0)
+            {
+                RemoteVolume[] volumes;
+                try { volumes = RemoteFileSystemWire.Decode<RemoteVolume[]>(message.Payload); }
+                catch (Exception ex) when (ex is JsonException or InvalidDataException)
+                { throw new InvalidDataException("Invalid fs.volumes.changed payload.", ex); }
+                RemoteVolumesChanged?.Invoke(deviceId, volumes);
+                return ValueTask.CompletedTask;
+            }
             return message.Method switch
             {
                 "shell.input" => interactive.HandleMessageAsync(message),
@@ -398,6 +412,41 @@ public sealed class PeerSessionManager : IAsyncDisposable
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
     }
 
+    private async Task PublishVolumeChangesAsync(CancellationToken token)
+    {
+        RemoteVolume[] previous = [];
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        try
+        {
+            while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
+            {
+                RemoteVolume[] current;
+                try
+                {
+                    current = _dispatcher.FileSystem.GetVolumesSnapshot()
+                        .Where(v => v.Kind == "removable")
+                        .OrderBy(v => v.Id, StringComparer.Ordinal)
+                        .ToArray();
+                }
+                catch (Exception) when (!token.IsCancellationRequested) { continue; }
+                if (current.SequenceEqual(previous)) continue;
+                previous = current;
+                var payload = RemoteFileSystemWire.Encode(current);
+                foreach (var session in _sessions.Values)
+                {
+                    if (!session.Online || !_permissions.IsAllowed(session.DeviceId, Capability.FileSystem)) continue;
+                    try
+                    {
+                        await session.SendAsync(PeerLane.Control,
+                            new ProtocolMessage(MessageKind.Event, 0, 0, "fs.volumes.changed", payload), token).ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is IOException or ObjectDisposedException) { }
+                }
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+    }
+
     private bool IsPreferred(bool outbound, string peerId) =>
         outbound == (string.CompareOrdinal(_identity.DeviceId, peerId) < 0);
 
@@ -408,6 +457,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
         _shutdown.Cancel();
         if (_maintenance is not null) { try { await _maintenance.ConfigureAwait(false); } catch (OperationCanceledException) { } }
         if (_displayPublisher is not null) { try { await _displayPublisher.ConfigureAwait(false); } catch (OperationCanceledException) { } }
+        if (_volumePublisher is not null) { try { await _volumePublisher.ConfigureAwait(false); } catch (OperationCanceledException) { } }
         if (_discovery is not null)
         {
             _discovery.PeerUpdated -= OnPeerUpdated;

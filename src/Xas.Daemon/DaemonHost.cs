@@ -13,6 +13,7 @@ using Xas.Daemon.Sessions;
 using Xas.Daemon.Pairing;
 using Xas.Daemon.Web;
 using Xas.Daemon.LocalIpc;
+using Xas.Daemon.FileSystem.Mount;
 using Xas.Input;
 
 namespace Xas.Daemon;
@@ -79,6 +80,8 @@ public sealed class DaemonHost
         using var daemonStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         listener.Start();
         Task kvmCoordinator = Task.CompletedTask;
+        RemoteMountManager? remoteMounts = null;
+        Task remoteMountTask = Task.CompletedTask;
         Task localIpcTask = Task.CompletedTask;
         try
         {
@@ -88,8 +91,13 @@ public sealed class DaemonHost
             await web.StartAsync(cancellationToken);
             localIpcTask = localIpc.RunAsync(daemonStop.Token);
             if (OperatingSystem.IsWindows())
+            {
                 kvmCoordinator = WindowsKvmCoordinator.RunAsync(configuration, PeerSessions, daemonStop.Token,
                     message => Console.Error.WriteLine(message));
+                remoteMounts = new RemoteMountManager(configuration, PeerSessions,
+                    log: message => Console.Error.WriteLine(message));
+                remoteMountTask = remoteMounts.RunAsync(daemonStop.Token);
+            }
             Console.WriteLine($"xas daemon listening on TCP {_port}; device {_identity.DeviceId}");
             var clients = new HashSet<Task>();
             while (!cancellationToken.IsCancellationRequested)
@@ -109,6 +117,9 @@ public sealed class DaemonHost
             daemonStop.Cancel();
             try { await kvmCoordinator.ConfigureAwait(false); }
             catch (OperationCanceledException) when (daemonStop.IsCancellationRequested) { }
+            try { await remoteMountTask.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (daemonStop.IsCancellationRequested) { }
+            if (remoteMounts is not null) await remoteMounts.DisposeAsync().ConfigureAwait(false);
             try { await localIpcTask.ConfigureAwait(false); }
             catch (OperationCanceledException) when (daemonStop.IsCancellationRequested) { }
             await _input.DisposeAsync();

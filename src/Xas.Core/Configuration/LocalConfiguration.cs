@@ -46,6 +46,7 @@ public sealed class LocalConfiguration
     public string? DefaultDeviceId { get { lock (_gate) return _settings.DefaultDeviceId; } }
     public IReadOnlyList<ConfiguredPeer> Peers { get { lock (_gate) return _settings.Peers.ToArray(); } }
     public bool AutoExposeRemovable { get { lock (_gate) return _settings.AutoExposeRemovable; } }
+    public bool AutoMountRemoteRemovable { get { lock (_gate) return _settings.AutoMountRemoteRemovable; } }
     public IReadOnlyList<FileSystemExport> FileSystemExports { get { lock (_gate) return _settings.FileSystemExports.ToArray(); } }
 
     public ConfiguredPeer? Resolve(string? idPrefix)
@@ -102,6 +103,12 @@ public sealed class LocalConfiguration
         Changed?.Invoke();
     }
 
+    public void SetAutoMountRemoteRemovable(bool enabled)
+    {
+        lock (_gate) { _settings.AutoMountRemoteRemovable = enabled; Save(); }
+        Changed?.Invoke();
+    }
+
     public void UpsertFileSystemExport(FileSystemExport export)
     {
         ArgumentNullException.ThrowIfNull(export);
@@ -149,6 +156,7 @@ public sealed class LocalConfiguration
         public string? DefaultDeviceId { get; set; }
         public ConfiguredPeer[] Peers { get; set; } = [];
         public bool AutoExposeRemovable { get; set; } = true;
+        public bool AutoMountRemoteRemovable { get; set; } = true;
         public FileSystemExport[] FileSystemExports { get; set; } = [];
 
         public Settings() { }

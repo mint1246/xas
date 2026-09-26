@@ -10,6 +10,7 @@ public interface IRemoteFileSystemMountAdapter : IAsyncDisposable
 {
     bool IsAvailable { get; }
     string PlatformName { get; }
+    string? MountedAt { get; }
     ValueTask MountAsync(string mountPoint, RemoteVolume volume, IRemoteFileSystemOperations remoteFileSystem,
         CancellationToken cancellationToken);
     ValueTask UnmountAsync(CancellationToken cancellationToken);
@@ -35,6 +36,7 @@ public sealed class UnavailableRemoteFileSystemMountAdapter(string platformName)
 {
     public bool IsAvailable => false;
     public string PlatformName { get; } = platformName;
+    public string? MountedAt => null;
     public ValueTask MountAsync(string mountPoint, RemoteVolume volume, IRemoteFileSystemOperations remoteFileSystem,
         CancellationToken cancellationToken) =>
         ValueTask.FromException(new PlatformNotSupportedException($"A {PlatformName} filesystem mount adapter is not installed."));
