@@ -11,7 +11,7 @@ internal static class Program
             var localResult = await LocalSetupCommands.TryRunAsync(args);
             if (localResult is not null) return localResult.Value;
             using var client = new LocalDaemonClient(
-                Console.IsInputRedirected ? Console.OpenStandardInput() : Stream.Null,
+                Console.OpenStandardInput(),
                 Console.OpenStandardOutput(), Console.OpenStandardError());
             return await new XasCommandLine(client, Console.Out, Console.Error).RunAsync(args);
         }
@@ -263,7 +263,8 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         writer.WriteLine("  display                 Report virtual display driver and handoff state (Windows)");
         writer.WriteLine("  (no arguments)          Open an interactive shell (requires PTY support)");
         writer.WriteLine("  identity                Show local device ID and fingerprint");
-        writer.WriteLine("  pair <id> <fp> <host> [port] [name]  Approve a peer locally");
+        writer.WriteLine("  pair [name|short-id] [--kvm|--trust-only]  Pair a discovered nearby device");
+        writer.WriteLine("  pair-manual <id> <fp> <host> [port]       Recovery/manual pairing");
         writer.WriteLine("  peers                   List locally approved peers");
         writer.WriteLine("  allow|deny <id> <capability>        Set local peer permission");
         writer.WriteLine("  revoke <id>             Remove local trust, permissions, and endpoint");

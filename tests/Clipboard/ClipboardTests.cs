@@ -40,6 +40,20 @@ public static class ClipboardTests
             try { await service.HandleAsync("peer", spoof, CancellationToken.None); throw new Exception("Spoofed clipboard origin succeeded."); }
             catch (InvalidDataException) { }
 
+            var eventPayload = new ClipboardPayload("peer", 99, "event text");
+            var changedMessage = new ProtocolMessage(MessageKind.Event, 0, 0, "clipboard.changed",
+                JsonSerializer.SerializeToUtf8Bytes(eventPayload, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+            await service.ApplyChangedEventAsync("peer", changedMessage, CancellationToken.None);
+            var eventImported = Decode(await service.HandleAsync("peer", get, CancellationToken.None));
+            Assert(eventImported is { Origin: "peer", Version: 99, Text: "event text" },
+                "Incoming clipboard.changed event was not applied with its origin/version.");
+
+            var selfEvent = changedMessage with { Payload = JsonSerializer.SerializeToUtf8Bytes(
+                new ClipboardPayload("local", 100, "must not loop"), new JsonSerializerOptions(JsonSerializerDefaults.Web)) };
+            await service.ApplyChangedEventAsync("peer", selfEvent, CancellationToken.None);
+            var afterSelfEvent = Decode(await service.HandleAsync("peer", get, CancellationToken.None));
+            Assert(afterSelfEvent.Text == "event text", "A clipboard event originating locally looped back into the clipboard.");
+
             var notifications = new NotificationClipboard("remote text", 2,
                 [new ClipboardTextSnapshot("remote text", 2), new ClipboardTextSnapshot("local edit", 3)]);
             var eventService = new ClipboardService("local", permissions, notifications);

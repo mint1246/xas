@@ -65,9 +65,9 @@ public sealed class DaemonHost
         var listener = new TcpListener(IPAddress.Any, _port);
         await using var sessions = PeerSessions;
         await using var pairing = new PairingService(_identity, _trust, checked(_port + 1), Environment.MachineName);
-        await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, pairing);
         var configuration = new LocalConfiguration();
-        var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration);
+        await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, configuration, pairing);
+        var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration, _trust, _permissions);
         using var daemonStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var handoffStop = CancellationTokenSource.CreateLinkedTokenSource(daemonStop.Token);
         listener.Start();

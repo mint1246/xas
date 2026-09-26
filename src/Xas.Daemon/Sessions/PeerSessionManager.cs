@@ -56,6 +56,8 @@ public sealed class PeerSessionManager : IAsyncDisposable
     public IReadOnlyList<PeerSessionSnapshot> GetSnapshots() => _sessions.Values
         .Select(s => s.Snapshot).OrderBy(s => s.DeviceId, StringComparer.Ordinal).ToArray();
 
+    public IReadOnlyList<DiscoveredPeer> GetDiscoveredPeers() => _discovery?.GetPeers() ?? [];
+
     public PeerSession? GetSession(string deviceId) => _sessions.GetValueOrDefault(deviceId);
 
     public void UpdateConfiguredPeers(IReadOnlyList<ConfiguredPeer> peers)
@@ -199,6 +201,14 @@ public sealed class PeerSessionManager : IAsyncDisposable
         await using var streamingShell = new StreamingCommandManager(deviceId, _permissions, frames.SendAsync);
         await using var files = new FileTransferServer(deviceId, _permissions, frames.SendAsync);
         await using var input = _input.CreateSession(deviceId);
+        using var clipboardStop = CancellationTokenSource.CreateLinkedTokenSource(token);
+        Task clipboardPublisher = Task.CompletedTask;
+        var clipboardStarted = 0;
+        void StartClipboardPublisher(PeerLane selected)
+        {
+            if (selected != PeerLane.Control || Interlocked.Exchange(ref clipboardStarted, 1) != 0) return;
+            clipboardPublisher = _dispatcher.Clipboard.RunChangeNotificationsAsync(deviceId, frames.SendAsync, clipboardStop.Token);
+        }
         PeerLane? lane = expectedLane;
         var laneGate = new object();
         var managedLane = expectedLane is not null;
@@ -227,6 +237,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
                     throw new IOException("A preferred lane connection is already active.");
                 attached = true;
                 _lanes.TryAdd(protocol!, selected);
+                StartClipboardPublisher(selected);
             }
             if (message.Method == "session.lane.open")
             {
@@ -261,6 +272,8 @@ public sealed class PeerSessionManager : IAsyncDisposable
                 catch (JsonException) { throw new InvalidDataException("Invalid display.changed payload."); }
                 return ValueTask.CompletedTask;
             }
+            if (selected == PeerLane.Control && message.Method == "clipboard.changed" && message.Kind == MessageKind.Event)
+                return _dispatcher.Clipboard.ApplyChangedEventAsync(deviceId, message, token);
             return message.Method switch
             {
                 "shell.input" => interactive.HandleMessageAsync(message),
@@ -279,6 +292,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
                     throw new IOException("A preferred lane connection is already active.");
                 attached = true;
                 _lanes.TryAdd(protocol, outboundLane);
+                StartClipboardPublisher(outboundLane);
                 var hello = await protocol.RequestAsync("session.lane.open", System.Text.Encoding.UTF8.GetBytes(outboundLane.ToString()),
                     cancellationToken: token).ConfigureAwait(false);
                 if (hello.Kind != MessageKind.Response) throw new InvalidDataException("Invalid lane handshake response.");
@@ -289,6 +303,9 @@ public sealed class PeerSessionManager : IAsyncDisposable
         }
         finally
         {
+            clipboardStop.Cancel();
+            try { await clipboardPublisher.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (clipboardStop.IsCancellationRequested) { }
             _lanes.TryRemove(protocol, out _);
             if (attached) session.Detach(lane ?? PeerLane.Control, protocol);
             await protocol.DisposeAsync().ConfigureAwait(false);

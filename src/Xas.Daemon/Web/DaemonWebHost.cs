@@ -4,6 +4,8 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Xas.Core;
+using Xas.Core.Configuration;
+using Xas.Core.LocalIpc;
 using Xas.Core.Security;
 using Xas.Daemon.Pairing;
 using Xas.Daemon.Sessions;
@@ -19,6 +21,7 @@ public sealed class DaemonWebHost : IAsyncDisposable
     private readonly PeerTrustStore _trust;
     private readonly PeerPermissionStore _permissions;
     private readonly PairingService? _pairing;
+    private readonly LocalConfiguration _configuration;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stop = new();
     private readonly Dictionary<string, string> _csrfBySession = new(StringComparer.Ordinal);
@@ -26,11 +29,12 @@ public sealed class DaemonWebHost : IAsyncDisposable
     private Task? _acceptLoop;
 
     public DaemonWebHost(PeerSessionManager sessions, PeerTrustStore trust, PeerPermissionStore permissions,
-        PairingService? pairing = null, int port = 47832)
+        LocalConfiguration configuration, PairingService? pairing = null, int port = 47832)
     {
         _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
         _trust = trust ?? throw new ArgumentNullException(nameof(trust));
         _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
+        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _pairing = pairing;
         if (port is < 0 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
         _listener = new TcpListener(IPAddress.Loopback, port);
@@ -119,7 +123,10 @@ public sealed class DaemonWebHost : IAsyncDisposable
                         };
                     });
                     var pending = _pairing?.ListPending() ?? [];
-                    await RespondJsonAsync(stream, 200, new { peers, pending, capabilities = Enum.GetNames<Capability>() }, token);
+                    var capabilities = Enum.GetValues<Capability>()
+                        .Where(c => c != Capability.PrivilegedShell || OperatingSystem.IsWindows())
+                        .Select(c => c.ToString()).ToArray();
+                    await RespondJsonAsync(stream, 200, new { peers, pending, capabilities }, token);
                     return;
                 }
                 if (request.Method == "POST" && request.Path == "/api/permission")
@@ -134,7 +141,27 @@ public sealed class DaemonWebHost : IAsyncDisposable
                 if (request.Method == "POST" && request.Path == "/api/pairing/decision" && _pairing is not null)
                 {
                     var body = JsonSerializer.Deserialize<PairingDecisionRequest>(request.Body) ?? throw new InvalidDataException();
-                    await _pairing.ApproveAsync(body.PairingId, body.Approve, token).ConfigureAwait(false);
+                    var pending = _pairing.ListPending().FirstOrDefault(p => p.PairingId == body.PairingId)
+                        ?? throw new InvalidDataException("Pairing request not found or expired.");
+                    var preset = body.Preset?.ToLowerInvariant() switch
+                    {
+                        null or "personal" => PairPermissionPreset.Personal,
+                        "kvm" => PairPermissionPreset.Kvm,
+                        "none" or "trust-only" => PairPermissionPreset.None,
+                        _ => throw new InvalidDataException("Unknown pairing permission preset.")
+                    };
+                    var paired = await _pairing.ApproveAsync(body.PairingId, body.Approve, token).ConfigureAwait(false);
+                    if (body.Approve && !paired)
+                    {
+                        await RespondAsync(stream, 409, "application/json", "{\"error\":\"remote rejected pairing\"}", null, token);
+                        return;
+                    }
+                    if (paired)
+                    {
+                        _configuration.UpsertPeer(new ConfiguredPeer(pending.DeviceId, pending.DisplayName, pending.Address, pending.ControlPort));
+                        PairPermissionPresets.Apply(_permissions, pending.DeviceId, preset);
+                        _sessions.UpdateConfiguredPeers(_configuration.Peers);
+                    }
                     await RespondAsync(stream, 200, "application/json", "{\"ok\":true}", null, token);
                     return;
                 }
@@ -230,12 +257,12 @@ public sealed class DaemonWebHost : IAsyncDisposable
 <!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>xas local devices</title>
 <style>body{font:16px system-ui;max-width:1000px;margin:2rem auto;padding:0 1rem;background:#10151d;color:#e8edf5}h1{font-size:1.6rem}article{background:#1b2430;border-radius:12px;padding:1rem;margin:1rem 0}small{color:#9cacbf}button,select{padding:.4rem;margin:.2rem}button{cursor:pointer}.pending{border-left:4px solid #d9a441;padding-left:1rem}.cap{display:inline-block;margin:.25rem}</style>
 <h1>xas devices</h1><p><small>This management page is available only from this computer.</small></p><main id="app">Loading…</main>
-<script>const csrf='__CSRF__';async function api(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:{'X-Xas-CSRF':csrf,...(data?{'Content-Type':'application/json'}:{})},body:data?JSON.stringify(data):undefined});if(!r.ok)throw Error('Request failed');return r.json()}async function refresh(){const d=await api('/api/state');const root=document.querySelector('#app');root.replaceChildren();for(const p of d.peers){const a=document.createElement('article');a.innerHTML='<h2></h2><small></small><div class="caps"></div><button class="revoke">Revoke pairing</button>';a.querySelector('h2').textContent=p.Name+' · '+(p.Online?'online':'offline');a.querySelector('small').textContent=p.DeviceId+' · '+(p.Paired?'paired':'not paired')+(p.Endpoint?' · '+p.Endpoint:'');const caps=a.querySelector('.caps');for(const c of d.capabilities){const label=document.createElement('label');label.className='cap';const input=document.createElement('input');input.type='checkbox';input.checked=p.Permissions[c];input.onchange=()=>api('/api/permission',{deviceId:p.DeviceId,capability:c,allowed:input.checked});label.append(input,document.createTextNode(c));caps.append(label)}a.querySelector('.revoke').onclick=async()=>{await api('/api/revoke',{deviceId:p.DeviceId});refresh()};root.append(a)}for(const q of d.pending){const a=document.createElement('article');a.className='pending';a.innerHTML='<h2></h2><p></p><button>Approve</button> <button>Reject</button>';a.querySelector('h2').textContent='Pairing request: '+q.DisplayName;a.querySelector('p').textContent='Compare code on both devices: '+q.Code+' · '+q.Fingerprint;a.querySelectorAll('button')[0].onclick=()=>decide(q.PairingId,true);a.querySelectorAll('button')[1].onclick=()=>decide(q.PairingId,false);root.prepend(a)}}async function decide(id,approve){await api('/api/pairing/decision',{pairingId:id,approve});refresh()}refresh().catch(e=>document.querySelector('#app').textContent=e.message);setInterval(()=>refresh().catch(()=>{}),3000);</script></html>
+<script>const csrf='__CSRF__';async function api(path,data){const r=await fetch(path,{method:data?'POST':'GET',headers:{'X-Xas-CSRF':csrf,...(data?{'Content-Type':'application/json'}:{})},body:data?JSON.stringify(data):undefined});if(!r.ok)throw Error('Request failed');return r.json()}async function refresh(){const d=await api('/api/state');const root=document.querySelector('#app');root.replaceChildren();for(const p of d.peers){const a=document.createElement('article');a.innerHTML='<h2></h2><small></small><div class="caps"></div><button class="revoke">Revoke pairing</button>';a.querySelector('h2').textContent=p.Name+' · '+(p.Online?'online':'offline');a.querySelector('small').textContent=p.DeviceId+' · '+(p.Paired?'paired':'not paired')+(p.Endpoint?' · '+p.Endpoint:'');const caps=a.querySelector('.caps');for(const c of d.capabilities){const label=document.createElement('label');label.className='cap';const input=document.createElement('input');input.type='checkbox';input.checked=p.Permissions[c];input.onchange=()=>api('/api/permission',{deviceId:p.DeviceId,capability:c,allowed:input.checked});label.append(input,document.createTextNode(c));caps.append(label)}a.querySelector('.revoke').onclick=async()=>{await api('/api/revoke',{deviceId:p.DeviceId});refresh()};root.append(a)}for(const q of d.pending){const a=document.createElement('article');a.className='pending';a.innerHTML='<h2></h2><p></p><button data-preset="personal">Pair personal device</button> <button data-preset="kvm">KVM only</button> <button data-preset="none">Trust only</button> <button data-reject>Reject</button>';a.querySelector('h2').textContent='Pairing request: '+q.DisplayName;a.querySelector('p').textContent='Compare code on both devices: '+q.Code;a.querySelectorAll('button[data-preset]').forEach(b=>b.onclick=()=>decide(q.PairingId,true,b.dataset.preset));a.querySelector('button[data-reject]').onclick=()=>decide(q.PairingId,false,'none');root.prepend(a)}}async function decide(id,approve,preset){await api('/api/pairing/decision',{pairingId:id,approve,preset});refresh()}refresh().catch(e=>document.querySelector('#app').textContent=e.message);setInterval(()=>refresh().catch(()=>{}),3000);</script></html>
 """.Replace("__CSRF__", csrf, StringComparison.Ordinal);
 
     private sealed record Request(string Method, string Path, string Host, string Origin,
         Dictionary<string, string> Headers, string Body);
     private sealed record PermissionRequest(string DeviceId, string Capability, bool Allowed);
-    private sealed record PairingDecisionRequest(string PairingId, bool Approve);
+    private sealed record PairingDecisionRequest(string PairingId, bool Approve, string? Preset);
     private sealed record DeviceRequest(string DeviceId);
 }

@@ -71,7 +71,7 @@ public sealed class StreamingCommandManager : IAsyncDisposable
         if (!_permissions.IsAllowed(_peerId, Capability.Shell))
             throw new UnauthorizedAccessException("Shell access is not granted on this device for this peer.");
         var shellRequest = ShellWire.DecodeRequest(request.Payload);
-        if (shellRequest.Elevated && !_permissions.IsAllowed(_peerId, Capability.PrivilegedShell))
+        if (shellRequest.Elevated && OperatingSystem.IsWindows() && !_permissions.IsAllowed(_peerId, Capability.PrivilegedShell))
             throw new UnauthorizedAccessException("Privileged shell access is not granted on this device for this peer.");
         if (shellRequest.Mode == ShellMode.Interactive)
             throw new NotSupportedException("Interactive shells use the PTY/ConPTY protocol.");

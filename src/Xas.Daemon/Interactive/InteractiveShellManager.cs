@@ -88,7 +88,7 @@ public sealed class InteractiveShellManager : IAsyncDisposable
         if (columns is < 1 or > short.MaxValue || rows is < 1 or > short.MaxValue)
             throw new ArgumentOutOfRangeException(nameof(request), "Terminal dimensions must be from 1 through 32767.");
         var elevated = e.GetBoolean();
-        if (elevated && !_permissions.IsAllowed(_peerId, Capability.PrivilegedShell))
+        if (elevated && OperatingSystem.IsWindows() && !_permissions.IsAllowed(_peerId, Capability.PrivilegedShell))
             throw new UnauthorizedAccessException("Privileged shell access is not granted on this device for this peer.");
         IInteractiveShellBackend backend = elevated && OperatingSystem.IsWindows()
             ? new WindowsAdminBrokerInteractiveBackend() : _backend;

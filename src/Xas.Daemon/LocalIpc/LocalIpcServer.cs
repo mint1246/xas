@@ -8,6 +8,7 @@ using Xas.Core;
 using Xas.Core.Configuration;
 using Xas.Core.LocalIpc;
 using Xas.Core.Protocol;
+using Xas.Core.Security;
 using Xas.Core.Services;
 using Xas.Daemon.Pairing;
 using Xas.Daemon.Sessions;
@@ -16,12 +17,13 @@ namespace Xas.Daemon.LocalIpc;
 
 /// <summary>Per-user command endpoint. It exposes trusted daemon state without exposing network credentials.</summary>
 public sealed class LocalIpcServer(PeerSessionManager sessions, PairingService pairing,
-    LocalConfiguration configuration)
+    LocalConfiguration configuration, PeerTrustStore trust, PeerPermissionStore permissions)
 {
     private readonly PeerSessionManager _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
     private readonly PairingService _pairing = pairing ?? throw new ArgumentNullException(nameof(pairing));
     private readonly LocalConfiguration _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-    private readonly ConcurrentDictionary<string, (string Host, int Port)> _pairEndpoints = new(StringComparer.Ordinal);
+    private readonly PeerTrustStore _trust = trust ?? throw new ArgumentNullException(nameof(trust));
+    private readonly PeerPermissionStore _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -208,8 +210,28 @@ public sealed class LocalIpcServer(PeerSessionManager sessions, PairingService p
             {
                 var begin = JsonSerializer.Deserialize<LocalPairBegin>(request.Payload, LocalIpcProtocol.Json)
                     ?? throw new InvalidDataException("Invalid pair request.");
-                var pending = await _pairing.BeginAsync(begin.Host, begin.Port, begin.ExpectedDeviceId, token).ConfigureAwait(false);
-                _pairEndpoints[pending.PairingId] = (begin.Host, begin.Port);
+                if (begin.ControlPort is < 1 or >= 65535) throw new InvalidDataException("Invalid control port for pairing.");
+                var pending = await _pairing.BeginAsync(begin.Host, checked(begin.ControlPort + 1), begin.ExpectedDeviceId, token).ConfigureAwait(false);
+                return Response(request, JsonSerializer.SerializeToUtf8Bytes(pending, LocalIpcProtocol.Json));
+            }
+            case LocalIpcProtocol.PairCandidates:
+            {
+                var trusted = _trust.List().Select(p => p.DeviceId).ToHashSet(StringComparer.Ordinal);
+                var candidates = _sessions.GetDiscoveredPeers()
+                    .Where(p => !trusted.Contains(p.DeviceId))
+                    .Select(p => new LocalPairCandidate(p.DeviceId, p.Name, p.Address, p.TcpPort, p.LastSeen))
+                    .OrderBy(p => p.DisplayName, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(p => p.DeviceId, StringComparer.Ordinal)
+                    .ToArray();
+                return Response(request, JsonSerializer.SerializeToUtf8Bytes(candidates, LocalIpcProtocol.Json));
+            }
+            case LocalIpcProtocol.PairDiscover:
+            {
+                var target = JsonSerializer.Deserialize<LocalPairTarget>(request.Payload, LocalIpcProtocol.Json)
+                    ?? throw new InvalidDataException("Invalid discovered pair request.");
+                var candidate = ResolvePairCandidate(target.Query);
+                if (candidate.TcpPort >= 65535) throw new InvalidOperationException("The discovered device cannot expose the pairing port.");
+                var pending = await _pairing.BeginAsync(candidate.Address, checked(candidate.TcpPort + 1), candidate.DeviceId, token).ConfigureAwait(false);
                 return Response(request, JsonSerializer.SerializeToUtf8Bytes(pending, LocalIpcProtocol.Json));
             }
             case LocalIpcProtocol.PairList:
@@ -220,10 +242,16 @@ public sealed class LocalIpcServer(PeerSessionManager sessions, PairingService p
                     ?? throw new InvalidDataException("Invalid pair decision.");
                 var pending = _pairing.ListPending().FirstOrDefault(p => p.PairingId == decision.PairingId)
                     ?? throw new KeyNotFoundException("Pairing request not found or expired.");
-                await _pairing.ApproveAsync(decision.PairingId, decision.Approve, token).ConfigureAwait(false);
-                if (decision.Approve && _pairEndpoints.TryRemove(decision.PairingId, out var endpoint))
-                    _configuration.UpsertPeer(new ConfiguredPeer(pending.DeviceId, pending.DisplayName, endpoint.Host, endpoint.Port));
-                else _pairEndpoints.TryRemove(decision.PairingId, out _);
+                var paired = await _pairing.ApproveAsync(decision.PairingId, decision.Approve, token).ConfigureAwait(false);
+                if (decision.Approve && !paired)
+                    throw new InvalidOperationException("The other device rejected the pairing request or the pairing session failed.");
+                if (paired)
+                {
+                    if (string.IsNullOrWhiteSpace(pending.Address) || pending.ControlPort is < 1 or >= 65535)
+                        throw new InvalidDataException("Paired device did not provide a usable control endpoint.");
+                    _configuration.UpsertPeer(new ConfiguredPeer(pending.DeviceId, pending.DisplayName, pending.Address, pending.ControlPort));
+                    PairPermissionPresets.Apply(_permissions, pending.DeviceId, decision.Preset);
+                }
                 _sessions.UpdateConfiguredPeers(_configuration.Peers);
                 return Response(request, []);
             }
@@ -233,6 +261,21 @@ public sealed class LocalIpcServer(PeerSessionManager sessions, PairingService p
     }
 
     private ConfiguredPeer? Resolve(string? deviceId) => _configuration.Resolve(deviceId);
+
+    private Xas.Core.Discovery.DiscoveredPeer ResolvePairCandidate(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query)) throw new InvalidDataException("Pairing target is required.");
+        var trusted = _trust.List().Select(p => p.DeviceId).ToHashSet(StringComparer.Ordinal);
+        var candidates = _sessions.GetDiscoveredPeers().Where(p => !trusted.Contains(p.DeviceId)).ToArray();
+        var exactId = candidates.FirstOrDefault(p => string.Equals(p.DeviceId, query, StringComparison.Ordinal));
+        if (exactId is not null) return exactId;
+        var prefix = candidates.Where(p => p.DeviceId.StartsWith(query, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (prefix.Length == 1) return prefix[0];
+        var byName = candidates.Where(p => string.Equals(p.Name, query, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (byName.Length == 1) return byName[0];
+        if (prefix.Length > 1 || byName.Length > 1) throw new InvalidOperationException($"Pairing target '{query}' is ambiguous.");
+        throw new InvalidOperationException($"No unpaired discovered device matches '{query}'.");
+    }
 
     private static PeerLane LaneFor(string method) => method.StartsWith("input.", StringComparison.Ordinal)
         ? PeerLane.Realtime

@@ -19,6 +19,41 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
 
     public bool IsAvailable => backend.IsAvailable;
 
+    public async ValueTask ApplyChangedEventAsync(string peerId, ProtocolMessage message,
+        CancellationToken cancellationToken)
+    {
+        if (message.Kind != MessageKind.Event || message.RequestId != 0 || message.StreamId != 0 ||
+            message.Method != "clipboard.changed")
+            throw new InvalidDataException("Invalid clipboard change event.");
+        if (!permissions.IsAllowed(peerId, Capability.Clipboard))
+            throw new UnauthorizedAccessException("Clipboard access is not granted on this device for this peer.");
+        if (!backend.IsAvailable) throw new PlatformNotSupportedException("A user-session text clipboard is unavailable.");
+
+        ClipboardPayload payload;
+        try { payload = JsonSerializer.Deserialize<ClipboardPayload>(message.Payload, JsonOptions)
+            ?? throw new InvalidDataException("Empty clipboard.changed payload."); }
+        catch (JsonException ex) { throw new InvalidDataException("Invalid clipboard.changed JSON.", ex); }
+        if (string.IsNullOrWhiteSpace(payload.Origin) || payload.Text is null)
+            throw new InvalidDataException("clipboard.changed requires an origin and text.");
+        if (payload.Origin == localDeviceId) return;
+        if (Encoding.UTF8.GetByteCount(payload.Text) > MaxTextBytes)
+            throw new InvalidDataException("Clipboard text exceeds 256 KiB.");
+
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_importedOrigin == payload.Origin && _importedVersion == payload.Version && _importedText == payload.Text)
+                return;
+            await backend.SetTextAsync(payload.Text, cancellationToken).ConfigureAwait(false);
+            var after = await backend.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+            _importedChangeId = after.ChangeId;
+            _importedOrigin = payload.Origin;
+            _importedVersion = payload.Version;
+            _importedText = after.Text;
+        }
+        finally { _gate.Release(); }
+    }
+
     /// <summary>Publishes clipboard changes as events for the lifetime of an authenticated peer session.</summary>
     public async Task RunChangeNotificationsAsync(string peerId,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, CancellationToken cancellationToken)

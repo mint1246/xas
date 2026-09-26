@@ -45,11 +45,26 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
         return reply.Payload[0] == 1;
     }
 
-    public async Task<LocalPairPending> BeginPairingAsync(string host, int port, string? expectedDeviceId,
+    public async Task<LocalPairPending> BeginPairingAsync(string host, int controlPort, string? expectedDeviceId,
         CancellationToken cancellationToken)
     {
         var reply = await RequestAsync(LocalIpcProtocol.PairBegin,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalPairBegin(host, port, expectedDeviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+            JsonSerializer.SerializeToUtf8Bytes(new LocalPairBegin(host, controlPort, expectedDeviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<LocalPairPending>(reply.Payload, LocalIpcProtocol.Json)
+            ?? throw new InvalidDataException("The daemon returned an invalid pairing request.");
+    }
+
+    public async Task<IReadOnlyList<LocalPairCandidate>> ListPairingCandidatesAsync(CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.PairCandidates, [], cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<LocalPairCandidate[]>(reply.Payload, LocalIpcProtocol.Json)
+            ?? throw new InvalidDataException("The daemon returned an invalid pairing candidate list.");
+    }
+
+    public async Task<LocalPairPending> BeginDiscoveredPairingAsync(string query, CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.PairDiscover,
+            JsonSerializer.SerializeToUtf8Bytes(new LocalPairTarget(query), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
         return JsonSerializer.Deserialize<LocalPairPending>(reply.Payload, LocalIpcProtocol.Json)
             ?? throw new InvalidDataException("The daemon returned an invalid pairing request.");
     }
@@ -61,10 +76,11 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
             ?? throw new InvalidDataException("The daemon returned an invalid pairing list.");
     }
 
-    public async Task ApprovePairingAsync(string pairingId, bool approve, CancellationToken cancellationToken)
+    public async Task ApprovePairingAsync(string pairingId, bool approve, CancellationToken cancellationToken,
+        PairPermissionPreset preset = PairPermissionPreset.Personal)
     {
         _ = await RequestAsync(LocalIpcProtocol.PairApprove,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalPairDecision(pairingId, approve), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+            JsonSerializer.SerializeToUtf8Bytes(new LocalPairDecision(pairingId, approve, preset), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<int> RunShellAsync(ShellRequest request, string? deviceId, CancellationToken cancellationToken)

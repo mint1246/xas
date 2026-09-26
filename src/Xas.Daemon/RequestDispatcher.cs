@@ -23,6 +23,8 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
     private readonly LinuxDisplayMetadataService _display = new();
     private readonly FileSystemService _fileSystem = new(permissions);
 
+    internal ClipboardService Clipboard => _clipboard;
+
     public async ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, CancellationToken cancellationToken)
     {
@@ -71,7 +73,7 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
                 if (!permissions.IsAllowed(peerId, Capability.Shell))
                     throw new UnauthorizedAccessException("Shell access is not granted on this device for this peer.");
                 var shellRequest = ShellWire.DecodeRequest(request.Payload);
-                if (shellRequest.Elevated && !permissions.IsAllowed(peerId, Capability.PrivilegedShell))
+                if (shellRequest.Elevated && OperatingSystem.IsWindows() && !permissions.IsAllowed(peerId, Capability.PrivilegedShell))
                     throw new UnauthorizedAccessException("Privileged shell access is not granted on this device for this peer.");
                 if (shellRequest.Mode == ShellMode.Interactive) throw new NotSupportedException("Interactive PTY/ConPTY shell is not implemented.");
                 await using var stdout = new BoundedCaptureStream(450_000);
@@ -87,7 +89,7 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
                 if (!permissions.IsAllowed(peerId, Capability.Shell))
                     throw new UnauthorizedAccessException("Shell access is not granted on this device for this peer.");
                 var (shellRequest, inputBytes) = ShellWire.DecodeInvocation(request.Payload);
-                if (shellRequest.Elevated && !permissions.IsAllowed(peerId, Capability.PrivilegedShell))
+                if (shellRequest.Elevated && OperatingSystem.IsWindows() && !permissions.IsAllowed(peerId, Capability.PrivilegedShell))
                     throw new UnauthorizedAccessException("Privileged shell access is not granted on this device for this peer.");
                 if (shellRequest.Mode == ShellMode.Interactive) throw new NotSupportedException("Interactive PTY/ConPTY shell is not implemented.");
                 using var stdin = new MemoryStream(inputBytes, writable: false);
