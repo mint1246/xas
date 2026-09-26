@@ -4,4 +4,7 @@
     <OutputType Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('win-'))">WinExe</OutputType>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="../Xas.Core/Xas.Core.csproj" /><ProjectReference Include="../Xas.Input/Xas.Input.csproj" /></ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="winfsp.net" Version="2.2.26215" />
+  </ItemGroup>
 </Project>
