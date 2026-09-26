@@ -19,8 +19,10 @@
 - [x] Manual Windows input capture, authenticated input protocol, Input grants, exclusive lease, disconnect/timeout release, Windows SendInput receiver, and opt-in X11 XTest receiver source.
 - [x] Continuous plain-text clipboard sync with reconnect, echo suppression, deterministic simultaneous-edit resolution, and a network loopback test.
 - [x] Managed automatic Windows monitor-boundary handoff, absolute pointer protocol, Linux display metadata RPC, and topology/coordinate tests.
+- [x] Linux display metadata for GNOME on Wayland, read over Mutter's DisplayConfig D-Bus API, including logical-layout scale and transform handling.
 - [x] Source for one-monitor Windows IddCx driver and Wayland portal/libei input helper.
 - [x] Build the Windows x64 IddCx DLL with the Microsoft-signed WDK NuGet toolchain; verify its INF with Windows Driver, Universal, and WHQL rules.
+- [x] Replace the in-tree unsigned driver with the SudoVDA control channel: automatic monitor create/remove at the Linux display's mode, stable per-display monitor identity, driver watchdog keepalive, and adapter-based monitor discovery that needs no configuration.
 
 ## In progress
 
@@ -28,11 +30,14 @@
 - [ ] Validate the full interactive shell path between Windows and Linux.
 - [ ] Validate file copy and clipboard commands between a real Windows and Linux pair.
 - [ ] Validate clipboard sync on a physical Windows/Linux pair, including simultaneous edits and reconnect after sleep.
-- [ ] Generate/sign an installable catalog, install the IddCx package, extend it as a second Windows monitor, and validate native monitor identification.
+- [x] Exercise the SudoVDA control channel against an installed driver: create, reconfigure, and remove monitors, confirm the watchdog keepalive holds a monitor past its timeout, and confirm the monitor identity rules.
+- [x] Attach the virtual display at startup regardless of other virtual monitors, pin input to the monitor the daemon created, and recover when the driver will not republish a previously used identity.
+- [x] Read the remote display mode on GNOME Wayland through Mutter's DisplayConfig D-Bus API, including logical-layout scale.
+- [ ] Validate monitor-boundary handoff on a real Windows/Linux pair with the remote mode applied.
 - [x] Build the Wayland portal/libei helper on Ubuntu 24.04.
 - [ ] Validate compositor consent, absolute input, revocation, and release behavior on a real Wayland desktop.
 - [ ] Validate physical Windows cursor/keyboard handoff with X11 and Wayland receivers, including disconnect and emergency return.
-- [ ] Configure virtual display modes dynamically from Linux metadata; currently modes are fixed.
+- [x] Configure virtual display modes dynamically from Linux metadata.
 - [ ] Reconnect long-lived sessions after sleep/network changes.
 - [ ] Complete capability negotiation for all services and per-peer grants.
 

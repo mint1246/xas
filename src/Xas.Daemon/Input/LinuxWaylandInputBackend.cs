@@ -13,6 +13,8 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
     private StreamReader? _output;
     private bool _ready;
     private bool _disposed;
+    private string? _lastHelperError;
+    private string? _reportedHelperError;
 
     public bool IsAvailable
     {
@@ -64,9 +66,19 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
             {
                 if (reply != "READY")
                 {
-                    var error = process.HasExited ? process.StandardError.ReadToEnd() : reply;
+                    // The helper reports why on stderr and then exits, so drain it before stopping the
+                    // process. Checking HasExited first races the exit and loses the reason.
+                    var detail = reply;
+                    try
+                    {
+                        process.WaitForExit(2000);
+                        var stderr = process.StandardError.ReadToEnd().Trim();
+                        if (stderr.Length > 0) detail = stderr;
+                        else if (detail is null or "") detail = $"helper exited with code {process.ExitCode}";
+                    }
+                    catch (InvalidOperationException) { /* The process is still running; the reply stands. */ }
                     StopHelper();
-                    throw new IOException($"Wayland RemoteDesktop portal/EIS setup failed: {error}");
+                    throw new IOException($"Wayland RemoteDesktop portal/EIS setup failed: {detail}");
                 }
                 _ready = true;
             }
@@ -96,19 +108,23 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 timeout.CancelAfter(TimeSpan.FromSeconds(2));
                 StreamWriter input;
-                StreamReader output;
                 lock (_gate)
                 {
                     ObjectDisposedException.ThrowIf(_disposed, this);
                     input = _input ?? throw new IOException("Wayland input helper is not running.");
-                    output = _output ?? throw new IOException("Wayland input helper is not running.");
                 }
+                // Fire and forget. Waiting for a per-event acknowledgement put a full round trip in the
+                // input path, and the resulting timeouts tore the session down and re-prompted for consent.
+                // The helper applies each event as it reads it and reports trouble on stderr instead.
                 await input.WriteLineAsync(line.AsMemory(), timeout.Token).ConfigureAwait(false);
                 await input.FlushAsync(timeout.Token).ConfigureAwait(false);
-                var reply = await output.ReadLineAsync(timeout.Token).ConfigureAwait(false);
-                if (reply != "OK") throw new IOException(reply?.StartsWith("ERR ", StringComparison.Ordinal) == true ? reply[4..] : "Wayland input helper exited unexpectedly.");
             }
-            catch { lock (_gate) StopHelper(); throw; }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                // A failed write means the helper is gone, which is the one case that ends the session.
+                lock (_gate) StopHelper();
+                throw new IOException("Wayland input helper is not running.", ex);
+            }
         }
         finally { _activationGate.Release(); }
     }
@@ -129,11 +145,12 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
                 timeout.CancelAfter(TimeSpan.FromSeconds(1));
                 await input.WriteLineAsync("R".AsMemory(), timeout.Token).ConfigureAwait(false);
                 await input.FlushAsync(timeout.Token).ConfigureAwait(false);
-                if (await output.ReadLineAsync(timeout.Token).ConfigureAwait(false) != "OK")
-                    throw new IOException("Wayland input helper did not release held input.");
-                // Keep the consented portal session for the next monitor crossing.
+                if (await output.ReadLineAsync(timeout.Token).ConfigureAwait(false) == "OK") return;
+                // Keep the consented portal session for the next monitor crossing; a failed release is
+                // reported but does not justify discarding the user's consent.
+                throw new IOException("Wayland input helper did not release held input.");
             }
-            catch { lock (_gate) StopHelper(); throw; }
+            catch (Exception ex) when (ex is not IOException) { lock (_gate) StopHelper(); throw; }
         }
         finally { _activationGate.Release(); }
     }
@@ -147,6 +164,23 @@ public sealed class LinuxWaylandInputBackend : IAbsoluteInputInjectionBackend, I
             ?? throw new IOException("Could not start xas-wayland-eis.");
         _helper = p; _input = p.StandardInput; _output = p.StandardOutput;
         _ready = false;
+        // Drain stderr continuously. The helper reports per-event problems there, and an unread pipe would
+        // fill and block the helper mid-stream, which shows up as the cursor stalling.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                while (await p.StandardError.ReadLineAsync().ConfigureAwait(false) is { } line)
+                {
+                    lock (_gate)
+                    {
+                        _lastHelperError = line;
+                        if (line.Length > 0) _reportedHelperError = line;
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException) { }
+        });
     }
 
     private static string? FindHelper()

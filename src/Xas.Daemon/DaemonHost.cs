@@ -19,11 +19,26 @@ public sealed class DaemonHost(DeviceIdentity identity, PeerTrustStore trust,
 {
     private readonly InputControlService _input = new(permissions,
         inputBackend ?? (OperatingSystem.IsWindows() ? new WindowsSendInputBackend() :
-            OperatingSystem.IsLinux() && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"))
-                ? new LinuxWaylandInputBackend() :
-            OperatingSystem.IsLinux() && Environment.GetEnvironmentVariable("XAS_ENABLE_X11_INPUT") == "1"
-                ? new LinuxX11InputBackend() : new UnavailableInputBackend()));
+            OperatingSystem.IsLinux() ? CreateLinuxInputBackend() : new UnavailableInputBackend()));
     private RequestDispatcher? _dispatcher;
+
+    /// <summary>
+    /// Picks a Linux injection backend. uinput comes first because it needs no portal, so handoff never
+    /// asks the user for consent, and it is the only option that works identically on X11 and Wayland. The
+    /// X11 and Wayland portal paths remain as fallbacks for a host where /dev/uinput is not writable.
+    /// </summary>
+    private static IInputInjectionBackend CreateLinuxInputBackend()
+    {
+        var display = new Display.LinuxDisplayMetadataService();
+        IInputInjectionBackend? uinput = new LinuxUinputInputBackend(() =>
+            display.GetPrimaryDisplayAsync().GetAwaiter().GetResult());
+        if (uinput.IsAvailable) return uinput;
+        if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
+            return new LinuxWaylandInputBackend();
+        if (Environment.GetEnvironmentVariable("XAS_ENABLE_X11_INPUT") == "1")
+            return new LinuxX11InputBackend();
+        return new UnavailableInputBackend();
+    }
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {

@@ -239,6 +239,7 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         writer.WriteLine("  cp [-r] [-f] <src> <dst>  Copy files to or from a paired device");
         writer.WriteLine("  clipboard push|pull|sync [id]  Transfer or continuously sync plain text");
         writer.WriteLine("  input [device-id]       Capture Windows input manually (Ctrl+Alt+Esc releases)");
+        writer.WriteLine("  display                 Report virtual display driver and handoff state (Windows)");
         writer.WriteLine("  (no arguments)          Open an interactive shell (requires PTY support)");
         writer.WriteLine("  identity                Show local device ID and fingerprint");
         writer.WriteLine("  pair <id> <fp> <host> [port] [name]  Approve a peer locally");

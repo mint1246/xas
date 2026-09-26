@@ -6,10 +6,11 @@ using Xas.Core;
 namespace Xas.Daemon.Display;
 
 /// <summary>
-/// Reads display state from the logged-in Linux desktop session. X11 uses xrandr; Wayland uses
-/// wlr-randr (wlroots compositors) or kscreen-doctor (KDE). A user-session process is required
-/// because these commands need the desktop's session environment and compositor connection.
-/// Missing facts are left null; this service never substitutes guessed dimensions or rates.
+/// Reads display state from the logged-in Linux desktop session. X11 uses xrandr; Wayland uses wlr-randr
+/// (wlroots compositors), kscreen-doctor (KDE), or Mutter's DisplayConfig D-Bus API (GNOME), which gdbus
+/// reaches directly. A user-session process is required because these commands need the desktop's session
+/// environment and compositor connection. Missing facts are left null; this service never substitutes
+/// guessed dimensions or rates.
 /// </summary>
 public sealed class LinuxDisplayMetadataService
 {
@@ -19,29 +20,35 @@ public sealed class LinuxDisplayMetadataService
 
     internal LinuxDisplayMetadataService(Func<string, CancellationToken, Task<string?>> run) => _run = run;
 
-    public bool IsAvailable => OperatingSystem.IsLinux() &&
-        (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"))
-            ? FindExecutable("wlr-randr") is not null || FindExecutable("kscreen-doctor") is not null
-            : !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY")) &&
-                FindExecutable("xrandr") is not null);
+    public bool IsAvailable => OperatingSystem.IsLinux() && Backends.Any(backend => FindExecutable(backend) is not null);
+
+    /// <summary>
+    /// Session backends in preference order. A Wayland compositor only reports outputs to its own clients, so
+    /// each desktop has its own tool and none of them work on the others: wlroots and Mutter both ignore
+    /// xrandr under Wayland, because all a client sees is XWayland's merged view.
+    /// </summary>
+    private static readonly string[] WaylandBackends = ["wlr-randr", "kscreen-doctor", "gdbus"];
+
+    private static string[] Backends => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"))
+        ? WaylandBackends
+        : !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY")) ? ["xrandr"] : [];
 
     public async Task<DisplayMetadata?> GetPrimaryDisplayAsync(CancellationToken cancellationToken = default)
     {
         if (!OperatingSystem.IsLinux()) return null;
-        var wayland = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"));
-        if (wayland)
+        foreach (var backend in Backends)
         {
-            foreach (var command in new[] { "wlr-randr", "kscreen-doctor" })
+            var output = await _run(backend, cancellationToken).ConfigureAwait(false);
+            var parsed = backend switch
             {
-                var output = await _run(command, cancellationToken).ConfigureAwait(false);
-                var parsed = command == "wlr-randr" ? ParseWlrRandr(output) : ParseKScreenDoctor(output);
-                if (parsed is not null) return parsed;
-            }
-            return null;
+                "wlr-randr" => ParseWlrRandr(output),
+                "kscreen-doctor" => ParseKScreenDoctor(output),
+                "gdbus" => ParseMutterState(output),
+                _ => ParseXrandr(output)
+            };
+            if (parsed is not null) return parsed;
         }
-
-        if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY"))) return null;
-        return ParseXrandr(await _run("xrandr", cancellationToken).ConfigureAwait(false));
+        return null;
     }
 
     /// <summary>Parses xrandr --query output and selects its declared primary, then an eDP/LVDS panel.</summary>
@@ -148,6 +155,178 @@ public sealed class LinuxDisplayMetadataService
         return Choose(displays);
     }
 
+    /// <summary>
+    /// Parses the reply of Mutter's org.gnome.Mutter.DisplayConfig.GetCurrentState, the API GNOME Settings
+    /// itself uses. gdbus prints GVariant text, so the reply is walked with balanced-delimiter splitting
+    /// rather than a single pattern: the nesting is irregular enough that one regex would be fragile.
+    /// </summary>
+    public static DisplayMetadata? ParseMutterState(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+        var reply = Unwrap(text);
+        if (reply is null) return null;
+        // (serial, monitors, logical_monitors, properties)
+        var fields = SplitTopLevel(reply, ',');
+        if (fields.Count < 3) return null;
+        var layoutLogical = Regex.Match(fields[3] ?? string.Empty, @"'layout-mode':\s*<\s*uint32\s+(\d+)").Groups[1].Value == "1";
+
+        // Each monitor is ((connector, vendor, product, serial), [modes], {properties}).
+        var displays = new List<(DisplayMetadata Data, bool Primary, bool BuiltIn)>();
+        var byConnector = new Dictionary<string, (int Width, int Height, int? MilliHertz)>(StringComparer.Ordinal);
+        foreach (var monitor in SplitElements(fields[1]))
+        {
+            var parts = SplitTopLevel(monitor, ',');
+            if (parts.Count < 3) continue;
+            var connector = FirstString(parts[0]);
+            if (connector.Length == 0) continue;
+            var properties = parts[2];
+            foreach (var candidate in SplitElements(parts[1]))
+            {
+                var fieldsOfMode = SplitTopLevel(candidate, ',');
+                if (fieldsOfMode.Count < 4) continue;
+                // Only the mode Mutter marks current describes the live desktop.
+                if (!fieldsOfMode[6].Contains("'is-current': <true>", StringComparison.Ordinal)) continue;
+                if (!int.TryParse(fieldsOfMode[1], out var width) ||
+                    !int.TryParse(fieldsOfMode[2], out var height)) break;
+                if (width <= 0 || height <= 0) break;
+                byConnector[connector] = (width, height, MilliHertz(fieldsOfMode[3]));
+                break;
+            }
+            var physicalWidth = PropertyInt(properties, "width-mm");
+            var physicalHeight = PropertyInt(properties, "height-mm");
+            // Mutter lists every plugged output, including ones the user switched off in Settings, so a
+            // connector only counts as the desktop when a logical monitor actually drives it.
+            var logical = SplitElements(fields[2])
+                .Select(entry => SplitTopLevel(entry, ',')).FirstOrDefault(parts => parts.Count >= 6 &&
+                    parts[5].Contains($"'{connector}'", StringComparison.Ordinal));
+            if (logical is null || !byConnector.TryGetValue(connector, out var mode) || mode.Width <= 0) continue;
+            var scale = 1.0;
+            if (double.TryParse(logical[2], NumberStyles.Float, CultureInfo.InvariantCulture,
+                out var parsedScale) && parsedScale > 0) scale = parsedScale;
+            // gdbus annotates the transform as "uint32 1"; a bare digit match would read the 32.
+            var transform = int.TryParse(Regex.Match(logical[3].Trim(), @"^(?:u?int32\s+)?(\d+)$")
+                .Groups[1].Value, out var parsedTransform) ? parsedTransform : 0;
+            var primary = logical[5].TrimStart().StartsWith("true", StringComparison.Ordinal);
+            // Under logical layout the desktop the user works in is the mode divided by the scale, and that is
+            // the coordinate space absolute input has to be expressed in. Under physical layout it is the mode.
+            var logicalWidth = layoutLogical ? Math.Max(1, (int)Math.Round(mode.Width / scale)) : mode.Width;
+            var logicalHeight = layoutLogical ? Math.Max(1, (int)Math.Round(mode.Height / scale)) : mode.Height;
+            var rotation = MutterRotation(transform);
+            var displayName = PropertyString(properties, "display-name");
+            displays.Add((new DisplayMetadata
+            {
+                Id = connector,
+                Name = displayName.Length > 0 ? displayName : connector,
+                WidthPixels = rotation is 90 or 270 ? logicalHeight : logicalWidth,
+                HeightPixels = rotation is 90 or 270 ? logicalWidth : logicalHeight,
+                RefreshMilliHertz = mode.MilliHertz,
+                PhysicalWidthMillimeters = physicalWidth > 0 ? physicalWidth : null,
+                PhysicalHeightMillimeters = physicalHeight > 0 ? physicalHeight : null,
+                RotationDegrees = rotation,
+                Scale = scale == 1.0 ? null : scale
+            }, primary, properties.Contains("'is-builtin': <true>", StringComparison.Ordinal)));
+        }
+        return Choose(displays);
+    }
+
+    /// <summary>Strips the GVariant annotations and outer parentheses gdbus wraps a reply in.</summary>
+    private static string? Unwrap(string text)
+    {
+        var value = text.Trim();
+        foreach (var annotation in new[] { "@a{sv} ", "uint32 ", "int32 " })
+            if (value.StartsWith(annotation, StringComparison.Ordinal))
+                value = value[annotation.Length..].Trim();
+        return value.Length > 1 && value[0] == '(' && value[^1] == ')' ? value[1..^1] : null;
+    }
+
+    /// <summary>
+    /// Splits on a delimiter that is not nested inside brackets or quotes. gdbus output mixes (), [], {} and
+    /// quoted strings, so a plain Split would cut tuples in half.
+    /// </summary>
+    private static List<string> SplitTopLevel(string text, char delimiter)
+    {
+        var parts = new List<string>();
+        var depth = 0;
+        var quoted = false;
+        var start = 0;
+        for (var i = 0; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c == '\'') quoted = !quoted;
+            else if (!quoted && c is '(' or '[' or '{') depth++;
+            else if (!quoted && c is ')' or ']' or '}') depth--;
+            else if (!quoted && depth == 0 && c == delimiter)
+            {
+                parts.Add(text[start..i].Trim());
+                start = i + 1;
+            }
+        }
+        parts.Add(text[start..].Trim());
+        return parts;
+    }
+
+    private static List<string> SplitTopLevel(string text, char open, char close) =>
+        text.Length > 1 && text[0] == open && text[^1] == close
+            ? SplitTopLevel(text[1..^1], ',')
+            : [];
+
+    /// <summary>
+    /// Returns the elements of a bracketed array whose entries are parenthesised tuples, with each element's
+    /// own parentheses removed. Splitting on commas would tear the tuples apart instead.
+    /// </summary>
+    private static List<string> SplitElements(string array)
+    {
+        var items = new List<string>();
+        if (array.Length < 2 || array[0] != '[' || array[^1] != ']') return items;
+        var depth = 0;
+        var quoted = false;
+        var start = -1;
+        for (var i = 1; i < array.Length - 1; i++)
+        {
+            var c = array[i];
+            if (c == '\'') { quoted = !quoted; continue; }
+            if (quoted) continue;
+            if (c == '(')
+            {
+                if (depth == 0) start = i;
+                depth++;
+            }
+            else if (c == ')')
+            {
+                depth--;
+                if (depth == 0 && start >= 0)
+                {
+                    items.Add(array[(start + 1)..i]);
+                    start = -1;
+                }
+            }
+        }
+        return items;
+    }
+
+    private static string FirstString(string text)
+    {
+        var match = Regex.Match(text, @"'((?:[^'\\]|\\.)*)'");
+        return match.Success ? match.Groups[1].Value : string.Empty;
+    }
+
+    private static int? MilliHertz(string text) =>
+        double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var hz) && hz > 0
+            ? (int)Math.Round(hz * 1000) : null;
+
+    private static int PropertyInt(string properties, string key) =>
+        int.TryParse(Regex.Match(properties, $"'{key}':\\s*<\\s*(?:int32\\s+)?(-?\\d+)").Groups[1].Value,
+            out var value) && value > 0 ? value : 0;
+
+    private static string PropertyString(string properties, string key)
+    {
+        var match = Regex.Match(properties, $"'{key}':\\s*<\\s*'((?:[^'\\\\]|\\\\.)*)'");
+        return match.Success ? match.Groups[1].Value : string.Empty;
+    }
+
+    /// <summary>Mutter transform codes: 0 normal, 1 90, 2 180, 3 270, 4-7 the same rotations flipped.</summary>
+    private static int MutterRotation(int transform) => transform switch { 1 or 5 => 90, 2 or 6 => 180, 3 or 7 => 270, _ => 0 };
+
     private static DisplayMetadata? Choose(List<(DisplayMetadata Data, bool Primary, bool BuiltIn)> items) => items
         .OrderByDescending(x => x.Primary).ThenByDescending(x => x.BuiltIn).Select(x => x.Data).FirstOrDefault();
     private static DisplayMetadata Make(string id, int w, int h, int? hz, int pw, int ph, int rotation, double? scale) => new()
@@ -170,7 +349,17 @@ public sealed class LinuxDisplayMetadataService
         Process? process = null;
         try
         {
-            var arguments = command switch { "kscreen-doctor" => "-o", "xrandr" => "--query", _ => "" };
+            var arguments = command switch
+            {
+                "kscreen-doctor" => "-o",
+                "xrandr" => "--query",
+                // Mutter's own display API, the same one GNOME Settings uses. gdbus ships with GLib, so this
+                // needs no extra package on any GNOME install.
+                "gdbus" => "call --session --dest org.gnome.Mutter.DisplayConfig " +
+                    "--object-path /org/gnome/Mutter/DisplayConfig " +
+                    "--method org.gnome.Mutter.DisplayConfig.GetCurrentState",
+                _ => ""
+            };
             process = Process.Start(new ProcessStartInfo(executable, arguments)
             { UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = false, CreateNoWindow = true });
             if (process is null) return null;
@@ -199,3 +388,4 @@ public sealed class LinuxDisplayMetadataService
         return path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries).Select(p => Path.Combine(p, name)).FirstOrDefault(File.Exists);
     }
 }
+

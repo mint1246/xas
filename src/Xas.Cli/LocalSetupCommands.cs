@@ -57,6 +57,8 @@ internal static class LocalSetupCommands
                 foreach (var p in new PeerTrustStore(AppPaths.TrustDirectory).List())
                     Console.WriteLine($"{p.DeviceId}\t{p.DisplayName}\t{p.ApprovedAtUtc:O}");
                 return 0;
+            case "display":
+                return DisplayCommands.Run(args);
             case "revoke":
                 if (args.Length != 2) return Usage("Usage: xas revoke <device-id>");
                 var config = new LocalConfiguration();

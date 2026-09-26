@@ -44,7 +44,7 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
         @('xas Windows x64 package', '', 'Run install-windows.ps1 from PowerShell to install both programs under %LOCALAPPDATA%\Programs\xas and add that folder to your user PATH.', 'Open a new terminal after installation.') | Set-Content -LiteralPath $readme
     } else {
         Copy-Item (Join-Path $PSScriptRoot 'install-linux.sh') $package
-        foreach ($helper in @('xas-linux-pty', 'xas-wayland-eis')) {
+        foreach ($helper in @('xas-linux-pty', 'xas-wayland-eis', 'xas-uinput')) {
             $candidate = Join-Path $root "artifacts\native-linux\$helper"
             if (Test-Path -LiteralPath $candidate -PathType Leaf) { Copy-Item -LiteralPath $candidate -Destination $package }
         }

@@ -14,6 +14,18 @@ static struct ei *ctx;
 static struct oeffis *portal;
 static struct ei_device *pointer_device, *absolute_device, *keyboard_device;
 static int started_pointer, started_absolute, started_keyboard;
+
+enum { ROLE_POINTER = 1, ROLE_ABSOLUTE = 2, ROLE_KEYBOARD = 4 };
+
+/* The portal may report one device carrying several roles, so roles are a bitmask. */
+static int roles_of(struct ei_device *d) {
+    int roles = 0;
+    if (ei_device_has_capability(d, EI_DEVICE_CAP_POINTER) || ei_device_has_capability(d, EI_DEVICE_CAP_BUTTON)
+        || ei_device_has_capability(d, EI_DEVICE_CAP_SCROLL)) roles |= ROLE_POINTER;
+    if (ei_device_has_capability(d, EI_DEVICE_CAP_POINTER_ABSOLUTE)) roles |= ROLE_ABSOLUTE;
+    if (ei_device_has_capability(d, EI_DEVICE_CAP_KEYBOARD)) roles |= ROLE_KEYBOARD;
+    return roles;
+}
 static unsigned char held_keys[256], held_buttons[9];
 
 static uint32_t hid_key(uint16_t u) {
@@ -47,23 +59,51 @@ static void dispatch(void) {
     ei_dispatch(ctx);
     struct ei_event *ev;
     while ((ev = ei_get_event(ctx))) {
+        /* XAS_EIS_DEBUG=1 traces the raw event stream, which is the only way to tell a missing
+           emulator event apart from a device we failed to match. */
+        if (getenv("XAS_EIS_DEBUG")) {
+            fprintf(stderr, "eis event %d\n", ei_event_get_type(ev));
+            if (ei_event_get_type(ev) == EI_EVENT_DEVICE_ADDED) {
+                struct ei_device *d = ei_event_get_device(ev);
+                /* The portal decides the coordinate space absolute motion is expressed in, so report it
+                   rather than assuming it matches the logical desktop we send. */
+                fprintf(stderr, "  device name=%s type=%d size=%dx%d roles=%d\n",
+                        ei_device_get_name(d) ? ei_device_get_name(d) : "?",
+                        ei_device_get_type(d), ei_device_get_width(d), ei_device_get_height(d),
+                        roles_of(d));
+                for (int i = 0; i < 16; i++) {
+                    struct ei_region *r = ei_device_get_region(d, i);
+                    if (!r) break;
+                    fprintf(stderr, "  region %d: %dx%d at %d,%d physical_scale=%f\n", i,
+                            ei_region_get_width(r), ei_region_get_height(r),
+                            ei_region_get_x(r), ei_region_get_y(r),
+                            (double)ei_region_get_physical_scale(r));
+                }
+            }
+        }
         switch (ei_event_get_type(ev)) {
         case EI_EVENT_SEAT_ADDED:
             ei_seat_bind_capabilities(ei_event_get_seat(ev), EI_DEVICE_CAP_POINTER, EI_DEVICE_CAP_POINTER_ABSOLUTE, EI_DEVICE_CAP_BUTTON, EI_DEVICE_CAP_SCROLL, EI_DEVICE_CAP_KEYBOARD, NULL);
             break;
         case EI_EVENT_DEVICE_ADDED: {
             struct ei_device *d = ei_event_get_device(ev);
-            if (ei_device_has_capability(d, EI_DEVICE_CAP_POINTER) || ei_device_has_capability(d, EI_DEVICE_CAP_BUTTON) || ei_device_has_capability(d, EI_DEVICE_CAP_SCROLL)) { if (pointer_device) ei_device_unref(pointer_device); pointer_device = ei_device_ref(d); }
-            if (ei_device_has_capability(d, EI_DEVICE_CAP_POINTER_ABSOLUTE)) { if (absolute_device) ei_device_unref(absolute_device); absolute_device = ei_device_ref(d); }
-            if (ei_device_has_capability(d, EI_DEVICE_CAP_KEYBOARD)) { if (keyboard_device) ei_device_unref(keyboard_device); keyboard_device = ei_device_ref(d); }
+            int roles = roles_of(d);
+            if (roles & ROLE_POINTER) { if (pointer_device) ei_device_unref(pointer_device); pointer_device = ei_device_ref(d); }
+            if (roles & ROLE_ABSOLUTE) { if (absolute_device) ei_device_unref(absolute_device); absolute_device = ei_device_ref(d); }
+            if (roles & ROLE_KEYBOARD) { if (keyboard_device) ei_device_unref(keyboard_device); keyboard_device = ei_device_ref(d); }
             break;
         }
-        case EI_EVENT_DEVICE_START_EMULATING: {
+        case EI_EVENT_DEVICE_RESUMED: {
+            /* EI_EVENT_DEVICE_START_EMULATING is documented as generated only on a receiver context, so a
+               sender must never wait for it. Once resumed, the sender starts emulating itself. */
             struct ei_device *d = ei_event_get_device(ev);
-            ei_device_start_emulating(d, ei_event_emulating_get_sequence(ev));
-            if (d == pointer_device) started_pointer = 1;
-            if (d == absolute_device) started_absolute = 1;
-            if (d == keyboard_device) started_keyboard = 1;
+            ei_device_start_emulating(d, 0);
+            /* Identify the role from its capabilities rather than by comparing ei_device pointers: the
+               library hands out a different pointer for each event, so an address comparison never matches. */
+            int roles = roles_of(d);
+            if (roles & ROLE_POINTER) started_pointer = 1;
+            if (roles & ROLE_ABSOLUTE) started_absolute = 1;
+            if (roles & ROLE_KEYBOARD) started_keyboard = 1;
             break;
         }
         case EI_EVENT_DEVICE_REMOVED:
@@ -81,7 +121,15 @@ static void dispatch(void) {
 static int wait_devices(void) {
     while (!pointer_device || !absolute_device || !keyboard_device || !started_pointer || !started_absolute || !started_keyboard) {
         struct pollfd p = { .fd = ei_get_fd(ctx), .events = POLLIN };
-        if (poll(&p, 1, 30000) <= 0) return -1;
+        if (poll(&p, 1, 30000) <= 0) {
+            /* Name what never arrived: a portal that grants only a relative pointer is a platform
+               limitation worth reporting plainly rather than a generic timeout. */
+            fprintf(stderr, "Timed out waiting for portal-granted EIS devices"
+                            " (pointer=%d absolute=%d keyboard=%d started=%d/%d/%d)\n",
+                    pointer_device != NULL, absolute_device != NULL, keyboard_device != NULL,
+                    started_pointer, started_absolute, started_keyboard);
+            return -1;
+        }
         dispatch();
     }
     return 0;
@@ -145,9 +193,9 @@ static int handle(char *line) {
         puts("OK"); fflush(stdout);
         return 0;
     }
-    if (op == 'N') { puts("OK"); fflush(stdout); return 0; }
+    if (op == 'N') return 0;
     if (op == 'M' && sscanf(line, "M %d %d", &x,&y)==2) ei_device_pointer_motion(pointer_device,x,y);
-    else if (op == 'A' && sscanf(line, "A %d %d", &x,&y)==2) { if (!absolute_device || !started_absolute || !ei_device_has_capability(absolute_device, EI_DEVICE_CAP_POINTER_ABSOLUTE)) { puts("ERR portal did not grant an active absolute pointer device"); fflush(stdout); return 0; } if (!ei_device_get_region_at(absolute_device,(double)x,(double)y)) { puts("ERR absolute pointer coordinates are outside the portal-granted device regions"); fflush(stdout); return 0; } ei_device_pointer_motion_absolute(absolute_device,x,y); }
+    else if (op == 'A' && sscanf(line, "A %d %d", &x,&y)==2) { if (!absolute_device || !started_absolute || !ei_device_has_capability(absolute_device, EI_DEVICE_CAP_POINTER_ABSOLUTE)) { fprintf(stderr,"ERR portal did not grant an active absolute pointer device\n"); return 0; } if (!ei_device_get_region_at(absolute_device,(double)x,(double)y)) { fprintf(stderr,"ERR absolute pointer coordinates are outside the portal-granted device regions\n"); return 0; } ei_device_pointer_motion_absolute(absolute_device,x,y); }
     else if (op == 'B' && sscanf(line, "B %u %d", &code,&down)==2) { int b=button_code(code); if(!b)return -1; ei_device_button_button(pointer_device,(uint32_t)b,down!=0); held_buttons[code]=(unsigned char)(down!=0); }
     else if (op == 'K' && sscanf(line, "K %u %d %d", &code,&down,&repeat)==3) { uint32_t key=hid_key((uint16_t)code); if(!key)return -1; if(repeat) { ei_device_keyboard_key(keyboard_device,key,false); ei_device_keyboard_key(keyboard_device,key,true); } else ei_device_keyboard_key(keyboard_device,key,down!=0); held_keys[code]=(unsigned char)(repeat||down); }
     else if (op == 'S' && sscanf(line, "S %d %d", &x,&y)==2) ei_device_scroll_discrete(pointer_device,x,y);
@@ -155,7 +203,9 @@ static int handle(char *line) {
     if (pointer_device) ei_device_frame(pointer_device,ei_now(ctx));
     if (absolute_device && absolute_device != pointer_device) ei_device_frame(absolute_device,ei_now(ctx));
     if (keyboard_device) ei_device_frame(keyboard_device,ei_now(ctx));
-    puts("OK"); fflush(stdout); return 0;
+    /* No per-event acknowledgement: the sender applies events as it reads them, and waiting for a reply
+       per event put a round trip in the input path. Problems go to stderr and a broken pipe is fatal. */
+    return 0;
 }
 
 int main(int argc, char **argv) {

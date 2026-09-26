@@ -12,7 +12,7 @@ for name in xas Xas.Daemon; do
     install -m 0755 "$PACKAGE_DIR/$name" "$BIN_DIR/$name"
 done
 # Carry native helpers only when the package actually contains built helpers.
-for name in xas-linux-pty xas-wayland-eis; do
+for name in xas-linux-pty xas-wayland-eis xas-uinput; do
     if [ -f "$PACKAGE_DIR/$name" ]; then install -m 0755 "$PACKAGE_DIR/$name" "$BIN_DIR/$name"; fi
 done
 

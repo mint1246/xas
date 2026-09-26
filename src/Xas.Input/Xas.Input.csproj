@@ -1,3 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup><ProjectReference Include="../Xas.Core/Xas.Core.csproj" /></ItemGroup>
+  <ItemGroup>
+    <!-- The driver's IOCTL codes and marshalled layouts are internal; the test suite asserts them directly. -->
+    <InternalsVisibleTo Include="Xas.Tests" />
+  </ItemGroup>
 </Project>

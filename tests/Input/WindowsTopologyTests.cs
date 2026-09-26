@@ -17,6 +17,35 @@ public static class WindowsTopologyTests
             throw new Exception("Monitor coordinates must scale to the remote display without leaving bounds.");
         if (WindowsMonitorTopology.FindRemote([physical, virtualMonitor]) != virtualMonitor)
             throw new Exception("The XAS virtual monitor was not found.");
+
+        // A SudoVDA monitor is named "Generic PnP Monitor" and reports a manufacturer hardware ID, so it can
+        // only be recognised through the virtual adapter that owns it. No configuration should be required.
+        var sudovda = virtualMonitor with
+        {
+            FriendlyName = "Generic PnP Monitor",
+            HardwareId = @"MONITOR\SMKD1CE\{4d36e968-e325-11ce-bfc1-08002be10318}\0001",
+            AdapterHardwareId = @"root\sudomaker\sudovda"
+        };
+        if (WindowsMonitorTopology.FindRemote([physical, sudovda]) != sudovda)
+            throw new Exception("A monitor on a virtual display adapter must be found without configuration.");
+        var hardware = sudovda with { AdapterHardwareId = @"PCI\VEN_10DE&DEV_2484" };
+        if (WindowsMonitorTopology.FindRemote([physical, hardware]) is not null)
+            throw new Exception("A monitor on a hardware adapter must not take input ownership.");
+
+        // A second virtual monitor on the same adapter makes automatic selection ambiguous, but an explicit
+        // hardware ID must still resolve. This is how a daemon pins itself to the monitor it created.
+        var other = sudovda with
+        {
+            DeviceName = @"\\.\DISPLAY3",
+            HardwareId = @"MONITOR\SMKD1CE\{4d36e968-e325-11ce-bfc1-08002be10318}\0009",
+            Region = new(5360, 0, 6784, 720)
+        };
+        if (WindowsMonitorTopology.FindRemote([physical, sudovda, other]) is not null)
+            throw new Exception("Two virtual monitors must not be resolved without a hint.");
+        if (WindowsMonitorTopology.FindRemote([physical, sudovda, other], other.HardwareId) != other)
+            throw new Exception("An explicit monitor hardware ID must select that monitor.");
+        if (WindowsMonitorTopology.FindRemote([physical, sudovda, virtualMonitor]) is not null)
+            throw new Exception("An ambiguous monitor set must not guess which one owns input.");
         if (WindowsMonitorTopology.FindRemote([physical, virtualMonitor with
             { Region = new(1600, 0, 3520, 1080) }]) is not null)
             throw new Exception("An overlapping monitor must not take input ownership.");

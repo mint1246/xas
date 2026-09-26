@@ -12,7 +12,8 @@ namespace Xas.Input;
 public static class InputControlClient
 {
     public static async Task RunAsync(ConfiguredPeer configured, DeviceIdentity identity,
-        PeerTrustStore trust, CancellationToken cancellationToken, WindowsCaptureRegion? region = null)
+        PeerTrustStore trust, CancellationToken cancellationToken, WindowsCaptureRegion? region = null,
+        string? monitorHint = null, Action<string>? trace = null)
     {
         ArgumentNullException.ThrowIfNull(configured);
         if (!WindowsInputCapture.IsAvailable)
@@ -50,6 +51,7 @@ public static class InputControlClient
         var sessionId = BinaryPrimitives.ReadUInt32BigEndian(opened.Payload);
         if (sessionId == 0) throw new InvalidDataException("The remote input session ID was zero.");
 
+        var sent = 0;
         try
         {
             if (region is { } bounds && display is not null)
@@ -66,10 +68,10 @@ public static class InputControlClient
             await using var capture = await WindowsInputCapture.StartAsync(cancellationToken, region,
                 display?.WidthPixels ?? 0, display?.HeightPixels ?? 0).ConfigureAwait(false);
             using var active = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var sendTask = SendEventsAsync(peer, capture, sessionId, active.Token);
+            var sendTask = SendEventsAsync(peer, capture, sessionId, active.Token, () => sent++);
             var heartbeatTask = SendHeartbeatAsync(peer, sessionId, active.Token);
             var boundaryTask = region is null ? Task.Delay(Timeout.Infinite, active.Token) :
-                WatchBoundaryAsync(capture, region.Value, active.Token);
+                WatchBoundaryAsync(capture, region.Value, monitorHint, active.Token);
             var cancelled = Task.Delay(Timeout.Infinite, cancellationToken);
             var first = await Task.WhenAny(capture.Completion, sendTask, heartbeatTask,
                 boundaryTask, peer.Completion, cancelled).ConfigureAwait(false);
@@ -78,6 +80,15 @@ public static class InputControlClient
             catch when (first != capture.Completion) { /* Observe the primary send/connection failure below. */ }
             if (first == cancelled) cancellationToken.ThrowIfCancellationRequested();
             if (first == peer.Completion) throw new IOException("The remote input connection closed.");
+            // Name the task that ended the session: the boundary watcher, the event pump, and the heartbeat
+            // all race here, and which one wins is the whole diagnosis when a session will not stay open.
+            trace?.Invoke($"input session ended by {Name(first)} after {sent} event(s)");
+
+            string Name(Task task) => ReferenceEquals(task, capture.Completion) ? "capture"
+                : ReferenceEquals(task, sendTask) ? "event-pump"
+                : ReferenceEquals(task, heartbeatTask) ? "heartbeat"
+                : ReferenceEquals(task, boundaryTask) ? "boundary-watch"
+                : ReferenceEquals(task, peer.Completion) ? "peer" : "cancelled";
             if (first == sendTask) await sendTask.ConfigureAwait(false);
             if (first == heartbeatTask) await heartbeatTask.ConfigureAwait(false);
             await capture.Completion.ConfigureAwait(false);
@@ -99,7 +110,7 @@ public static class InputControlClient
     }
 
     private static async Task SendEventsAsync(MultiplexedProtocolPeer peer, WindowsInputCapture capture,
-        uint sessionId, CancellationToken token)
+        uint sessionId, CancellationToken token, Action onSent)
     {
         var batch = new List<InputEvent>(InputWire.MaxEventsPerFrame);
         await foreach (var input in capture.Events.ReadAllAsync(token).ConfigureAwait(false))
@@ -108,6 +119,7 @@ public static class InputControlClient
             while (batch.Count < InputWire.MaxEventsPerFrame && capture.Events.TryRead(out var next))
                 batch.Add(next);
             await SendWithTimeoutAsync(peer, sessionId, batch, token).ConfigureAwait(false);
+            onSent();
             batch.Clear();
         }
     }
@@ -139,14 +151,17 @@ public static class InputControlClient
     }
 
     private static async Task WatchBoundaryAsync(WindowsInputCapture capture,
-        WindowsCaptureRegion region, CancellationToken token)
+        WindowsCaptureRegion region, string? monitorHint, CancellationToken token)
     {
         var ticks = 0;
         while (true)
         {
             await Task.Delay(25, token).ConfigureAwait(false);
+            // The hint must be the same pinned monitor the caller handed off on. Resolving the target
+            // afresh would be ambiguous whenever another virtual monitor shares the adapter, and the
+            // session would end itself within half a second of opening.
             if (!WindowsMonitorTopology.TryGetPointer(out var x, out var y) || !region.Contains(x, y) ||
-                (++ticks % 20 == 0 && WindowsMonitorTopology.FindRemote()?.Region != region))
+                (++ticks % 20 == 0 && WindowsMonitorTopology.FindRemote(monitorHint)?.Region != region))
             { capture.EndCapture(); return; }
         }
     }
