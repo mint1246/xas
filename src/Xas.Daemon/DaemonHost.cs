@@ -43,7 +43,7 @@ public sealed class DaemonHost
         _input = new InputControlService(permissions,
             inputBackend ?? (OperatingSystem.IsWindows() ? new WindowsSendInputBackend() :
                 OperatingSystem.IsLinux() ? CreateLinuxInputBackend() : new UnavailableInputBackend()), inputMetrics);
-        _dispatcher = new RequestDispatcher(identity, permissions, () => _input.ProtocolVersion, clipboardBackend);
+        _dispatcher = new RequestDispatcher(identity, permissions, () => _input.ProtocolVersion, clipboardBackend, _configuration);
         PeerSessions = new PeerSessionManager(identity, trust, permissions, _input, _dispatcher, _configuration, port);
     }
 

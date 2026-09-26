@@ -1,14 +1,15 @@
 using System.Text.Json;
 using Xas.Core;
+using Xas.Core.Configuration;
 using Xas.Core.FileSystem;
 using Xas.Core.Security;
 
 namespace Xas.Daemon.FileSystem;
 
 /// <summary>Implements the peer-authorized filesystem RPC surface on top of local volumes.</summary>
-public sealed class FileSystemService(PeerPermissionStore permissions)
+public sealed class FileSystemService(PeerPermissionStore permissions, LocalConfiguration configuration)
 {
-    private readonly LocalFileSystemBackend _backend = new();
+    private readonly LocalFileSystemBackend _backend = new(configuration);
 
     public async ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
         CancellationToken cancellationToken)
@@ -66,48 +67,74 @@ public sealed class FileSystemService(PeerPermissionStore permissions)
 }
 
 /// <summary>Filesystem access is rooted at an explicitly selected local volume; paths cannot escape it.</summary>
-internal sealed class LocalFileSystemBackend
+internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
 {
     private const int PageSize = 512;
-    private readonly Dictionary<string, string> _volumes = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, VolumeRoot> _volumes = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _volumeGate = new();
 
     public RemoteVolume[] GetVolumes()
     {
-        lock (_volumeGate) _volumes.Clear();
+        var roots = new Dictionary<string, VolumeRoot>(StringComparer.OrdinalIgnoreCase);
         var result = new List<RemoteVolume>();
-        foreach (var drive in DriveInfo.GetDrives())
+
+        foreach (var export in configuration.FileSystemExports)
         {
             try
             {
-                if (!drive.IsReady) continue;
-                var root = Path.GetFullPath(drive.RootDirectory.FullName);
-                var id = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(root.ToUpperInvariant())))[..16];
-                lock (_volumeGate) _volumes[id] = root;
-                var kind = drive.DriveType switch { DriveType.Removable => "removable", DriveType.Network => "network", DriveType.CDRom => "optical", _ => "fixed" };
-                result.Add(new RemoteVolume(id, drive.VolumeLabel.Length == 0 ? root : drive.VolumeLabel, kind, IsReadOnly(root)));
+                var root = Path.GetFullPath(export.Path);
+                if (!Directory.Exists(root)) continue;
+                RejectLinks(root);
+                var id = "export-" + export.Id;
+                roots[id] = new VolumeRoot(root, export.ReadOnly);
+                result.Add(new RemoteVolume(id, export.Name, "export", export.ReadOnly));
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
+        }
+
+        if (configuration.AutoExposeRemovable)
+        {
+            foreach (var volume in EnumerateRemovableVolumes())
+            {
+                try
+                {
+                    var root = Path.GetFullPath(volume.Root);
+                    if (!Directory.Exists(root)) continue;
+                    RejectLinks(root);
+                    var id = "removable-" + StableVolumeId(root);
+                    if (roots.ContainsKey(id)) continue;
+                    roots[id] = new VolumeRoot(root, volume.ReadOnly);
+                    result.Add(new RemoteVolume(id, volume.Name, "removable", volume.ReadOnly));
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
+        lock (_volumeGate)
+        {
+            _volumes.Clear();
+            foreach (var (id, root) in roots) _volumes[id] = root;
         }
         return result.ToArray();
     }
 
     public RemoteFileStat Stat(RemotePath request)
     {
-        var path = Resolve(request.VolumeId, request.Path, allowRoot: true);
+        var (path, volume) = Resolve(request.VolumeId, request.Path, allowRoot: true);
         RejectLinks(path);
         var attrs = File.GetAttributes(path);
         var directory = attrs.HasFlag(FileAttributes.Directory);
         var info = directory ? (FileSystemInfo)new DirectoryInfo(path) : new FileInfo(path);
         return new RemoteFileStat(info.Name.Length == 0 ? path : info.Name, directory, directory ? 0 : ((FileInfo)info).Length,
-            new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeMilliseconds(), attrs.HasFlag(FileAttributes.ReadOnly));
+            new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeMilliseconds(), volume.ReadOnly || attrs.HasFlag(FileAttributes.ReadOnly));
     }
 
     public RemoteDirectoryPage List(RemoteListPath request)
     {
         if (request.Offset < 0) throw new InvalidDataException("Directory offset cannot be negative.");
-        var path = Resolve(request.VolumeId, request.Path, allowRoot: true);
+        var (path, _) = Resolve(request.VolumeId, request.Path, allowRoot: true);
         RejectLinks(path);
         if (!Directory.Exists(path)) throw new DirectoryNotFoundException(path);
         var entries = Directory.EnumerateFileSystemEntries(path).OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
@@ -126,7 +153,7 @@ internal sealed class LocalFileSystemBackend
     public byte[] Read(RemoteReadRange request, CancellationToken cancellationToken)
     {
         if (request.Offset < 0) throw new InvalidDataException("File offset cannot be negative.");
-        var path = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        var (path, _) = Resolve(request.VolumeId, request.Path, allowRoot: false);
         RejectLinks(path);
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
         stream.Position = request.Offset;
@@ -145,7 +172,8 @@ internal sealed class LocalFileSystemBackend
     public async ValueTask<long> WriteAsync(RemoteWriteRange request, CancellationToken cancellationToken)
     {
         if (request.Offset < 0) throw new InvalidDataException("File offset cannot be negative.");
-        var path = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        var (path, volume) = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        EnsureWritable(volume);
         RejectLinks(path);
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read, 4096, FileOptions.Asynchronous);
         stream.Position = request.Offset;
@@ -155,7 +183,8 @@ internal sealed class LocalFileSystemBackend
 
     public void Create(RemoteCreatePath request)
     {
-        var path = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        var (path, volume) = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        EnsureWritable(volume);
         RejectLinks(Path.GetDirectoryName(path)!);
         RejectLinks(path);
         if (request.Directory)
@@ -172,15 +201,18 @@ internal sealed class LocalFileSystemBackend
 
     public void Delete(RemoteDeletePath request)
     {
-        var path = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        var (path, volume) = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        EnsureWritable(volume);
         RejectLinks(path);
         if (request.Directory) Directory.Delete(path, recursive: false); else File.Delete(path);
     }
 
     public void Rename(RemoteRenamePath request)
     {
-        var source = Resolve(request.VolumeId, request.Path, allowRoot: false);
-        var destination = Resolve(request.VolumeId, request.NewPath, allowRoot: false);
+        var (source, volume) = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        EnsureWritable(volume);
+        var (destination, destinationVolume) = Resolve(request.VolumeId, request.NewPath, allowRoot: false);
+        EnsureWritable(destinationVolume);
         RejectLinks(source);
         RejectLinks(Path.GetDirectoryName(destination)!);
         RejectLinks(destination);
@@ -195,12 +227,11 @@ internal sealed class LocalFileSystemBackend
         }
     }
 
-    private string Resolve(string id, string relative, bool allowRoot)
+    private (string Path, VolumeRoot Volume) Resolve(string id, string relative, bool allowRoot)
     {
         if (relative is null || relative.Length > RemoteFileSystemWire.MaxPathChars || relative.IndexOf('\0') >= 0) throw new InvalidDataException("Invalid filesystem path.");
-        string root;
-        lock (_volumeGate)
-            if (!_volumes.TryGetValue(id, out root!)) throw new IOException("Volume is no longer available. Refresh the volume list.");
+        var volume = GetVolume(id);
+        var root = volume.Root;
         var normalized = relative.Replace('/', Path.DirectorySeparatorChar);
         if (Path.IsPathRooted(normalized)) throw new InvalidDataException("Filesystem paths must be relative to their volume.");
         var path = Path.GetFullPath(Path.Combine(root, normalized));
@@ -208,10 +239,92 @@ internal sealed class LocalFileSystemBackend
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         if ((!path.Equals(root, comparison) && !path.StartsWith(prefix, comparison)) || (!allowRoot && path.Equals(root, comparison)))
             throw new InvalidDataException("Filesystem path escapes its volume.");
-        return path;
+        return (path, volume);
     }
 
-    private static bool IsReadOnly(string path) => (File.GetAttributes(path) & FileAttributes.ReadOnly) != 0;
+    private VolumeRoot GetVolume(string id)
+    {
+        lock (_volumeGate)
+            if (_volumes.TryGetValue(id, out var cached)) return cached;
+        _ = GetVolumes();
+        lock (_volumeGate)
+            if (_volumes.TryGetValue(id, out var refreshed)) return refreshed;
+        throw new IOException("Volume is no longer available or is not exported.");
+    }
+
+    private static void EnsureWritable(VolumeRoot volume)
+    {
+        if (volume.ReadOnly) throw new UnauthorizedAccessException("This filesystem export is read-only.");
+    }
+
+    private static IEnumerable<MountedVolume> EnumerateRemovableVolumes()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                if (!drive.IsReady || drive.DriveType != DriveType.Removable) continue;
+                var root = drive.RootDirectory.FullName;
+                var name = string.IsNullOrWhiteSpace(drive.VolumeLabel) ? root : drive.VolumeLabel;
+                yield return new MountedVolume(root, name, false);
+            }
+            yield break;
+        }
+
+        if (!OperatingSystem.IsLinux() || !File.Exists("/proc/self/mountinfo")) yield break;
+        foreach (var line in File.ReadLines("/proc/self/mountinfo"))
+        {
+            var fields = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (fields.Length < 10) continue;
+            var separator = Array.IndexOf(fields, "-");
+            if (separator < 6 || separator + 2 >= fields.Length) continue;
+            var device = fields[2];
+            var mountPoint = DecodeMountInfoPath(fields[4]);
+            if (mountPoint == "/" || !Path.IsPathRooted(mountPoint) || !IsLinuxRemovableDevice(device)) continue;
+            var readOnly = fields[5].Split(',').Contains("ro", StringComparer.Ordinal);
+            var name = Path.GetFileName(mountPoint.TrimEnd('/'));
+            if (string.IsNullOrWhiteSpace(name)) name = mountPoint;
+            yield return new MountedVolume(mountPoint, name, readOnly);
+        }
+    }
+
+    private static bool IsLinuxRemovableDevice(string majorMinor)
+    {
+        if (majorMinor.Length == 0 || majorMinor.Any(c => !char.IsAsciiDigit(c) && c != ':')) return false;
+        var link = Path.Combine("/sys/dev/block", majorMinor);
+        if (!File.Exists(link) && !Directory.Exists(link)) return false;
+        try
+        {
+            FileSystemInfo source = new FileInfo(link);
+            var target = source.ResolveLinkTarget(returnFinalTarget: true);
+            if (target is null) return false;
+            var full = target.FullName.Replace('\\', '/');
+            if (full.Contains("/usb", StringComparison.OrdinalIgnoreCase)) return true;
+            var current = target.FullName;
+            while (!string.IsNullOrWhiteSpace(current) && current.StartsWith("/sys/", StringComparison.Ordinal))
+            {
+                var removable = Path.Combine(current, "removable");
+                if (File.Exists(removable) && string.Equals(File.ReadAllText(removable).Trim(), "1", StringComparison.Ordinal))
+                    return true;
+                var parent = Path.GetDirectoryName(current);
+                if (parent is null || parent == current) break;
+                current = parent;
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return false;
+    }
+
+    private static string DecodeMountInfoPath(string value) => value
+        .Replace("\\040", " ", StringComparison.Ordinal)
+        .Replace("\\011", "\t", StringComparison.Ordinal)
+        .Replace("\\012", "\n", StringComparison.Ordinal)
+        .Replace("\\134", "\\", StringComparison.Ordinal);
+
+    private static string StableVolumeId(string root) => Convert.ToHexString(
+        System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
+            OperatingSystem.IsWindows() ? root.ToUpperInvariant() : root)))[..16];
 
     private static void RejectLinks(string path)
     {
@@ -229,4 +342,7 @@ internal sealed class LocalFileSystemBackend
             current = parent;
         }
     }
+
+    private sealed record VolumeRoot(string Root, bool ReadOnly);
+    private sealed record MountedVolume(string Root, string Name, bool ReadOnly);
 }

@@ -1,6 +1,9 @@
 using Xas.Core.FileSystem;
 using Xas.Core;
+using Xas.Core.Configuration;
 using Xas.Core.Protocol;
+using Xas.Core.Security;
+using Xas.Daemon.FileSystem;
 using Xas.Daemon.FileSystem.Mount;
 
 public static class FileSystemTests
@@ -24,6 +27,47 @@ public static class FileSystemTests
         }
         catch (InvalidDataException) { }
         await RemoteClientUsesVolumeScopedRequests();
+        await FileSystemExportsAreExplicitAndReadOnlyIsEnforced();
+    }
+
+    private static async Task FileSystemExportsAreExplicitAndReadOnlyIsEnforced()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "xas-fs-policy-" + Guid.NewGuid().ToString("N"));
+        var exportRoot = Path.Combine(root, "export");
+        Directory.CreateDirectory(exportRoot);
+        await File.WriteAllTextAsync(Path.Combine(exportRoot, "hello.txt"), "hello");
+        try
+        {
+            var configuration = new LocalConfiguration(Path.Combine(root, "config"));
+            configuration.SetAutoExposeRemovable(false);
+            configuration.UpsertFileSystemExport(new FileSystemExport("docs", exportRoot, "Docs", ReadOnly: true));
+            var permissions = new PeerPermissionStore(Path.Combine(root, "trust"));
+            permissions.SetAllowed("peer", Capability.FileSystem, true);
+            var service = new FileSystemService(permissions, configuration);
+
+            var volumesReply = await service.HandleAsync("peer",
+                new ProtocolMessage(MessageKind.Request, 1, 0, "fs.volumes", []), CancellationToken.None);
+            var volumes = RemoteFileSystemWire.Decode<RemoteVolume[]>(volumesReply.Payload);
+            Assert(volumes.Length == 1 && volumes[0] is { Id: "export-docs", Name: "Docs", Kind: "export", ReadOnly: true },
+                "Filesystem service exposed storage outside the explicit export policy.");
+
+            var readReply = await service.HandleAsync("peer", new ProtocolMessage(MessageKind.Request, 2, 0, "fs.read",
+                RemoteFileSystemWire.Encode(new RemoteReadRange("export-docs", "hello.txt", 0, 5))), CancellationToken.None);
+            Assert(System.Text.Encoding.UTF8.GetString(readReply.Payload) == "hello", "Explicit filesystem export could not be read.");
+
+            try
+            {
+                await service.HandleAsync("peer", new ProtocolMessage(MessageKind.Request, 3, 0, "fs.write",
+                    RemoteFileSystemWire.Encode(new RemoteWriteRange("export-docs", "hello.txt", 0, [1, 2, 3]))), CancellationToken.None);
+                throw new Exception("A read-only filesystem export accepted a write.");
+            }
+            catch (UnauthorizedAccessException) { }
+
+            var reloaded = new LocalConfiguration(Path.Combine(root, "config"));
+            Assert(!reloaded.AutoExposeRemovable && reloaded.FileSystemExports.Single().Id == "docs",
+                "Filesystem export policy did not persist in local configuration.");
+        }
+        finally { Directory.Delete(root, true); }
     }
 
     private static async Task RemoteClientUsesVolumeScopedRequests()

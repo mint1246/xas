@@ -23,6 +23,7 @@ public static class AppPaths
 }
 
 public sealed record ConfiguredPeer(string DeviceId, string Name, string Host, int Port);
+public sealed record FileSystemExport(string Id, string Path, string Name, bool ReadOnly);
 
 /// <summary>Per-user nonsecret peer endpoints and default selection.</summary>
 public sealed class LocalConfiguration
@@ -44,6 +45,8 @@ public sealed class LocalConfiguration
 
     public string? DefaultDeviceId { get { lock (_gate) return _settings.DefaultDeviceId; } }
     public IReadOnlyList<ConfiguredPeer> Peers { get { lock (_gate) return _settings.Peers.ToArray(); } }
+    public bool AutoExposeRemovable { get { lock (_gate) return _settings.AutoExposeRemovable; } }
+    public IReadOnlyList<FileSystemExport> FileSystemExports { get { lock (_gate) return _settings.FileSystemExports.ToArray(); } }
 
     public ConfiguredPeer? Resolve(string? idPrefix)
     {
@@ -64,7 +67,7 @@ public sealed class LocalConfiguration
         lock (_gate)
         {
             var peers = _settings.Peers.Where(p => p.DeviceId != peer.DeviceId).Append(peer).ToArray();
-            _settings = _settings with { Peers = peers };
+            _settings.Peers = peers;
             Save();
         }
         Changed?.Invoke();
@@ -73,7 +76,7 @@ public sealed class LocalConfiguration
     public void SetDefault(string idPrefix)
     {
         var peer = Resolve(idPrefix) ?? throw new InvalidOperationException("No matching paired device.");
-        lock (_gate) { _settings = _settings with { DefaultDeviceId = peer.DeviceId }; Save(); }
+        lock (_gate) { _settings.DefaultDeviceId = peer.DeviceId; Save(); }
         Changed?.Invoke();
     }
 
@@ -84,11 +87,49 @@ public sealed class LocalConfiguration
         {
             var peers = _settings.Peers.Where(p => p.DeviceId != deviceId).ToArray();
             if (peers.Length == _settings.Peers.Length) return false;
-            _settings = _settings with
-            {
-                Peers = peers,
-                DefaultDeviceId = _settings.DefaultDeviceId == deviceId ? null : _settings.DefaultDeviceId
-            };
+            _settings.Peers = peers;
+            if (_settings.DefaultDeviceId == deviceId) _settings.DefaultDeviceId = null;
+            Save();
+            removed = true;
+        }
+        if (removed) Changed?.Invoke();
+        return removed;
+    }
+
+    public void SetAutoExposeRemovable(bool enabled)
+    {
+        lock (_gate) { _settings.AutoExposeRemovable = enabled; Save(); }
+        Changed?.Invoke();
+    }
+
+    public void UpsertFileSystemExport(FileSystemExport export)
+    {
+        ArgumentNullException.ThrowIfNull(export);
+        if (string.IsNullOrWhiteSpace(export.Id) || export.Id.Length > 128 || export.Id.Any(char.IsControl))
+            throw new ArgumentException("Filesystem export ID is invalid.", nameof(export));
+        if (string.IsNullOrWhiteSpace(export.Path) || !Path.IsPathRooted(export.Path))
+            throw new ArgumentException("Filesystem export path must be an absolute local path.", nameof(export));
+        if (string.IsNullOrWhiteSpace(export.Name) || export.Name.Length > 128 || export.Name.Any(char.IsControl))
+            throw new ArgumentException("Filesystem export name is invalid.", nameof(export));
+        var normalized = Path.GetFullPath(export.Path);
+        lock (_gate)
+        {
+            _settings.FileSystemExports = _settings.FileSystemExports
+                .Where(item => !string.Equals(item.Id, export.Id, StringComparison.Ordinal))
+                .Append(export with { Path = normalized }).ToArray();
+            Save();
+        }
+        Changed?.Invoke();
+    }
+
+    public bool RemoveFileSystemExport(string id)
+    {
+        var removed = false;
+        lock (_gate)
+        {
+            var exports = _settings.FileSystemExports.Where(item => !string.Equals(item.Id, id, StringComparison.Ordinal)).ToArray();
+            if (exports.Length == _settings.FileSystemExports.Length) return false;
+            _settings.FileSystemExports = exports;
             Save();
             removed = true;
         }
@@ -103,5 +144,15 @@ public sealed class LocalConfiguration
         File.Move(temp, _path, true);
     }
 
-    private sealed record Settings(string? DefaultDeviceId, ConfiguredPeer[] Peers);
+    private sealed class Settings
+    {
+        public string? DefaultDeviceId { get; set; }
+        public ConfiguredPeer[] Peers { get; set; } = [];
+        public bool AutoExposeRemovable { get; set; } = true;
+        public FileSystemExport[] FileSystemExports { get; set; } = [];
+
+        public Settings() { }
+        public Settings(string? defaultDeviceId, ConfiguredPeer[] peers)
+        { DefaultDeviceId = defaultDeviceId; Peers = peers; }
+    }
 }

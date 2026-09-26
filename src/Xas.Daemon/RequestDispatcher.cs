@@ -5,6 +5,7 @@ using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Core.Services;
 using Xas.Core.Privileged;
+using Xas.Core.Configuration;
 using Xas.Daemon.Shell;
 using Xas.Daemon.Clipboard;
 using Xas.Daemon.Display;
@@ -13,7 +14,8 @@ using Xas.Daemon.FileSystem;
 namespace Xas.Daemon;
 
 public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionStore permissions,
-    Func<ushort>? inputVersion = null, ITextClipboardBackend? clipboardBackend = null)
+    Func<ushort>? inputVersion = null, ITextClipboardBackend? clipboardBackend = null,
+    LocalConfiguration? configuration = null)
 {
     private readonly ProcessShellBackend _shell = new();
     private readonly IInteractiveShellBackend _interactive = OperatingSystem.IsWindows()
@@ -21,7 +23,7 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
     private readonly ClipboardService _clipboard = new(identity.DeviceId, permissions,
         clipboardBackend ?? (OperatingSystem.IsWindows() ? new WindowsTextClipboard() : new LinuxTextClipboard()));
     private readonly LinuxDisplayMetadataService _display = new();
-    private readonly FileSystemService _fileSystem = new(permissions);
+    private readonly FileSystemService _fileSystem = new(permissions, configuration ?? new LocalConfiguration());
 
     internal ClipboardService Clipboard => _clipboard;
 
