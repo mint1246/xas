@@ -2,6 +2,7 @@ using Xas.Cli;
 using Xas.Cli.FileTransfer;
 using Xas.Core;
 using Xas.Core.Configuration;
+using Xas.Core.LocalIpc;
 
 namespace Xas.Tests;
 
@@ -18,6 +19,7 @@ public static class CliTests
         CopyDefaultDeviceShorthandResolves();
         await ClipboardParsesDirectionAndTarget();
         await ClipboardSyncParsesTarget();
+        await StorageCommandsParseTargetsAndVolumes();
         await InputParsesTarget();
     }
 
@@ -141,6 +143,40 @@ public static class CliTests
         Equal("desktop", client.WatchDeviceId);
     }
 
+    private static async Task StorageCommandsParseTargetsAndVolumes()
+    {
+        var client = new FakeClient();
+        var cli = CreateCli(client);
+
+        Equal(0, await cli.RunAsync(["-d", "laptop", "volumes"]));
+        Equal("laptop", client.VolumeListDeviceId);
+        Equal(0, await cli.RunAsync(["volumes", "desktop"]));
+        Equal("desktop", client.VolumeListDeviceId);
+
+        Equal(0, await cli.RunAsync(["mounts"]));
+        Equal<string?>(null, client.MountListDeviceId);
+        Equal(0, await cli.RunAsync(["-d", "laptop", "mounts"]));
+        Equal("laptop", client.MountListDeviceId);
+
+        Equal(0, await cli.RunAsync(["-d", "laptop", "mount", "CAMERA_SD"]));
+        Equal("laptop", client.StorageDeviceId);
+        Equal("CAMERA_SD", client.StorageVolume);
+        Equal("mount", client.StorageOperation);
+
+        Equal(0, await cli.RunAsync(["-d", "laptop", "unmount", "sd-1"]));
+        Equal("laptop", client.StorageDeviceId);
+        Equal("sd-1", client.StorageVolume);
+        Equal("unmount", client.StorageOperation);
+
+        Equal(0, await cli.RunAsync(["-d", "laptop", "eject", "CAMERA_SD"]));
+        Equal("laptop", client.StorageDeviceId);
+        Equal("CAMERA_SD", client.StorageVolume);
+        Equal("eject", client.StorageOperation);
+
+        Equal(2, await cli.RunAsync(["mount"]));
+        Equal(2, await cli.RunAsync(["eject", "one", "two"]));
+    }
+
     private static XasCommandLine CreateCli(FakeClient client) => new(client, TextWriter.Null, TextWriter.Null);
 
     private static void Equal<T>(T expected, T actual)
@@ -176,6 +212,11 @@ public static class CliTests
         public string? ClipboardDeviceId { get; private set; }
         public string? InputDeviceId { get; private set; }
         public string? WatchDeviceId { get; private set; }
+        public string? VolumeListDeviceId { get; private set; }
+        public string? MountListDeviceId { get; private set; }
+        public string? StorageDeviceId { get; private set; }
+        public string? StorageVolume { get; private set; }
+        public string? StorageOperation { get; private set; }
 
         public Task<IReadOnlyList<KnownDeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<KnownDeviceInfo>>([]);
         public Task<DeviceInfo?> GetDeviceInfoAsync(string? deviceId, CancellationToken cancellationToken)
@@ -224,6 +265,42 @@ public static class CliTests
         {
             WatchDeviceId = deviceId;
             return Task.FromResult(19);
+        }
+        public Task<IReadOnlyList<LocalRemoteVolumeInfo>> ListRemoteVolumesAsync(string? deviceId,
+            CancellationToken cancellationToken)
+        {
+            VolumeListDeviceId = deviceId;
+            return Task.FromResult<IReadOnlyList<LocalRemoteVolumeInfo>>([]);
+        }
+        public Task<IReadOnlyList<LocalRemoteVolumeInfo>> ListRemoteMountsAsync(string? deviceId,
+            CancellationToken cancellationToken)
+        {
+            MountListDeviceId = deviceId;
+            return Task.FromResult<IReadOnlyList<LocalRemoteVolumeInfo>>([]);
+        }
+        public Task<LocalRemoteVolumeInfo> MountRemoteVolumeAsync(string? deviceId, string volume,
+            CancellationToken cancellationToken)
+        {
+            StorageDeviceId = deviceId;
+            StorageVolume = volume;
+            StorageOperation = "mount";
+            return Task.FromResult(new LocalRemoteVolumeInfo(deviceId ?? "default", "test", "volume-1", volume,
+                "removable", false, null, null, "exfat", "E:", false));
+        }
+        public Task<bool> UnmountRemoteVolumeAsync(string? deviceId, string volume,
+            CancellationToken cancellationToken)
+        {
+            StorageDeviceId = deviceId;
+            StorageVolume = volume;
+            StorageOperation = "unmount";
+            return Task.FromResult(true);
+        }
+        public Task EjectRemoteVolumeAsync(string? deviceId, string volume, CancellationToken cancellationToken)
+        {
+            StorageDeviceId = deviceId;
+            StorageVolume = volume;
+            StorageOperation = "eject";
+            return Task.CompletedTask;
         }
     }
 }

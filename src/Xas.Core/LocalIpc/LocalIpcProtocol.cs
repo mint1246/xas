@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Xas.Core.Configuration;
+using Xas.Core.FileSystem;
 using Xas.Core.Services;
 
 namespace Xas.Core.LocalIpc;
@@ -25,6 +26,11 @@ public static class LocalIpcProtocol
     public const string ClipboardPush = "local.clipboard.push";
     public const string ClipboardPull = "local.clipboard.pull";
     public const string ClipboardStatus = "local.clipboard.status";
+    public const string StorageVolumes = "local.storage.volumes";
+    public const string StorageMounts = "local.storage.mounts";
+    public const string StorageMount = "local.storage.mount";
+    public const string StorageUnmount = "local.storage.unmount";
+    public const string StorageEject = "local.storage.eject";
     public const string UiInfo = "local.ui.info";
     public const string Revoke = "local.revoke";
     public const string Endpoint = "local.endpoint";
@@ -65,6 +71,10 @@ public sealed record LocalPairDecision(string PairingId, bool Approve, PairPermi
 public sealed record LocalPairPending(string PairingId, string DeviceId, string DisplayName,
     string Fingerprint, string Code, DateTimeOffset CreatedAtUtc, bool Incoming, string Address, int ControlPort);
 public sealed record LocalClipboardStatus(bool Active, string Message);
+public sealed record LocalRemoteVolumeInfo(string DeviceId, string DeviceName, string VolumeId, string Name,
+    string Kind, bool ReadOnly, long? TotalBytes, long? FreeBytes, string? FileSystem,
+    string? MountedAt, bool AutoMountSuppressed);
+public sealed record LocalStorageVolumeTarget(string? DeviceId, string Volume);
 public sealed record LocalUiInfo(string Url);
 public sealed record LocalEndpointUpdate(string DeviceId, string Host, int Port);
 

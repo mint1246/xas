@@ -43,6 +43,8 @@ public static class RemoteMountManagerTests
                 new RemoteVolume("sd-1", "CAMERA_SD", "removable", false, 64_000_000, 32_000_000, "exfat")
             ];
             var adapters = new List<FakeMountAdapter>();
+            var ejectCount = 0;
+            var failEject = false;
             await using var manager = new RemoteMountManager(configuration, sessions,
                 adapterFactory: () =>
                 {
@@ -54,6 +56,15 @@ public static class RemoteMountManagerTests
                 {
                     ct.ThrowIfCancellationRequested();
                     return ValueTask.FromResult(current.ToArray());
+                },
+                ejectVolume: (_, volumeId, ct) =>
+                {
+                    ct.ThrowIfCancellationRequested();
+                    Equal("sd-1", volumeId, "Eject targeted the wrong remote volume.");
+                    ejectCount++;
+                    if (failEject) return ValueTask.FromException(new IOException("remote media is busy"));
+                    current = [];
+                    return ValueTask.CompletedTask;
                 });
             var run = manager.RunAsync(CancellationToken.None);
 
@@ -66,25 +77,66 @@ public static class RemoteMountManagerTests
             await Task.Delay(100);
             Equal(1, adapters.Count, "A duplicate session event created a duplicate mount.");
 
-            current = [];
-            session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(3));
+            Assert(await manager.UnmountVolumeAsync(peerId, "CAMERA_SD", CancellationToken.None),
+                "Manual unmount did not report an existing mount.");
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
-            Equal(1, adapters[0].UnmountCount, "Remote volume removal did not unmount its drive.");
+            Equal(1, adapters[0].UnmountCount, "Manual unmount did not close the native mount.");
+            session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(3));
+            await Task.Delay(150);
+            Equal(0, manager.GetSnapshots().Count, "Manual unmount was immediately undone by automatic remounting.");
+            Equal(1, adapters.Count, "Suppressed volume unexpectedly created another mount adapter.");
+
+            var manuallyMounted = await manager.MountVolumeAsync(peerId, "CAMERA_SD", CancellationToken.None);
+            Equal("Y:", manuallyMounted.MountPoint, "Manual mount did not create the expected native mount.");
+            Equal(2, adapters.Count, "Manual mount did not create exactly one new mount adapter.");
+
+            await manager.EjectVolumeAsync(peerId, "CAMERA_SD", CancellationToken.None);
+            Equal(1, ejectCount, "Remote eject callback was not invoked.");
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
+            Equal(1, adapters[1].UnmountCount, "Successful remote eject did not first remove the local native mount.");
+
+            // Let the post-eject reconciliation observe that the remote volume is genuinely gone;
+            // this clears suppression so a later physical reinsertion of the same volume ID can auto-mount.
+            session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(3.5));
+            await Task.Delay(150);
 
             current = [new RemoteVolume("sd-1", "CAMERA_SD", "removable", false, 64_000_000, 31_000_000, "exfat")];
             session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(4));
-            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1 && adapters.Count == 2);
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1 && adapters.Count == 3);
+
+            failEject = true;
+            try
+            {
+                await manager.EjectVolumeAsync(peerId, "CAMERA_SD", CancellationToken.None);
+                throw new InvalidOperationException("Failed remote eject unexpectedly succeeded.");
+            }
+            catch (IOException ex) when (ex.Message.Contains("busy", StringComparison.OrdinalIgnoreCase)) { }
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1 && adapters.Count == 4);
+            Equal(1, adapters[2].UnmountCount, "Failed eject did not remove the original local mount first.");
+            Equal("W:", manager.GetSnapshots()[0].MountPoint,
+                "Failed remote eject did not clear suppression and restore the still-present remote volume.");
+            failEject = false;
 
             configuration.SetAutoMountRemoteRemovable(false);
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
-            Equal(1, adapters[1].UnmountCount, "Disabling automatic remote mounts left the drive mounted.");
+            Equal(1, adapters[3].UnmountCount, "Disabling automatic remote mounts left the drive mounted.");
 
             configuration.SetAutoMountRemoteRemovable(true);
-            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1 && adapters.Count == 3);
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1 && adapters.Count == 5);
+
+            current =
+            [
+                new RemoteVolume("sd-1", "CAMERA_SD", "removable", false, 64_000_000, 31_000_000, "exfat"),
+                new RemoteVolume("export-projects", "PROJECTS", "export", false, 128_000_000, 96_000_000, "ext4")
+            ];
+            var exportMount = await manager.MountVolumeAsync(peerId, "PROJECTS", CancellationToken.None);
+            Equal("export", exportMount.Kind, "Manual export mount lost its remote volume kind.");
+            Assert(await manager.UnmountVolumeAsync(peerId, "PROJECTS", CancellationToken.None),
+                "Manual export unmount did not report an existing native mount.");
 
             session.Detach(PeerLane.Bulk, bulk);
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
-            Equal(1, adapters[2].UnmountCount, "Losing the bulk lane left a stale drive mounted.");
+            Equal(1, adapters[4].UnmountCount, "Losing the bulk lane left a stale drive mounted.");
 
             await manager.DisposeAsync();
             await run;

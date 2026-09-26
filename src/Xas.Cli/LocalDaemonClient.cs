@@ -272,6 +272,48 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
         return status.Active ? 0 : 1;
     }
 
+    public async Task<IReadOnlyList<LocalRemoteVolumeInfo>> ListRemoteVolumesAsync(string? deviceId,
+        CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.StorageVolumes,
+            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<LocalRemoteVolumeInfo[]>(reply.Payload, LocalIpcProtocol.Json)
+            ?? throw new InvalidDataException("The daemon returned an invalid remote volume list.");
+    }
+
+    public async Task<IReadOnlyList<LocalRemoteVolumeInfo>> ListRemoteMountsAsync(string? deviceId,
+        CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.StorageMounts,
+            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<LocalRemoteVolumeInfo[]>(reply.Payload, LocalIpcProtocol.Json)
+            ?? throw new InvalidDataException("The daemon returned an invalid remote mount list.");
+    }
+
+    public async Task<LocalRemoteVolumeInfo> MountRemoteVolumeAsync(string? deviceId, string volume,
+        CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.StorageMount,
+            JsonSerializer.SerializeToUtf8Bytes(new LocalStorageVolumeTarget(deviceId, volume), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<LocalRemoteVolumeInfo>(reply.Payload, LocalIpcProtocol.Json)
+            ?? throw new InvalidDataException("The daemon returned an invalid remote mount response.");
+    }
+
+    public async Task<bool> UnmountRemoteVolumeAsync(string? deviceId, string volume,
+        CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.StorageUnmount,
+            JsonSerializer.SerializeToUtf8Bytes(new LocalStorageVolumeTarget(deviceId, volume), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<bool>(reply.Payload, LocalIpcProtocol.Json);
+    }
+
+    public async Task EjectRemoteVolumeAsync(string? deviceId, string volume, CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.StorageEject,
+            JsonSerializer.SerializeToUtf8Bytes(new LocalStorageVolumeTarget(deviceId, volume), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        if (reply.Payload.Length != 0) throw new InvalidDataException("The daemon returned an invalid remote eject response.");
+    }
+
     public async Task<string> RevokeAsync(string deviceId, CancellationToken cancellationToken)
     {
         var reply = await RequestAsync(LocalIpcProtocol.Revoke,

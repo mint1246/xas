@@ -8,6 +8,7 @@ public sealed record RemoteVolume(string Id, string Name, string Kind, bool Read
 public sealed record RemoteFileEntry(string Name, bool Directory, long Length, long LastWriteUnixMs);
 public sealed record RemoteDirectoryPage(RemoteFileEntry[] Entries, bool HasMore);
 public sealed record RemotePath(string VolumeId, string Path);
+public sealed record RemoteVolumeRequest(string VolumeId);
 public sealed record RemoteListPath(string VolumeId, string Path, int Offset);
 public sealed record RemoteReadRange(string VolumeId, string Path, long Offset, int Length);
 public sealed record RemoteWriteRange(string VolumeId, string Path, long Offset, byte[] Data);

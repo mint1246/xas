@@ -73,14 +73,16 @@ public sealed class DaemonHost
         await using var pairing = new PairingService(_identity, _trust, checked(_port + 1), Environment.MachineName);
         var configuration = _configuration;
         var peerAdministration = new PeerAdministrationService(configuration, _trust, _permissions, PeerSessions);
+        RemoteMountManager? remoteMounts = OperatingSystem.IsWindows()
+            ? new RemoteMountManager(configuration, PeerSessions, log: message => Console.Error.WriteLine(message))
+            : null;
         await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, configuration,
             peerAdministration, pairing, _webPort);
         var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration, _trust, _permissions,
-            _dispatcher.Clipboard, peerAdministration, () => $"http://127.0.0.1:{web.Port}/");
+            _dispatcher.Clipboard, peerAdministration, remoteMounts, () => $"http://127.0.0.1:{web.Port}/");
         using var daemonStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         listener.Start();
         Task kvmCoordinator = Task.CompletedTask;
-        RemoteMountManager? remoteMounts = null;
         Task remoteMountTask = Task.CompletedTask;
         Task localIpcTask = Task.CompletedTask;
         try
@@ -94,9 +96,7 @@ public sealed class DaemonHost
             {
                 kvmCoordinator = WindowsKvmCoordinator.RunAsync(configuration, PeerSessions, daemonStop.Token,
                     message => Console.Error.WriteLine(message));
-                remoteMounts = new RemoteMountManager(configuration, PeerSessions,
-                    log: message => Console.Error.WriteLine(message));
-                remoteMountTask = remoteMounts.RunAsync(daemonStop.Token);
+                remoteMountTask = remoteMounts!.RunAsync(daemonStop.Token);
             }
             Console.WriteLine($"xas daemon listening on TCP {_port}; device {_identity.DeviceId}");
             var clients = new HashSet<Task>();

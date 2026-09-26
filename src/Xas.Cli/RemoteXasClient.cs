@@ -2,6 +2,7 @@ using System.Text.Json;
 using Xas.Core;
 using Xas.Core.Configuration;
 using Xas.Core.Discovery;
+using Xas.Core.LocalIpc;
 using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Core.Services;
@@ -234,6 +235,25 @@ public sealed class RemoteXasClient : IXasClient, IDisposable
         catch (RemoteProtocolException ex) { throw new XasClientException(ex.Message); }
         finally { Console.CancelKeyPress -= onCancel; }
     }
+
+    public Task<IReadOnlyList<LocalRemoteVolumeInfo>> ListRemoteVolumesAsync(string? deviceId,
+        CancellationToken cancellationToken) => Task.FromException<IReadOnlyList<LocalRemoteVolumeInfo>>(
+            new NotSupportedException("Remote volume management requires the local XAS daemon."));
+
+    public Task<IReadOnlyList<LocalRemoteVolumeInfo>> ListRemoteMountsAsync(string? deviceId,
+        CancellationToken cancellationToken) => Task.FromException<IReadOnlyList<LocalRemoteVolumeInfo>>(
+            new NotSupportedException("Remote mount management requires the local XAS daemon."));
+
+    public Task<LocalRemoteVolumeInfo> MountRemoteVolumeAsync(string? deviceId, string volume,
+        CancellationToken cancellationToken) => Task.FromException<LocalRemoteVolumeInfo>(
+            new NotSupportedException("Native remote mounts are owned by the local XAS daemon."));
+
+    public Task<bool> UnmountRemoteVolumeAsync(string? deviceId, string volume,
+        CancellationToken cancellationToken) => Task.FromException<bool>(
+            new NotSupportedException("Native remote mounts are owned by the local XAS daemon."));
+
+    public Task EjectRemoteVolumeAsync(string? deviceId, string volume, CancellationToken cancellationToken) =>
+        Task.FromException(new NotSupportedException("Remote safe eject is owned by the local XAS daemon."));
 
     private async Task<byte[]> ReadPipedInputAsync(CancellationToken cancellationToken)
     {

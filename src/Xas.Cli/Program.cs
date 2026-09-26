@@ -1,4 +1,5 @@
 using Xas.Core;
+using Xas.Core.LocalIpc;
 
 namespace Xas.Cli;
 
@@ -43,6 +44,11 @@ public interface IXasClient
         CancellationToken cancellationToken);
     Task<int> SyncClipboardAsync(bool push, string? deviceId, CancellationToken cancellationToken);
     Task<int> WatchClipboardAsync(string? deviceId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<LocalRemoteVolumeInfo>> ListRemoteVolumesAsync(string? deviceId, CancellationToken cancellationToken);
+    Task<IReadOnlyList<LocalRemoteVolumeInfo>> ListRemoteMountsAsync(string? deviceId, CancellationToken cancellationToken);
+    Task<LocalRemoteVolumeInfo> MountRemoteVolumeAsync(string? deviceId, string volume, CancellationToken cancellationToken);
+    Task<bool> UnmountRemoteVolumeAsync(string? deviceId, string volume, CancellationToken cancellationToken);
+    Task EjectRemoteVolumeAsync(string? deviceId, string volume, CancellationToken cancellationToken);
     Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken);
 }
 
@@ -101,6 +107,16 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
                     return await CopyAsync(args, targetDevice, cancellationToken);
                 case "clipboard":
                     return await ClipboardAsync(args, targetDevice, cancellationToken);
+                case "volumes":
+                    return await ListRemoteVolumesAsync(ResolveTarget(targetDevice, args.Skip(1).ToArray()), cancellationToken);
+                case "mounts":
+                    return await ListRemoteMountsAsync(ResolveTarget(targetDevice, args.Skip(1).ToArray()), cancellationToken);
+                case "mount":
+                    return await MountRemoteVolumeAsync(args, targetDevice, cancellationToken);
+                case "unmount":
+                    return await UnmountRemoteVolumeAsync(args, targetDevice, cancellationToken);
+                case "eject":
+                    return await EjectRemoteVolumeAsync(args, targetDevice, cancellationToken);
                 case "input":
                     if (args.Length > 2) { error.WriteLine("Usage: xas input [device-id]"); return 2; }
                     return await client.RunInputAsync(ResolveTarget(targetDevice, args.Skip(1).ToArray()), cancellationToken);
@@ -238,6 +254,85 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
             ResolveTarget(targetDevice, args.Skip(2).ToArray()), ct);
     }
 
+    private async Task<int> ListRemoteVolumesAsync(string? targetDevice, CancellationToken ct)
+    {
+        var volumes = await client.ListRemoteVolumesAsync(targetDevice, ct);
+        if (volumes.Count == 0)
+        {
+            output.WriteLine("No remote volumes found.");
+            return 0;
+        }
+        foreach (var volume in volumes)
+        {
+            var state = volume.MountedAt is { Length: > 0 } mounted
+                ? $"mounted={mounted}"
+                : volume.AutoMountSuppressed ? "unmounted (suppressed)" : "available";
+            output.WriteLine($"{volume.Name}\t{volume.Kind}\t{(volume.ReadOnly ? "ro" : "rw")}\t{FormatBytes(volume.TotalBytes)}\t{volume.FileSystem ?? "unknown"}\t{state}\t{volume.VolumeId}");
+        }
+        return 0;
+    }
+
+    private async Task<int> ListRemoteMountsAsync(string? targetDevice, CancellationToken ct)
+    {
+        var mounts = await client.ListRemoteMountsAsync(targetDevice, ct);
+        if (mounts.Count == 0)
+        {
+            output.WriteLine("No remote volumes are mounted.");
+            return 0;
+        }
+        foreach (var mount in mounts)
+            output.WriteLine($"{mount.MountedAt ?? "?"}\t{mount.Name}\t{mount.DeviceName}\t{(mount.ReadOnly ? "ro" : "rw")}\t{FormatBytes(mount.TotalBytes)}\t{mount.VolumeId}");
+        return 0;
+    }
+
+    private async Task<int> MountRemoteVolumeAsync(string[] args, string? targetDevice, CancellationToken ct)
+    {
+        if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1]))
+        {
+            error.WriteLine("Usage: xas [-d <device>] mount <volume-name-or-id>");
+            return 2;
+        }
+        var mounted = await client.MountRemoteVolumeAsync(targetDevice, args[1], ct);
+        output.WriteLine($"Mounted {mounted.Name} from {mounted.DeviceName} at {mounted.MountedAt ?? "native mount"}.");
+        return 0;
+    }
+
+    private async Task<int> UnmountRemoteVolumeAsync(string[] args, string? targetDevice, CancellationToken ct)
+    {
+        if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1]))
+        {
+            error.WriteLine("Usage: xas [-d <device>] unmount <volume-name-or-id>");
+            return 2;
+        }
+        var wasMounted = await client.UnmountRemoteVolumeAsync(targetDevice, args[1], ct);
+        output.WriteLine(wasMounted
+            ? $"Unmounted {args[1]}; automatic remount is suppressed until it disappears or you mount it again."
+            : $"{args[1]} was not mounted; automatic mounting is now suppressed until it disappears or you mount it again.");
+        return 0;
+    }
+
+    private async Task<int> EjectRemoteVolumeAsync(string[] args, string? targetDevice, CancellationToken ct)
+    {
+        if (args.Length != 2 || string.IsNullOrWhiteSpace(args[1]))
+        {
+            error.WriteLine("Usage: xas [-d <device>] eject <volume-name-or-id>");
+            return 2;
+        }
+        await client.EjectRemoteVolumeAsync(targetDevice, args[1], ct);
+        output.WriteLine($"Safely ejected {args[1]} on the remote device.");
+        return 0;
+    }
+
+    private static string FormatBytes(long? bytes)
+    {
+        if (bytes is null || bytes < 0) return "unknown";
+        string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+        var value = (double)bytes.Value;
+        var unit = 0;
+        while (value >= 1024 && unit < units.Length - 1) { value /= 1024; unit++; }
+        return unit == 0 ? $"{value:0} {units[unit]}" : $"{value:0.#} {units[unit]}";
+    }
+
     private static string? ResolveTarget(string? targetDevice, string[] positional)
     {
         if (positional.Length > 1)
@@ -259,6 +354,11 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         writer.WriteLine("  exec [--sudo] [--] <exe> [args]  Run an executable (optionally elevated)");
         writer.WriteLine("  cp [-r] [-f] <src> <dst>  Copy files to or from a paired device (:path uses the default device)");
         writer.WriteLine("  clipboard push|pull|sync [id]  Transfer or continuously sync plain text");
+        writer.WriteLine("  volumes [device-id]      List volumes exported by a remote device");
+        writer.WriteLine("  mounts [device-id]       List currently mounted remote volumes");
+        writer.WriteLine("  mount <volume>           Mount a remote volume natively (use -d to select device)");
+        writer.WriteLine("  unmount <volume>         Unmount and suppress automatic remount until reinsertion");
+        writer.WriteLine("  eject <volume>           Safely unmount/eject removable media on the remote device");
         writer.WriteLine("  input [device-id]       Capture Windows input manually (Ctrl+Alt+Esc releases)");
         writer.WriteLine("  display                 Report virtual display driver and handoff state (Windows)");
         writer.WriteLine("  (no arguments)          Open an interactive shell (requires PTY support)");

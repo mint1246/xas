@@ -13,13 +13,15 @@ using Xas.Core.Services;
 using Xas.Daemon.Pairing;
 using Xas.Daemon.Sessions;
 using Xas.Daemon.Clipboard;
+using Xas.Daemon.FileSystem.Mount;
 
 namespace Xas.Daemon.LocalIpc;
 
 /// <summary>Per-user command endpoint. It exposes trusted daemon state without exposing network credentials.</summary>
 internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService pairing,
     LocalConfiguration configuration, PeerTrustStore trust, PeerPermissionStore permissions,
-    ClipboardService clipboard, PeerAdministrationService peerAdministration, Func<string> uiUrl)
+    ClipboardService clipboard, PeerAdministrationService peerAdministration, RemoteMountManager? remoteMounts,
+    Func<string> uiUrl)
 {
     private readonly PeerSessionManager _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
     private readonly PairingService _pairing = pairing ?? throw new ArgumentNullException(nameof(pairing));
@@ -28,6 +30,7 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
     private readonly PeerPermissionStore _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
     private readonly ClipboardService _clipboard = clipboard ?? throw new ArgumentNullException(nameof(clipboard));
     private readonly PeerAdministrationService _peerAdministration = peerAdministration ?? throw new ArgumentNullException(nameof(peerAdministration));
+    private readonly RemoteMountManager? _remoteMounts = remoteMounts;
     private readonly Func<string> _uiUrl = uiUrl ?? throw new ArgumentNullException(nameof(uiUrl));
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -142,7 +145,8 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
                 return await DispatchRequestAsync(request, token).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException or InvalidOperationException or
-                KeyNotFoundException or JsonException or ArgumentException)
+                KeyNotFoundException or JsonException or ArgumentException or NotSupportedException or
+                UnauthorizedAccessException or RemoteProtocolException)
             {
                 return new ProtocolMessage(MessageKind.Error, request.RequestId, request.StreamId,
                     request.Method, Encoding.UTF8.GetBytes(ex.Message));
@@ -257,6 +261,51 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
                         new LocalClipboardStatus(false, $"Clipboard sync is unavailable: {ex.Message}"), LocalIpcProtocol.Json));
                 }
             }
+            case LocalIpcProtocol.StorageVolumes:
+            {
+                var manager = RequireRemoteMounts();
+                var target = ReadTarget(request.Payload);
+                var volumes = await manager.GetRemoteVolumesAsync(target.DeviceId, token).ConfigureAwait(false);
+                var response = volumes.Select(ToLocalVolumeInfo).ToArray();
+                return Response(request, JsonSerializer.SerializeToUtf8Bytes(response, LocalIpcProtocol.Json));
+            }
+            case LocalIpcProtocol.StorageMounts:
+            {
+                var manager = RequireRemoteMounts();
+                var target = ReadTarget(request.Payload);
+                var resolvedDevice = target.DeviceId is null ? null : Resolve(target.DeviceId)?.DeviceId
+                    ?? throw new InvalidOperationException("No matching paired device.");
+                var response = manager.GetSnapshots()
+                    .Where(m => resolvedDevice is null || m.DeviceId == resolvedDevice)
+                    .Select(m => new LocalRemoteVolumeInfo(m.DeviceId, m.DeviceName, m.VolumeId, m.VolumeName,
+                        m.Kind, m.ReadOnly, m.TotalBytes, m.FreeBytes, m.FileSystem, m.MountPoint, false))
+                    .ToArray();
+                return Response(request, JsonSerializer.SerializeToUtf8Bytes(response, LocalIpcProtocol.Json));
+            }
+            case LocalIpcProtocol.StorageMount:
+            {
+                var manager = RequireRemoteMounts();
+                var target = ReadStorageTarget(request.Payload);
+                var mounted = await manager.MountVolumeAsync(target.DeviceId, target.Volume, token).ConfigureAwait(false);
+                var response = new LocalRemoteVolumeInfo(mounted.DeviceId, mounted.DeviceName, mounted.VolumeId,
+                    mounted.VolumeName, mounted.Kind, mounted.ReadOnly, mounted.TotalBytes, mounted.FreeBytes,
+                    mounted.FileSystem, mounted.MountPoint, false);
+                return Response(request, JsonSerializer.SerializeToUtf8Bytes(response, LocalIpcProtocol.Json));
+            }
+            case LocalIpcProtocol.StorageUnmount:
+            {
+                var manager = RequireRemoteMounts();
+                var target = ReadStorageTarget(request.Payload);
+                var unmounted = await manager.UnmountVolumeAsync(target.DeviceId, target.Volume, token).ConfigureAwait(false);
+                return Response(request, JsonSerializer.SerializeToUtf8Bytes(unmounted, LocalIpcProtocol.Json));
+            }
+            case LocalIpcProtocol.StorageEject:
+            {
+                var manager = RequireRemoteMounts();
+                var target = ReadStorageTarget(request.Payload);
+                await manager.EjectVolumeAsync(target.DeviceId, target.Volume, token).ConfigureAwait(false);
+                return Response(request, []);
+            }
             case LocalIpcProtocol.UiInfo:
                 return Response(request, JsonSerializer.SerializeToUtf8Bytes(
                     new LocalUiInfo(_uiUrl()), LocalIpcProtocol.Json));
@@ -333,6 +382,14 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
 
     private ConfiguredPeer? Resolve(string? deviceId) => _configuration.Resolve(deviceId);
 
+    private RemoteMountManager RequireRemoteMounts() => _remoteMounts
+        ?? throw new PlatformNotSupportedException("Native remote filesystem mounts are currently available on Windows only.");
+
+    private static LocalRemoteVolumeInfo ToLocalVolumeInfo(RemoteVolumeStatus item) =>
+        new(item.DeviceId, item.DeviceName, item.Volume.Id, item.Volume.Name, item.Volume.Kind,
+            item.Volume.ReadOnly, item.Volume.TotalBytes, item.Volume.FreeBytes, item.Volume.FileSystem,
+            item.MountedAt, item.AutoMountSuppressed);
+
     private Xas.Core.Discovery.DiscoveredPeer ResolvePairCandidate(string query)
     {
         if (string.IsNullOrWhiteSpace(query)) throw new InvalidDataException("Pairing target is required.");
@@ -357,6 +414,10 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
     private static LocalTarget ReadTarget(byte[] payload) => payload.Length == 0
         ? new LocalTarget(null)
         : JsonSerializer.Deserialize<LocalTarget>(payload, LocalIpcProtocol.Json) ?? throw new InvalidDataException("Invalid device target.");
+
+    private static LocalStorageVolumeTarget ReadStorageTarget(byte[] payload) =>
+        JsonSerializer.Deserialize<LocalStorageVolumeTarget>(payload, LocalIpcProtocol.Json)
+        ?? throw new InvalidDataException("Invalid storage volume target.");
 
     private static ProtocolMessage Response(ProtocolMessage request, byte[] payload) =>
         new(MessageKind.Response, request.RequestId, request.StreamId, request.Method, payload);

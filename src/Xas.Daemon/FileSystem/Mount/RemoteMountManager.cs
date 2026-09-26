@@ -9,7 +9,9 @@ using Xas.Daemon.Sessions;
 namespace Xas.Daemon.FileSystem.Mount;
 
 public sealed record RemoteMountSnapshot(string DeviceId, string DeviceName, string VolumeId, string VolumeName,
-    string? MountPoint, bool ReadOnly, long? TotalBytes, long? FreeBytes, string? FileSystem);
+    string Kind, string? MountPoint, bool ReadOnly, long? TotalBytes, long? FreeBytes, string? FileSystem);
+public sealed record RemoteVolumeStatus(string DeviceId, string DeviceName, RemoteVolume Volume,
+    string? MountedAt, bool AutoMountSuppressed);
 
 /// <summary>
 /// Reconciles remote removable volumes with native local mounts. The daemon owns this for its entire
@@ -21,8 +23,10 @@ public sealed class RemoteMountManager : IAsyncDisposable
     private readonly PeerSessionManager _sessions;
     private readonly Func<IRemoteFileSystemMountAdapter> _adapterFactory;
     private readonly Func<PeerSession, CancellationToken, ValueTask<RemoteVolume[]>> _volumeProvider;
+    private readonly Func<PeerSession, string, CancellationToken, ValueTask> _ejectVolume;
     private readonly Action<string>? _log;
     private readonly ConcurrentDictionary<MountKey, MountedVolume> _mounted = new();
+    private readonly ConcurrentDictionary<MountKey, byte> _suppressed = new();
     private readonly ConcurrentDictionary<string, byte> _pending = new(StringComparer.Ordinal);
     private readonly Channel<string> _queue = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
     {
@@ -38,6 +42,7 @@ public sealed class RemoteMountManager : IAsyncDisposable
     public RemoteMountManager(LocalConfiguration configuration, PeerSessionManager sessions,
         Func<IRemoteFileSystemMountAdapter>? adapterFactory = null,
         Func<PeerSession, CancellationToken, ValueTask<RemoteVolume[]>>? volumeProvider = null,
+        Func<PeerSession, string, CancellationToken, ValueTask>? ejectVolume = null,
         Action<string>? log = null)
     {
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
@@ -46,16 +51,98 @@ public sealed class RemoteMountManager : IAsyncDisposable
             ? new WinFspRemoteFileSystemMountAdapter()
             : new UnavailableRemoteFileSystemMountAdapter("native"));
         _volumeProvider = volumeProvider ?? RemoteFileSystemOperationsClient.GetVolumesAsync;
+        _ejectVolume = ejectVolume ?? RemoteFileSystemOperationsClient.EjectVolumeAsync;
         _log = log;
     }
 
     public IReadOnlyList<RemoteMountSnapshot> GetSnapshots() => _mounted.Values
         .Select(item => new RemoteMountSnapshot(item.Key.DeviceId, item.DeviceName, item.Key.VolumeId,
-            item.Volume.Name, item.Adapter.MountedAt, item.Volume.ReadOnly, item.Volume.TotalBytes,
+            item.Volume.Name, item.Volume.Kind, item.Adapter.MountedAt, item.Volume.ReadOnly, item.Volume.TotalBytes,
             item.Volume.FreeBytes, item.Volume.FileSystem))
         .OrderBy(item => item.DeviceName, StringComparer.OrdinalIgnoreCase)
         .ThenBy(item => item.VolumeName, StringComparer.OrdinalIgnoreCase)
         .ToArray();
+
+    public async ValueTask<IReadOnlyList<RemoteVolumeStatus>> GetRemoteVolumesAsync(string? deviceId,
+        CancellationToken cancellationToken)
+    {
+        var peer = ResolvePeer(deviceId);
+        var session = RequireReadySession(peer);
+        var volumes = await _volumeProvider(session, cancellationToken).ConfigureAwait(false);
+        return volumes.Select(volume =>
+        {
+            var key = new MountKey(peer.DeviceId, volume.Id);
+            _mounted.TryGetValue(key, out var mounted);
+            return new RemoteVolumeStatus(peer.DeviceId, session.Snapshot.Name, volume,
+                mounted?.Adapter.MountedAt, _suppressed.ContainsKey(key));
+        }).OrderBy(item => item.Volume.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+
+    public async ValueTask<RemoteMountSnapshot> MountVolumeAsync(string? deviceId, string volumeQuery,
+        CancellationToken cancellationToken)
+    {
+        var peer = ResolvePeer(deviceId);
+        var session = RequireReadySession(peer);
+        var volumes = await _volumeProvider(session, cancellationToken).ConfigureAwait(false);
+        var volume = ResolveVolume(volumes, volumeQuery);
+        var key = new MountKey(peer.DeviceId, volume.Id);
+        _suppressed.TryRemove(key, out _);
+        if (!_mounted.ContainsKey(key))
+            await MountAsync(key, session.Snapshot.Name, session, volume, cancellationToken).ConfigureAwait(false);
+        if (!_mounted.TryGetValue(key, out var mounted))
+            throw new PlatformNotSupportedException("The native remote filesystem mount provider is unavailable.");
+        return ToSnapshot(mounted);
+    }
+
+    public async ValueTask<bool> UnmountVolumeAsync(string? deviceId, string volumeQuery,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var peer = ResolvePeer(deviceId);
+        var session = _sessions.GetSession(peer.DeviceId);
+        var mounted = _mounted.Values.Where(m => m.Key.DeviceId == peer.DeviceId)
+            .Where(m => MatchesVolume(m.Volume, volumeQuery)).ToArray();
+        if (mounted.Length > 1) throw new InvalidOperationException($"Remote volume '{volumeQuery}' is ambiguous.");
+        if (mounted.Length == 0)
+        {
+            if (session is null || !session.Online || !session.BulkReady) return false;
+            var volumes = await _volumeProvider(session, cancellationToken).ConfigureAwait(false);
+            var volume = ResolveVolume(volumes, volumeQuery);
+            _suppressed[new MountKey(peer.DeviceId, volume.Id)] = 0;
+            return false;
+        }
+        var key = mounted[0].Key;
+        _suppressed[key] = 0;
+        await UnmountAsync(key).ConfigureAwait(false);
+        return true;
+    }
+
+    public async ValueTask EjectVolumeAsync(string? deviceId, string volumeQuery,
+        CancellationToken cancellationToken)
+    {
+        var peer = ResolvePeer(deviceId);
+        var session = RequireReadySession(peer);
+        var volumes = await _volumeProvider(session, cancellationToken).ConfigureAwait(false);
+        var volume = ResolveVolume(volumes, volumeQuery);
+        if (!string.Equals(volume.Kind, "removable", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Only removable remote volumes can be ejected.");
+        var key = new MountKey(peer.DeviceId, volume.Id);
+        _suppressed[key] = 0;
+        if (_mounted.ContainsKey(key)) await UnmountAsync(key).ConfigureAwait(false);
+        try
+        {
+            await _ejectVolume(session, volume.Id, cancellationToken).ConfigureAwait(false);
+            // UDisks returns after the local mount has been removed. Refresh immediately instead of
+            // waiting for the periodic fs.volumes.changed publisher so suppression can clear promptly.
+            Queue(peer.DeviceId);
+        }
+        catch
+        {
+            _suppressed.TryRemove(key, out _);
+            Queue(peer.DeviceId);
+            throw;
+        }
+    }
 
     public Task RunAsync(CancellationToken cancellationToken)
     {
@@ -155,6 +242,9 @@ public sealed class RemoteMountManager : IAsyncDisposable
         var desired = volumes.Where(v => string.Equals(v.Kind, "removable", StringComparison.OrdinalIgnoreCase))
             .ToDictionary(v => v.Id, StringComparer.Ordinal);
 
+        foreach (var suppressed in _suppressed.Keys.Where(k => k.DeviceId == deviceId).ToArray())
+            if (!desired.ContainsKey(suppressed.VolumeId)) _suppressed.TryRemove(suppressed, out _);
+
         foreach (var existing in _mounted.Keys.Where(k => k.DeviceId == deviceId).ToArray())
         {
             if (!desired.ContainsKey(existing.VolumeId)) await UnmountAsync(existing).ConfigureAwait(false);
@@ -163,7 +253,7 @@ public sealed class RemoteMountManager : IAsyncDisposable
         foreach (var volume in desired.Values)
         {
             var key = new MountKey(deviceId, volume.Id);
-            if (_mounted.ContainsKey(key)) continue;
+            if (_mounted.ContainsKey(key) || _suppressed.ContainsKey(key)) continue;
             await MountAsync(key, snapshot.Name, session, volume, token).ConfigureAwait(false);
         }
     }
@@ -219,6 +309,48 @@ public sealed class RemoteMountManager : IAsyncDisposable
     {
         foreach (var key in _mounted.Keys.ToArray()) await UnmountAsync(key).ConfigureAwait(false);
     }
+
+    private ConfiguredPeer ResolvePeer(string? deviceId) => _configuration.Resolve(deviceId)
+        ?? throw new InvalidOperationException(deviceId is null
+            ? "No default remote device is configured."
+            : $"No configured peer matches '{deviceId}'.");
+
+    private PeerSession RequireReadySession(ConfiguredPeer peer)
+    {
+        var session = _sessions.GetSession(peer.DeviceId)
+            ?? throw new IOException($"Device {peer.Name} is offline.");
+        if (!session.Online || !session.BulkReady) throw new IOException($"Filesystem transport to {peer.Name} is offline.");
+        if (session.Snapshot.Device?.Capabilities.Any(c => c.Capability == Capability.FileSystem && c.Version > 0) != true)
+            throw new NotSupportedException($"Device {peer.Name} does not advertise remote filesystem support.");
+        return session;
+    }
+
+    private static RemoteVolume ResolveVolume(IEnumerable<RemoteVolume> volumes, string query)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(query);
+        var all = volumes.ToArray();
+        var exact = all.Where(v => string.Equals(v.Id, query, StringComparison.OrdinalIgnoreCase) ||
+                                   string.Equals(v.Name, query, StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (exact.Length == 1) return exact[0];
+        if (exact.Length > 1) throw new InvalidOperationException($"Remote volume '{query}' is ambiguous.");
+        var prefix = all.Where(v => v.Id.StartsWith(query, StringComparison.OrdinalIgnoreCase)).ToArray();
+        return prefix.Length switch
+        {
+            1 => prefix[0],
+            > 1 => throw new InvalidOperationException($"Remote volume '{query}' is ambiguous."),
+            _ => throw new InvalidOperationException($"Remote volume '{query}' was not found.")
+        };
+    }
+
+    private static bool MatchesVolume(RemoteVolume volume, string query) =>
+        string.Equals(volume.Id, query, StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(volume.Name, query, StringComparison.OrdinalIgnoreCase) ||
+        volume.Id.StartsWith(query, StringComparison.OrdinalIgnoreCase);
+
+    private static RemoteMountSnapshot ToSnapshot(MountedVolume item) =>
+        new(item.Key.DeviceId, item.DeviceName, item.Key.VolumeId, item.Volume.Name, item.Volume.Kind,
+            item.Adapter.MountedAt, item.Volume.ReadOnly, item.Volume.TotalBytes, item.Volume.FreeBytes,
+            item.Volume.FileSystem);
 
     public async ValueTask DisposeAsync()
     {

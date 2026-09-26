@@ -75,6 +75,12 @@ public static class IntegrationTests
                     var uiUrl = await localDaemon.GetUiUrlAsync(CancellationToken.None);
                     Assert(Uri.TryCreate(uiUrl, UriKind.Absolute, out var uiUri) && uiUri.IsLoopback && uiUri.Port > 0,
                         "The local daemon IPC did not return a valid loopback UI URL.");
+                    if (OperatingSystem.IsWindows())
+                    {
+                        var mounts = await localDaemon.ListRemoteMountsAsync(null, CancellationToken.None);
+                        Assert(mounts.Count == 0,
+                            "A fresh integration daemon unexpectedly reported a native remote mount.");
+                    }
                 }
 
                 try

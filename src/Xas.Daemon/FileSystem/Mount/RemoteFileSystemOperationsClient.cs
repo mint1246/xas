@@ -37,6 +37,16 @@ public sealed class RemoteFileSystemOperationsClient : IRemoteFileSystemOperatio
         return RemoteFileSystemWire.Decode<RemoteVolume[]>(reply.Payload);
     }
 
+    public static async ValueTask EjectVolumeAsync(PeerSession session, string volumeId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        ArgumentException.ThrowIfNullOrWhiteSpace(volumeId);
+        var reply = await session.RequestAsync(PeerLane.Bulk, "fs.eject",
+            RemoteFileSystemWire.Encode(new RemoteVolumeRequest(volumeId)), cancellationToken).ConfigureAwait(false);
+        if (reply.Payload.Length != 0) throw new InvalidDataException("Invalid fs.eject response payload.");
+    }
+
     public async ValueTask<RemoteFileStat> StatAsync(string path, CancellationToken cancellationToken) =>
         RemoteFileSystemWire.Decode<RemoteFileStat>((await RequestAsync("fs.stat",
             RemoteFileSystemWire.Encode(new RemotePath(_volumeId, Normalize(path))), cancellationToken).ConfigureAwait(false)).Payload);

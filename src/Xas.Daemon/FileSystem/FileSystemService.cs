@@ -3,6 +3,7 @@ using Xas.Core;
 using Xas.Core.Configuration;
 using Xas.Core.FileSystem;
 using Xas.Core.Security;
+using System.Diagnostics;
 
 namespace Xas.Daemon.FileSystem;
 
@@ -63,6 +64,9 @@ public sealed class FileSystemService(PeerPermissionStore permissions, LocalConf
                 case "fs.setinfo":
                     _backend.SetInfo(Decode<RemoteSetInfo>(request.Payload));
                     return Reply(request, []);
+                case "fs.eject":
+                    await _backend.EjectAsync(Decode<RemoteVolumeRequest>(request.Payload), cancellationToken).ConfigureAwait(false);
+                    return Reply(request, []);
                 default: throw new NotSupportedException($"Unknown filesystem method: {request.Method}");
             }
         }
@@ -94,7 +98,7 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
                 if (!Directory.Exists(root)) continue;
                 RejectLinks(root);
                 var id = "export-" + export.Id;
-                roots[id] = new VolumeRoot(root, export.ReadOnly);
+                roots[id] = new VolumeRoot(root, export.ReadOnly, "export", null);
                 var storage = GetStorageInfo(root);
                 result.Add(new RemoteVolume(id, export.Name, "export", export.ReadOnly,
                     storage.TotalBytes, storage.FreeBytes, storage.FileSystem));
@@ -114,7 +118,7 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
                     RejectLinks(root);
                     var id = "removable-" + StableVolumeId(root);
                     if (roots.ContainsKey(id)) continue;
-                    roots[id] = new VolumeRoot(root, volume.ReadOnly);
+                    roots[id] = new VolumeRoot(root, volume.ReadOnly, "removable", volume.SourceDevice);
                     var storage = GetStorageInfo(root);
                     result.Add(new RemoteVolume(id, volume.Name, "removable", volume.ReadOnly,
                         storage.TotalBytes, storage.FreeBytes, storage.FileSystem));
@@ -268,6 +272,51 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
         }
     }
 
+    public async ValueTask EjectAsync(RemoteVolumeRequest request, CancellationToken cancellationToken)
+    {
+        var volume = GetVolume(request.VolumeId);
+        if (!string.Equals(volume.Kind, "removable", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Only removable volumes can be ejected.");
+        if (!OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException("Remote safe eject is currently implemented for Linux removable volumes.");
+        if (string.IsNullOrWhiteSpace(volume.SourceDevice) || !volume.SourceDevice.StartsWith("/dev/", StringComparison.Ordinal))
+            throw new PlatformNotSupportedException("The removable volume has no UDisks block-device source.");
+
+        var udisksctl = FindOnPath("udisksctl")
+            ?? throw new PlatformNotSupportedException("udisksctl is unavailable; install UDisks2 for remote safe eject.");
+        var info = new ProcessStartInfo(udisksctl)
+        {
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        info.ArgumentList.Add("unmount");
+        info.ArgumentList.Add("--block-device");
+        info.ArgumentList.Add(volume.SourceDevice);
+        info.ArgumentList.Add("--no-user-interaction");
+        using var process = new Process { StartInfo = info };
+        if (!process.Start()) throw new IOException("Could not start udisksctl for remote eject.");
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(15));
+        var stdout = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var stderr = process.StandardError.ReadToEndAsync(timeout.Token);
+        try { await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+            throw new TimeoutException("Timed out while asking UDisks to unmount the removable volume.");
+        }
+        var output = await stdout.ConfigureAwait(false);
+        var error = await stderr.ConfigureAwait(false);
+        if (process.ExitCode != 0)
+        {
+            var detail = string.IsNullOrWhiteSpace(error) ? output : error;
+            throw new IOException($"UDisks could not safely unmount the removable volume: {detail.Trim()}");
+        }
+        lock (_volumeGate) _volumes.Remove(request.VolumeId);
+    }
+
     private (string Path, VolumeRoot Volume) Resolve(string id, string relative, bool allowRoot)
     {
         if (relative is null || relative.Length > RemoteFileSystemWire.MaxPathChars || relative.IndexOf('\0') >= 0) throw new InvalidDataException("Invalid filesystem path.");
@@ -307,7 +356,7 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
                 if (!drive.IsReady || drive.DriveType != DriveType.Removable) continue;
                 var root = drive.RootDirectory.FullName;
                 var name = string.IsNullOrWhiteSpace(drive.VolumeLabel) ? root : drive.VolumeLabel;
-                yield return new MountedVolume(root, name, false);
+                yield return new MountedVolume(root, name, false, null);
             }
             yield break;
         }
@@ -325,7 +374,9 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
             var readOnly = fields[5].Split(',').Contains("ro", StringComparer.Ordinal);
             var name = Path.GetFileName(mountPoint.TrimEnd('/'));
             if (string.IsNullOrWhiteSpace(name)) name = mountPoint;
-            yield return new MountedVolume(mountPoint, name, readOnly);
+            var sourceDevice = DecodeMountInfoPath(fields[separator + 2]);
+            if (!sourceDevice.StartsWith("/dev/", StringComparison.Ordinal)) sourceDevice = null;
+            yield return new MountedVolume(mountPoint, name, readOnly, sourceDevice);
         }
     }
 
@@ -385,6 +436,22 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
         catch (UnauthorizedAccessException) { return default; }
     }
 
+    private static string? FindOnPath(string executable)
+    {
+        var path = Environment.GetEnvironmentVariable("PATH");
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            try
+            {
+                var candidate = Path.Combine(directory, executable);
+                if (File.Exists(candidate)) return candidate;
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException) { }
+        }
+        return null;
+    }
+
     private static void RejectLinks(string path)
     {
         var full = Path.GetFullPath(path);
@@ -402,7 +469,7 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
         }
     }
 
-    private sealed record VolumeRoot(string Root, bool ReadOnly);
-    private sealed record MountedVolume(string Root, string Name, bool ReadOnly);
+    private sealed record VolumeRoot(string Root, bool ReadOnly, string Kind, string? SourceDevice);
+    private sealed record MountedVolume(string Root, string Name, bool ReadOnly, string? SourceDevice);
     private readonly record struct StorageInfo(long? TotalBytes, long? FreeBytes, string? FileSystem);
 }
