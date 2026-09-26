@@ -10,16 +10,25 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
     private readonly ConcurrentDictionary<uint, TaskCompletionSource<ProtocolMessage>> _pending = new();
     private readonly ConcurrentDictionary<uint, CancellationTokenSource> _incoming = new();
     private readonly CancellationTokenSource _shutdown = new();
-    private readonly Task _reader;
+    private Task _reader = Task.CompletedTask;
+    private int _started;
     private uint _nextId;
     private int _disposed;
     private Exception? _terminalException;
 
     public MultiplexedProtocolPeer(IFrameConnection connection,
-        Func<ProtocolMessage, CancellationToken, ValueTask<ProtocolMessage>> requestHandler)
+        Func<ProtocolMessage, CancellationToken, ValueTask<ProtocolMessage>> requestHandler,
+        bool startImmediately = true)
     {
         _connection = connection ?? throw new ArgumentNullException(nameof(connection));
         _requestHandler = requestHandler ?? throw new ArgumentNullException(nameof(requestHandler));
+        if (startImmediately) Start();
+    }
+
+    public void Start()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (Interlocked.Exchange(ref _started, 1) != 0) return;
         _reader = ReadLoopAsync();
     }
 
@@ -35,6 +44,7 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
     public ValueTask SendAsync(ProtocolMessage message, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (Volatile.Read(ref _started) == 0) throw new InvalidOperationException("Protocol peer has not been started.");
         return _connection.SendAsync(message, cancellationToken);
     }
 
@@ -42,6 +52,7 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
         uint streamId = 0, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (Volatile.Read(ref _started) == 0) throw new InvalidOperationException("Protocol peer has not been started.");
         ArgumentNullException.ThrowIfNull(method);
         ArgumentNullException.ThrowIfNull(payload);
         cancellationToken.ThrowIfCancellationRequested();

@@ -217,7 +217,12 @@ public sealed class PeerSessionManager : IAsyncDisposable
                 delay = TimeSpan.FromSeconds(1);
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
-            catch (Exception) { await Task.Delay(delay, token).ConfigureAwait(false); delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2)); }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"Peer lane {lane} to {peer.Name} ({peer.DeviceId}) failed: {ex.Message}");
+                await Task.Delay(delay, token).ConfigureAwait(false);
+                delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2));
+            }
         }
     }
 
@@ -259,33 +264,41 @@ public sealed class PeerSessionManager : IAsyncDisposable
         MultiplexedProtocolPeer? protocol = null;
         protocol = new MultiplexedProtocolPeer(frames, async (message, ct) =>
         {
-            var selected = SelectLane(message);
-            if (managedLane && !attached)
+            try
             {
-                if (!await session.AttachAsync(selected, protocol!, IsPreferred(outbound, deviceId)).ConfigureAwait(false))
-                    throw new IOException("A preferred lane connection is already active.");
-                attached = true;
-                _lanes.TryAdd(protocol!, selected);
-                StartClipboardPublisher(selected);
+                var selected = SelectLane(message);
+                if (managedLane && !attached)
+                {
+                    if (!await session.AttachAsync(selected, protocol!, IsPreferred(outbound, deviceId)).ConfigureAwait(false))
+                        throw new IOException("A preferred lane connection is already active.");
+                    attached = true;
+                    _lanes.TryAdd(protocol!, selected);
+                    StartClipboardPublisher(selected);
+                }
+                if (message.Method == "session.lane.open")
+                {
+                    if (selected == PeerLane.Control)
+                        await LoadPeerMetadataAsync(deviceId, session, protocol!, ct).ConfigureAwait(false);
+                    return new ProtocolMessage(MessageKind.Response, message.RequestId, message.StreamId,
+                        message.Method, []);
+                }
+                return message.Method is ShellExecWire.Open or ShellExecWire.Close
+                    ? await streamingShell.HandleRequestAsync(message, ct).ConfigureAwait(false)
+                    : message.Method.StartsWith("shell.", StringComparison.Ordinal) &&
+                        message.Method is "shell.open" or "shell.resize" or "shell.close"
+                    ? await interactive.HandleRequestAsync(message, ct).ConfigureAwait(false)
+                    : message.Method.StartsWith("file.", StringComparison.Ordinal)
+                        ? await files.HandleRequestAsync(message, ct).ConfigureAwait(false)
+                        : message.Method is "input.open" or "input.close" or "input.release"
+                            ? await input.HandleRequestAsync(message, ct).ConfigureAwait(false)
+                            : await _dispatcher.HandleAsync(deviceId, message, frames.SendAsync, ct).ConfigureAwait(false);
             }
-            if (message.Method == "session.lane.open")
+            catch (Exception ex) when (message.Method == "session.lane.open")
             {
-                if (selected == PeerLane.Control)
-                    await LoadPeerMetadataAsync(deviceId, session, protocol!, ct).ConfigureAwait(false);
-                return new ProtocolMessage(MessageKind.Response, message.RequestId, message.StreamId,
-                    message.Method, []);
+                Console.Error.WriteLine($"session.lane.open from {deviceId} failed: {ex}");
+                throw;
             }
-            return message.Method is ShellExecWire.Open or ShellExecWire.Close
-                ? await streamingShell.HandleRequestAsync(message, ct).ConfigureAwait(false)
-                : message.Method.StartsWith("shell.", StringComparison.Ordinal) &&
-                    message.Method is "shell.open" or "shell.resize" or "shell.close"
-                ? await interactive.HandleRequestAsync(message, ct).ConfigureAwait(false)
-                : message.Method.StartsWith("file.", StringComparison.Ordinal)
-                    ? await files.HandleRequestAsync(message, ct).ConfigureAwait(false)
-                    : message.Method is "input.open" or "input.close" or "input.release"
-                        ? await input.HandleRequestAsync(message, ct).ConfigureAwait(false)
-                        : await _dispatcher.HandleAsync(deviceId, message, frames.SendAsync, ct).ConfigureAwait(false);
-        });
+        }, startImmediately: false);
         _connections.TryAdd(protocol, deviceId);
         protocol.MessageReceived += message =>
         {
@@ -323,6 +336,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
                 _ => session.OnMessageAsync(selected, message)
             };
         };
+        protocol.Start();
         try
         {
             if (expectedLane is { } outboundLane)
