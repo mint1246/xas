@@ -1,0 +1,104 @@
+using Xas.Core;
+using Xas.Core.FileSystem;
+using Xas.Core.Protocol;
+using Xas.Daemon.Sessions;
+
+namespace Xas.Daemon.FileSystem.Mount;
+
+/// <summary>
+/// Volume-scoped filesystem client used by native mount adapters. The transport delegate is kept
+/// abstract so the filesystem semantics can be tested without a mounted WinFsp/FUSE filesystem.
+/// </summary>
+public sealed class RemoteFileSystemOperationsClient : IRemoteFileSystemOperations
+{
+    private readonly string _volumeId;
+    private readonly Func<string, byte[], CancellationToken, ValueTask<ProtocolMessage>> _request;
+
+    public RemoteFileSystemOperationsClient(string volumeId,
+        Func<string, byte[], CancellationToken, ValueTask<ProtocolMessage>> request)
+    {
+        if (string.IsNullOrWhiteSpace(volumeId)) throw new ArgumentException("Volume ID is required.", nameof(volumeId));
+        _volumeId = volumeId;
+        _request = request ?? throw new ArgumentNullException(nameof(request));
+    }
+
+    public static RemoteFileSystemOperationsClient ForPeer(PeerSession session, string volumeId)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        return new RemoteFileSystemOperationsClient(volumeId,
+            (method, payload, token) => session.RequestAsync(PeerLane.Bulk, method, payload, token));
+    }
+
+    public static async ValueTask<RemoteVolume[]> GetVolumesAsync(PeerSession session,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(session);
+        var reply = await session.RequestAsync(PeerLane.Bulk, "fs.volumes", [], cancellationToken).ConfigureAwait(false);
+        return RemoteFileSystemWire.Decode<RemoteVolume[]>(reply.Payload);
+    }
+
+    public async ValueTask<RemoteFileStat> StatAsync(string path, CancellationToken cancellationToken) =>
+        RemoteFileSystemWire.Decode<RemoteFileStat>((await RequestAsync("fs.stat",
+            RemoteFileSystemWire.Encode(new RemotePath(_volumeId, Normalize(path))), cancellationToken).ConfigureAwait(false)).Payload);
+
+    public async ValueTask<RemoteDirectoryPage> ListAsync(string path, int offset, CancellationToken cancellationToken) =>
+        RemoteFileSystemWire.Decode<RemoteDirectoryPage>((await RequestAsync("fs.list",
+            RemoteFileSystemWire.Encode(new RemoteListPath(_volumeId, Normalize(path), offset)), cancellationToken).ConfigureAwait(false)).Payload);
+
+    public async ValueTask<byte[]> ReadAsync(string path, long offset, int length, CancellationToken cancellationToken)
+    {
+        if (length is < 0 or > RemoteFileSystemWire.MaxChunkBytes)
+            throw new ArgumentOutOfRangeException(nameof(length), $"Read length must be between 0 and {RemoteFileSystemWire.MaxChunkBytes} bytes.");
+        return (await RequestAsync("fs.read",
+            RemoteFileSystemWire.Encode(new RemoteReadRange(_volumeId, Normalize(path), offset, length)), cancellationToken).ConfigureAwait(false)).Payload;
+    }
+
+    public async ValueTask<int> WriteAsync(string path, long offset, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+    {
+        if (data.Length > RemoteFileSystemWire.MaxChunkBytes)
+            throw new ArgumentOutOfRangeException(nameof(data), $"Write length must not exceed {RemoteFileSystemWire.MaxChunkBytes} bytes.");
+        var reply = await RequestAsync("fs.write",
+            RemoteFileSystemWire.Encode(new RemoteWriteRange(_volumeId, Normalize(path), offset, data.ToArray())), cancellationToken).ConfigureAwait(false);
+        var result = RemoteFileSystemWire.Decode<RemoteWriteResult>(reply.Payload);
+        if (result.BytesWritten is < 0 or > int.MaxValue) throw new InvalidDataException("Remote filesystem returned an invalid write count.");
+        return checked((int)result.BytesWritten);
+    }
+
+    public async ValueTask CreateAsync(string path, bool directory, bool replace, CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync("fs.create",
+            RemoteFileSystemWire.Encode(new RemoteCreatePath(_volumeId, Normalize(path), directory, replace)), cancellationToken).ConfigureAwait(false);
+        RequireEmpty(reply, "fs.create");
+    }
+
+    public async ValueTask DeleteAsync(string path, bool directory, CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync("fs.delete",
+            RemoteFileSystemWire.Encode(new RemoteDeletePath(_volumeId, Normalize(path), directory)), cancellationToken).ConfigureAwait(false);
+        RequireEmpty(reply, "fs.delete");
+    }
+
+    public async ValueTask RenameAsync(string path, string newPath, bool replace, CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync("fs.rename",
+            RemoteFileSystemWire.Encode(new RemoteRenamePath(_volumeId, Normalize(path), Normalize(newPath), replace)), cancellationToken).ConfigureAwait(false);
+        RequireEmpty(reply, "fs.rename");
+    }
+
+    private ValueTask<ProtocolMessage> RequestAsync(string method, byte[] payload, CancellationToken cancellationToken) =>
+        _request(method, payload, cancellationToken);
+
+    private static string Normalize(string path)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        if (path.Length > RemoteFileSystemWire.MaxPathChars) throw new ArgumentOutOfRangeException(nameof(path));
+        if (path.IndexOf('\0') >= 0) throw new ArgumentException("Filesystem path contains a NUL character.", nameof(path));
+        // Native providers normally pass a rooted mount path. The wire protocol is volume-relative.
+        return path.Replace('\\', '/').TrimStart('/');
+    }
+
+    private static void RequireEmpty(ProtocolMessage reply, string method)
+    {
+        if (reply.Payload.Length != 0) throw new InvalidDataException($"{method} returned an unexpected response payload.");
+    }
+}
