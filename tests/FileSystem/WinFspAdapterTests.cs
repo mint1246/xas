@@ -100,6 +100,7 @@ public static class WinFspAdapterTests
 
     private sealed class MemoryRemoteFileSystem : IRemoteFileSystemOperations
     {
+        public int MaxTransferBytes => RemoteFileSystemWire.MaxChunkBytes;
         private readonly object _gate = new();
         private readonly Dictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase)
         {

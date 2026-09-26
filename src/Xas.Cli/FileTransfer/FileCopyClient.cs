@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Threading.Channels;
 using Xas.Core;
@@ -12,7 +13,9 @@ namespace Xas.Cli.FileTransfer;
 /// <summary>Copies files and directory trees between this machine and one configured XAS peer.</summary>
 public static class FileCopyClient
 {
-    private const int ChunkSize = 64 * 1024;
+    // Keep comfortably below the 1 MiB protocol frame ceiling while amortizing TLS, framing and IPC
+    // overhead. 64 KiB made LAN transfers spend far too much time allocating and dispatching frames.
+    private const int ChunkSize = 768 * 1024;
     private const int EarlyDownloadLimit = 1024 * 1024;
     private const int MaxPathLength = 4096;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
@@ -125,22 +128,35 @@ public static class FileCopyClient
         var opened = await RequestAsync(peer, "file.put.open", new { path = remote, overwrite, lastWriteUnixMs = lastWrite }, token).ConfigureAwait(false);
         var id = ReadTransferId(opened.Payload);
         long sent = 0;
+        var total = new FileInfo(local).Length;
+        var reporter = new TransferProgress(progress, local, remote, total);
         try
         {
             await using var input = new FileStream(local, FileMode.Open, FileAccess.Read, FileShare.Read, ChunkSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
             var buffer = new byte[ChunkSize];
             while (true)
             {
-                var n = await input.ReadAsync(buffer, token).ConfigureAwait(false);
+                var n = 0;
+                while (n < buffer.Length)
+                {
+                    var read = await input.ReadAsync(buffer.AsMemory(n), token).ConfigureAwait(false);
+                    if (read == 0) break;
+                    n += read;
+                }
                 if (n == 0) break;
-                await peer.SendAsync(new ProtocolMessage(MessageKind.StreamData, 0, id, "file.put.data", buffer.AsSpan(0, n).ToArray()), token).ConfigureAwait(false);
+                // BinaryFrameConnection copies the payload into its pooled wire buffer before SendAsync
+                // completes, so a full read can reuse this same file buffer without another 768 KiB allocation.
+                var payload = n == buffer.Length ? buffer : buffer.AsSpan(0, n).ToArray();
+                await peer.SendAsync(new ProtocolMessage(MessageKind.StreamData, 0, id, "file.put.data", payload), token).ConfigureAwait(false);
                 sent += n;
+                await reporter.UpdateAsync(sent, final: false).ConfigureAwait(false);
+                if (n < buffer.Length) break;
             }
             await peer.SendAsync(new ProtocolMessage(MessageKind.StreamEnd, 0, id, "file.put.data", Array.Empty<byte>()), token).ConfigureAwait(false);
             var committed = await peer.RequestAsync("file.put.commit", UInt32Payload(id), cancellationToken: token).ConfigureAwait(false);
             if (committed.Payload.Length != 8 || BinaryPrimitives.ReadInt64BigEndian(committed.Payload) != sent)
                 throw new InvalidDataException("Remote file copy byte count did not match.");
-            await progress.WriteLineAsync($"{local} -> {remote} ({sent} bytes)").ConfigureAwait(false);
+            await reporter.UpdateAsync(sent, final: true).ConfigureAwait(false);
         }
         catch
         {
@@ -187,6 +203,7 @@ public static class FileCopyClient
             var lastWrite = BinaryPrimitives.ReadInt64BigEndian(response.Payload.AsSpan(12, 8));
             receive.Open(id);
             long count = 0;
+            var reporter = new TransferProgress(progress, remote, local, length);
             await using (var output = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None, ChunkSize, FileOptions.Asynchronous | FileOptions.SequentialScan))
             {
                 using var disconnected = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -195,13 +212,14 @@ public static class FileCopyClient
                 await foreach (var data in receive.ReadAllAsync(disconnected.Token).ConfigureAwait(false))
                 {
                     await output.WriteAsync(data, token).ConfigureAwait(false); count += data.Length;
+                    await reporter.UpdateAsync(count, final: false).ConfigureAwait(false);
                 }
                 await output.FlushAsync(token).ConfigureAwait(false);
             }
             if (count != length) throw new InvalidDataException("Downloaded file length did not match the remote file.");
             File.SetLastWriteTimeUtc(temp, DateTimeOffset.FromUnixTimeMilliseconds(lastWrite).UtcDateTime);
             File.Move(temp, local, overwrite);
-            await progress.WriteLineAsync($"{remote} -> {local} ({count} bytes)").ConfigureAwait(false);
+            await reporter.UpdateAsync(count, final: true).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested && peer.Completion.IsCompleted)
         {
@@ -290,6 +308,62 @@ public static class FileCopyClient
     private sealed record FileStat(string Kind, long Length, long LastWriteUnixMs);
     private sealed record FileEntry(string Name, string Kind, long Length, long LastWriteUnixMs);
     private sealed record FilePage(FileEntry[] Entries, bool HasMore);
+
+    private sealed class TransferProgress(TextWriter writer, string source, string destination, long total)
+    {
+        private readonly Stopwatch _clock = Stopwatch.StartNew();
+        private readonly bool _interactive = !Console.IsErrorRedirected;
+        private long _lastReportTicks;
+        private int _lastWidth;
+
+        public async ValueTask UpdateAsync(long transferred, bool final)
+        {
+            var elapsed = _clock.Elapsed;
+            if (!final && (!_interactive || elapsed.Ticks - _lastReportTicks < TimeSpan.FromMilliseconds(250).Ticks)) return;
+            _lastReportTicks = elapsed.Ticks;
+            if (!_interactive)
+            {
+                if (final) await writer.WriteLineAsync($"{source} -> {destination} ({transferred} bytes)").ConfigureAwait(false);
+                return;
+            }
+
+            var seconds = Math.Max(0.001, elapsed.TotalSeconds);
+            var rate = transferred / seconds;
+            var percent = total > 0 ? Math.Clamp(transferred * 100d / total, 0, 100) : 100;
+            var remainingSeconds = rate > 0 && total > transferred ? (total - transferred) / rate : 0;
+            var eta = remainingSeconds > 0 ? $"  ETA {FormatDuration(remainingSeconds)}" : string.Empty;
+            var line = $"{ShortName(source)} -> {ShortName(destination)}  {FormatBytes(transferred)} / {FormatBytes(total)}  {percent,5:0.0}%  {FormatBytes(rate)}/s{eta}";
+            if (line.Length < _lastWidth) line = line.PadRight(_lastWidth);
+            _lastWidth = Math.Max(_lastWidth, line.Length);
+            await writer.WriteAsync("\r" + line).ConfigureAwait(false);
+            if (final) await writer.WriteLineAsync().ConfigureAwait(false);
+            await writer.FlushAsync().ConfigureAwait(false);
+        }
+
+        private static string ShortName(string path)
+        {
+            var trimmed = path.TrimEnd('/', '\\');
+            var slash = Math.Max(trimmed.LastIndexOf('/'), trimmed.LastIndexOf('\\'));
+            return slash >= 0 && slash + 1 < trimmed.Length ? trimmed[(slash + 1)..] : trimmed;
+        }
+
+        private static string FormatBytes(double bytes)
+        {
+            string[] units = ["B", "KiB", "MiB", "GiB", "TiB"];
+            var value = Math.Max(0, bytes);
+            var unit = 0;
+            while (value >= 1024 && unit < units.Length - 1) { value /= 1024; unit++; }
+            return unit == 0 ? $"{value:0} {units[unit]}" : $"{value:0.0} {units[unit]}";
+        }
+
+        private static string FormatDuration(double seconds)
+        {
+            var span = TimeSpan.FromSeconds(Math.Max(0, seconds));
+            if (span.TotalHours >= 1) return $"{(int)span.TotalHours}h {span.Minutes}m";
+            if (span.TotalMinutes >= 1) return $"{span.Minutes}m {span.Seconds}s";
+            return $"{Math.Max(1, (int)Math.Ceiling(span.TotalSeconds))}s";
+        }
+    }
 
     private sealed class DownloadReceiver : IDisposable
     {

@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Buffers;
 using System.Text;
 
 namespace Xas.Core.Protocol;
@@ -38,24 +39,29 @@ public sealed class BinaryFrameConnection : IFrameConnection
         var frameLength = checked(HeaderBytes + method.Length + message.Payload.Length);
         if (frameLength > XasProtocol.MaxFrameBytes) throw new ArgumentException("Frame exceeds the protocol limit.", nameof(message));
 
-        var frame = new byte[4 + frameLength];
-        BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(0, 4), (uint)frameLength);
-        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(4, 2), XasProtocol.Version);
-        frame[6] = (byte)message.Kind;
-        BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(7, 4), message.RequestId);
-        BinaryPrimitives.WriteUInt32BigEndian(frame.AsSpan(11, 4), message.StreamId);
-        BinaryPrimitives.WriteUInt16BigEndian(frame.AsSpan(15, 2), (ushort)method.Length);
-        method.CopyTo(frame.AsSpan(17));
-        message.Payload.CopyTo(frame.AsSpan(17 + method.Length));
+        var frameBytes = 4 + frameLength;
+        var frame = ArrayPool<byte>.Shared.Rent(frameBytes);
+        var span = frame.AsSpan(0, frameBytes);
+        BinaryPrimitives.WriteUInt32BigEndian(span[..4], (uint)frameLength);
+        BinaryPrimitives.WriteUInt16BigEndian(span.Slice(4, 2), XasProtocol.Version);
+        span[6] = (byte)message.Kind;
+        BinaryPrimitives.WriteUInt32BigEndian(span.Slice(7, 4), message.RequestId);
+        BinaryPrimitives.WriteUInt32BigEndian(span.Slice(11, 4), message.StreamId);
+        BinaryPrimitives.WriteUInt16BigEndian(span.Slice(15, 2), (ushort)method.Length);
+        method.CopyTo(span[17..]);
+        message.Payload.CopyTo(span[(17 + method.Length)..]);
 
         await _sendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             ThrowIfDisposed();
-            await _stream.WriteAsync(frame, cancellationToken).ConfigureAwait(false);
-            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await _stream.WriteAsync(frame.AsMemory(0, frameBytes), cancellationToken).ConfigureAwait(false);
         }
-        finally { _sendLock.Release(); }
+        finally
+        {
+            _sendLock.Release();
+            ArrayPool<byte>.Shared.Return(frame);
+        }
     }
 
     public async ValueTask<ProtocolMessage?> ReceiveAsync(CancellationToken cancellationToken)
@@ -71,20 +77,29 @@ public sealed class BinaryFrameConnection : IFrameConnection
             var length = BinaryPrimitives.ReadUInt32BigEndian(prefix);
             if (length < HeaderBytes || length > XasProtocol.MaxFrameBytes)
                 throw new InvalidDataException("Invalid frame length.");
-            var body = new byte[(int)length];
-            await ReadExactlyOrEofAsync(body, allowInitialEof: false, cancellationToken).ConfigureAwait(false);
-            var version = BinaryPrimitives.ReadUInt16BigEndian(body.AsSpan(0, 2));
+            // Read directly into the final method/payload buffers. The old implementation first allocated
+            // the entire frame body and then copied the payload into a second byte[], doubling allocation
+            // and memory bandwidth for every large file-transfer frame.
+            var header = new byte[HeaderBytes];
+            await ReadExactlyOrEofAsync(header, allowInitialEof: false, cancellationToken).ConfigureAwait(false);
+            var version = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(0, 2));
             if (version != XasProtocol.Version) throw new InvalidDataException($"Unsupported protocol version {version}.");
-            var kind = (MessageKind)body[2];
+            var kind = (MessageKind)header[2];
             if (!Enum.IsDefined(kind)) throw new InvalidDataException("Unknown message kind.");
-            var requestId = BinaryPrimitives.ReadUInt32BigEndian(body.AsSpan(3, 4));
-            var streamId = BinaryPrimitives.ReadUInt32BigEndian(body.AsSpan(7, 4));
-            var methodLength = BinaryPrimitives.ReadUInt16BigEndian(body.AsSpan(11, 2));
-            if (methodLength > body.Length - HeaderBytes) throw new InvalidDataException("Method length exceeds frame length.");
+            var requestId = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(3, 4));
+            var streamId = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(7, 4));
+            var methodLength = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(11, 2));
+            if (methodLength > length - HeaderBytes) throw new InvalidDataException("Method length exceeds frame length.");
+            var methodBytes = new byte[methodLength];
+            if (methodBytes.Length != 0)
+                await ReadExactlyOrEofAsync(methodBytes, allowInitialEof: false, cancellationToken).ConfigureAwait(false);
             string method;
-            try { method = StrictUtf8.GetString(body, HeaderBytes, methodLength); }
+            try { method = StrictUtf8.GetString(methodBytes); }
             catch (DecoderFallbackException ex) { throw new InvalidDataException("Method is not valid UTF-8.", ex); }
-            var payload = body.AsSpan(HeaderBytes + methodLength).ToArray();
+            var payloadLength = checked((int)length - HeaderBytes - methodLength);
+            var payload = new byte[payloadLength];
+            if (payload.Length != 0)
+                await ReadExactlyOrEofAsync(payload, allowInitialEof: false, cancellationToken).ConfigureAwait(false);
             return new ProtocolMessage(kind, requestId, streamId, method, payload);
         }
         finally { _receiveLock.Release(); }

@@ -36,7 +36,7 @@ public static class MutualTlsTransport
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedPeerDeviceId);
         ValidateTimeout(handshakeTimeout);
 
-        var client = new TcpClient();
+        var client = new TcpClient { NoDelay = true };
         using var timeout = CreateTimeout(handshakeTimeout, cancellationToken);
         try
         {
@@ -56,6 +56,7 @@ public static class MutualTlsTransport
         TimeSpan handshakeTimeout, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(client);
+        client.NoDelay = true;
         ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(trustStore);
         ValidateTimeout(handshakeTimeout);

@@ -261,7 +261,7 @@ public sealed class RemoteWinFspFileSystem : FileSystemBase
             var destinationOffset = 0;
             while (remaining > 0)
             {
-                var request = Math.Min(remaining, RemoteFileSystemWire.MaxChunkBytes);
+                var request = Math.Min(remaining, _remote.MaxTransferBytes);
                 var data = Await(ct => _remote.ReadAsync(handle.Path, checked((long)offset + destinationOffset), request, ct));
                 if (data.Length == 0) break;
                 Marshal.Copy(data, 0, IntPtr.Add(buffer, destinationOffset), data.Length);
@@ -301,7 +301,7 @@ public sealed class RemoteWinFspFileSystem : FileSystemBase
             var transferred = 0;
             while (transferred < requested)
             {
-                var count = Math.Min(requested - transferred, RemoteFileSystemWire.MaxChunkBytes);
+                var count = Math.Min(requested - transferred, _remote.MaxTransferBytes);
                 var data = new byte[count];
                 Marshal.Copy(IntPtr.Add(buffer, transferred), data, 0, count);
                 var written = Await(ct => _remote.WriteAsync(handle.Path, effectiveOffset + transferred, data, ct));

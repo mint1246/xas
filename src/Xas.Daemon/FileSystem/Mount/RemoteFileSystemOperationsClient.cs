@@ -13,20 +13,28 @@ public sealed class RemoteFileSystemOperationsClient : IRemoteFileSystemOperatio
 {
     private readonly string _volumeId;
     private readonly Func<string, byte[], CancellationToken, ValueTask<ProtocolMessage>> _request;
+    private readonly ushort _protocolVersion;
 
     public RemoteFileSystemOperationsClient(string volumeId,
-        Func<string, byte[], CancellationToken, ValueTask<ProtocolMessage>> request)
+        Func<string, byte[], CancellationToken, ValueTask<ProtocolMessage>> request, ushort protocolVersion = 1)
     {
         if (string.IsNullOrWhiteSpace(volumeId)) throw new ArgumentException("Volume ID is required.", nameof(volumeId));
         _volumeId = volumeId;
         _request = request ?? throw new ArgumentNullException(nameof(request));
+        _protocolVersion = protocolVersion;
     }
+
+    public int MaxTransferBytes => _protocolVersion >= 2
+        ? RemoteFileSystemWire.MaxChunkBytes
+        : RemoteFileSystemWire.LegacyMaxChunkBytes;
 
     public static RemoteFileSystemOperationsClient ForPeer(PeerSession session, string volumeId)
     {
         ArgumentNullException.ThrowIfNull(session);
+        var version = session.Snapshot.Device?.Capabilities
+            .FirstOrDefault(c => c.Capability == Capability.FileSystem)?.Version ?? 1;
         return new RemoteFileSystemOperationsClient(volumeId,
-            (method, payload, token) => session.RequestAsync(PeerLane.Bulk, method, payload, token));
+            (method, payload, token) => session.RequestAsync(PeerLane.Bulk, method, payload, token), version);
     }
 
     public static async ValueTask<RemoteVolume[]> GetVolumesAsync(PeerSession session,
@@ -57,18 +65,22 @@ public sealed class RemoteFileSystemOperationsClient : IRemoteFileSystemOperatio
 
     public async ValueTask<byte[]> ReadAsync(string path, long offset, int length, CancellationToken cancellationToken)
     {
-        if (length is < 0 or > RemoteFileSystemWire.MaxChunkBytes)
-            throw new ArgumentOutOfRangeException(nameof(length), $"Read length must be between 0 and {RemoteFileSystemWire.MaxChunkBytes} bytes.");
+        if (length is < 0 || length > MaxTransferBytes)
+            throw new ArgumentOutOfRangeException(nameof(length), $"Read length must be between 0 and {MaxTransferBytes} bytes.");
         return (await RequestAsync("fs.read",
             RemoteFileSystemWire.Encode(new RemoteReadRange(_volumeId, Normalize(path), offset, length)), cancellationToken).ConfigureAwait(false)).Payload;
     }
 
     public async ValueTask<int> WriteAsync(string path, long offset, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
-        if (data.Length > RemoteFileSystemWire.MaxChunkBytes)
-            throw new ArgumentOutOfRangeException(nameof(data), $"Write length must not exceed {RemoteFileSystemWire.MaxChunkBytes} bytes.");
-        var reply = await RequestAsync("fs.write",
-            RemoteFileSystemWire.Encode(new RemoteWriteRange(_volumeId, Normalize(path), offset, data.ToArray())), cancellationToken).ConfigureAwait(false);
+        if (data.Length > MaxTransferBytes)
+            throw new ArgumentOutOfRangeException(nameof(data), $"Write length must not exceed {MaxTransferBytes} bytes.");
+        var normalized = Normalize(path);
+        var reply = _protocolVersion >= 2
+            ? await RequestAsync("fs.write.v2",
+                RemoteFileSystemWire.EncodeWriteV2(_volumeId, normalized, offset, data.Span), cancellationToken).ConfigureAwait(false)
+            : await RequestAsync("fs.write",
+                RemoteFileSystemWire.Encode(new RemoteWriteRange(_volumeId, normalized, offset, data.ToArray())), cancellationToken).ConfigureAwait(false);
         var result = RemoteFileSystemWire.Decode<RemoteWriteResult>(reply.Payload);
         if (result.BytesWritten is < 0 or > int.MaxValue) throw new InvalidDataException("Remote filesystem returned an invalid write count.");
         return checked((int)result.BytesWritten);

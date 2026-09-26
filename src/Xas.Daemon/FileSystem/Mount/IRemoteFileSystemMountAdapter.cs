@@ -19,6 +19,7 @@ public interface IRemoteFileSystemMountAdapter : IAsyncDisposable
 /// <summary>Operations that a native filesystem provider needs to forward to its remote peer.</summary>
 public interface IRemoteFileSystemOperations
 {
+    int MaxTransferBytes { get; }
     ValueTask<RemoteFileStat> StatAsync(string path, CancellationToken cancellationToken);
     ValueTask<RemoteDirectoryPage> ListAsync(string path, int offset, CancellationToken cancellationToken);
     ValueTask<byte[]> ReadAsync(string path, long offset, int length, CancellationToken cancellationToken);

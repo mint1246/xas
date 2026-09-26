@@ -38,7 +38,7 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
                 var capabilities = new List<CapabilityVersion>
                 {
                     new(Capability.Shell, (ushort)(_interactive.IsAvailable ? 3 : 2)),
-                    new(Capability.FileSystem, 1)
+                    new(Capability.FileSystem, 2)
                 };
                 if (_clipboard.IsAvailable) capabilities.Add(new(Capability.Clipboard, 1));
                 if (inputVersion?.Invoke() is > 0 and var version) capabilities.Add(new(Capability.Input, version));
@@ -67,6 +67,7 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
             case "fs.list":
             case "fs.read":
             case "fs.write":
+            case "fs.write.v2":
             case "fs.create":
             case "fs.delete":
             case "fs.rename":

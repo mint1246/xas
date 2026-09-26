@@ -39,13 +39,19 @@ public sealed class FileSystemService(PeerPermissionStore permissions, LocalConf
                 case "fs.read":
                 {
                     var arg = Decode<RemoteReadRange>(request.Payload);
-                    if (arg.Length < 0 || arg.Length > RemoteFileSystemWire.MaxChunkBytes) throw new InvalidDataException("Read length exceeds the 64 KiB limit.");
+                    if (arg.Length < 0 || arg.Length > RemoteFileSystemWire.MaxChunkBytes) throw new InvalidDataException("Read length exceeds the filesystem transfer limit.");
                     return Reply(request, _backend.Read(arg, cancellationToken));
                 }
                 case "fs.write":
                 {
                     var arg = Decode<RemoteWriteRange>(request.Payload);
-                    if (arg.Data.Length > RemoteFileSystemWire.MaxChunkBytes) throw new InvalidDataException("Write length exceeds the 64 KiB limit.");
+                    if (arg.Data.Length > RemoteFileSystemWire.LegacyMaxChunkBytes) throw new InvalidDataException("Legacy filesystem write length exceeds 64 KiB.");
+                    var written = await _backend.WriteAsync(arg, cancellationToken).ConfigureAwait(false);
+                    return Reply(request, RemoteFileSystemWire.Encode(new RemoteWriteResult(written)));
+                }
+                case "fs.write.v2":
+                {
+                    var arg = RemoteFileSystemWire.DecodeWriteV2(request.Payload);
                     var written = await _backend.WriteAsync(arg, cancellationToken).ConfigureAwait(false);
                     return Reply(request, RemoteFileSystemWire.Encode(new RemoteWriteResult(written)));
                 }
@@ -186,15 +192,22 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
     }
 
     public async ValueTask<long> WriteAsync(RemoteWriteRange request, CancellationToken cancellationToken)
+        => await WriteAsync(request.VolumeId, request.Path, request.Offset, request.Data, cancellationToken).ConfigureAwait(false);
+
+    public async ValueTask<long> WriteAsync(RemoteBinaryWriteRange request, CancellationToken cancellationToken)
+        => await WriteAsync(request.VolumeId, request.Path, request.Offset, request.Data, cancellationToken).ConfigureAwait(false);
+
+    private async ValueTask<long> WriteAsync(string volumeId, string remotePath, long offset,
+        ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
     {
-        if (request.Offset < 0) throw new InvalidDataException("File offset cannot be negative.");
-        var (path, volume) = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        if (offset < 0) throw new InvalidDataException("File offset cannot be negative.");
+        var (path, volume) = Resolve(volumeId, remotePath, allowRoot: false);
         EnsureWritable(volume);
         RejectLinks(path);
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read, 4096, FileOptions.Asynchronous);
-        stream.Position = request.Offset;
-        await stream.WriteAsync(request.Data, cancellationToken).ConfigureAwait(false);
-        return request.Data.LongLength;
+        stream.Position = offset;
+        await stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+        return data.Length;
     }
 
     public void Create(RemoteCreatePath request)

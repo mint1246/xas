@@ -9,7 +9,7 @@ namespace Xas.Daemon.FileTransfer;
 public sealed class FileTransferServer : IAsyncDisposable
 {
     private const int MaxTransfers = 8;
-    private const int MaxFrameBytes = 64 * 1024;
+    private const int MaxFrameBytes = 768 * 1024;
     private const int MaxPathChars = 4096;
     private const int MaxListEntries = 128;
     private const int MaxJsonBytes = 900 * 1024;
@@ -65,14 +65,13 @@ public sealed class FileTransferServer : IAsyncDisposable
             {
                 case MessageKind.StreamData:
                     if (message.Payload.Length is 0 or > MaxFrameBytes)
-                        throw new InvalidDataException("Upload frames must contain 1 to 65536 bytes.");
+                        throw new InvalidDataException($"Upload frames must contain 1 to {MaxFrameBytes} bytes.");
                     await transfer.Stream!.WriteAsync(message.Payload, _shutdown.Token).ConfigureAwait(false);
                     transfer.Bytes = checked(transfer.Bytes + message.Payload.Length);
                     break;
                 case MessageKind.StreamEnd:
                     if (message.Payload.Length != 0) throw new InvalidDataException("Upload StreamEnd must have an empty payload.");
                     transfer.Finished = true;
-                    await transfer.Stream!.FlushAsync(_shutdown.Token).ConfigureAwait(false);
                     break;
                 default: throw new InvalidDataException("Expected file.put.data StreamData or StreamEnd.");
             }
@@ -217,7 +216,8 @@ public sealed class FileTransferServer : IAsyncDisposable
             {
                 var count = await transfer.Stream!.ReadAsync(buffer, linked.Token).ConfigureAwait(false);
                 if (count == 0) break;
-                await _send(new ProtocolMessage(MessageKind.StreamData, 0, transfer.Id, "file.get.data", buffer.AsSpan(0, count).ToArray()), linked.Token).ConfigureAwait(false);
+                var payload = count == buffer.Length ? buffer : buffer.AsSpan(0, count).ToArray();
+                await _send(new ProtocolMessage(MessageKind.StreamData, 0, transfer.Id, "file.get.data", payload), linked.Token).ConfigureAwait(false);
             }
             await _send(new ProtocolMessage(MessageKind.StreamEnd, 0, transfer.Id, "file.get.data", []), linked.Token).ConfigureAwait(false);
         }

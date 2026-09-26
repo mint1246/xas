@@ -16,6 +16,13 @@ public static class FileSystemTests
         Assert(decoded.VolumeId == original.VolumeId && decoded.Path == original.Path && decoded.Offset == original.Offset &&
             decoded.Data.SequenceEqual(original.Data), "Filesystem range request did not round-trip.");
 
+        var binaryData = Enumerable.Range(0, 100_000).Select(i => (byte)(i % 251)).ToArray();
+        var binary = RemoteFileSystemWire.EncodeWriteV2("volume-2", "תיקיה/file.bin", 123456789, binaryData);
+        var decodedBinary = RemoteFileSystemWire.DecodeWriteV2(binary);
+        Assert(decodedBinary.VolumeId == "volume-2" && decodedBinary.Path == "תיקיה/file.bin" &&
+               decodedBinary.Offset == 123456789 && decodedBinary.Data.Span.SequenceEqual(binaryData),
+            "Binary filesystem write request did not round-trip.");
+
         var page = new RemoteDirectoryPage([new RemoteFileEntry("item", false, 5, 10)], true);
         var decodedPage = RemoteFileSystemWire.Decode<RemoteDirectoryPage>(RemoteFileSystemWire.Encode(page));
         Assert(decodedPage.HasMore && decodedPage.Entries.Single().Length == 5, "Filesystem directory page did not round-trip.");
@@ -31,6 +38,7 @@ public static class FileSystemTests
         }
         catch (InvalidDataException) { }
         await RemoteClientUsesVolumeScopedRequests();
+        await RemoteClientUsesBinaryWritesForVersion2();
         await FileSystemExportsAreExplicitAndReadOnlyIsEnforced();
     }
 
@@ -118,6 +126,27 @@ public static class FileSystemTests
         Assert(setInfo.Path == "folder/renamed.bin" && setInfo.CreationUnixMs == 10 && setInfo.LastAccessUnixMs == 20 &&
                setInfo.LastWriteUnixMs == 30 && setInfo.ReadOnly == true,
             "Filesystem client did not encode basic metadata updates correctly.");
+    }
+
+    private static async Task RemoteClientUsesBinaryWritesForVersion2()
+    {
+        var calls = new List<(string Method, byte[] Payload)>();
+        var client = new RemoteFileSystemOperationsClient("vol-v2", (method, payload, _) =>
+        {
+            calls.Add((method, payload));
+            return ValueTask.FromResult(new ProtocolMessage(MessageKind.Response, 1, 0, method,
+                RemoteFileSystemWire.Encode(new RemoteWriteResult(100_000))));
+        }, protocolVersion: 2);
+        Assert(client.MaxTransferBytes == RemoteFileSystemWire.MaxChunkBytes,
+            "Filesystem v2 client did not advertise the larger transfer limit.");
+        var data = Enumerable.Range(0, 100_000).Select(i => (byte)(i % 253)).ToArray();
+        Assert(await client.WriteAsync("/folder/large.bin", 77, data, CancellationToken.None) == data.Length,
+            "Filesystem v2 client returned the wrong write count.");
+        var call = calls.Single();
+        Assert(call.Method == "fs.write.v2", "Filesystem v2 client did not select the binary write method.");
+        var decoded = RemoteFileSystemWire.DecodeWriteV2(call.Payload);
+        Assert(decoded.VolumeId == "vol-v2" && decoded.Path == "folder/large.bin" && decoded.Offset == 77 &&
+               decoded.Data.Span.SequenceEqual(data), "Filesystem v2 client encoded the wrong binary write payload.");
     }
 
     private static void Assert(bool condition, string message)
