@@ -71,13 +71,24 @@ public sealed record LocalEndpointUpdate(string DeviceId, string Host, int Port)
 /// <summary>Per-user endpoint. The network peer certificate is never exposed to local clients.</summary>
 public static class LocalIpcEndpoint
 {
+    private static string InstanceSuffix
+    {
+        get
+        {
+            var instance = Environment.GetEnvironmentVariable("XAS_LOCAL_IPC_INSTANCE");
+            if (string.IsNullOrWhiteSpace(instance)) return string.Empty;
+            var digest = SHA256.HashData(Encoding.UTF8.GetBytes(instance));
+            return "-" + Convert.ToHexString(digest.AsSpan(0, 8)).ToLowerInvariant();
+        }
+    }
+
     public static string PipeName
     {
         get
         {
             var user = Environment.UserDomainName + "\\" + Environment.UserName;
             var digest = SHA256.HashData(Encoding.UTF8.GetBytes(user));
-            return "xas-" + Convert.ToHexString(digest.AsSpan(0, 12)).ToLowerInvariant();
+            return "xas-" + Convert.ToHexString(digest.AsSpan(0, 12)).ToLowerInvariant() + InstanceSuffix;
         }
     }
 
@@ -89,7 +100,7 @@ public static class LocalIpcEndpoint
             var directory = !string.IsNullOrWhiteSpace(runtime)
                 ? Path.Combine(runtime, "xas")
                 : Path.Combine(AppPaths.Root, "run");
-            return Path.Combine(directory, "daemon.sock");
+            return Path.Combine(directory, "daemon" + InstanceSuffix + ".sock");
         }
     }
 

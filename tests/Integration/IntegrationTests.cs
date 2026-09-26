@@ -23,6 +23,8 @@ public static class IntegrationTests
     {
         var root = Path.Combine(Path.GetTempPath(), "xas-integration-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
+        var previousIpcInstance = Environment.GetEnvironmentVariable("XAS_LOCAL_IPC_INSTANCE");
+        Environment.SetEnvironmentVariable("XAS_LOCAL_IPC_INSTANCE", "integration-" + Guid.NewGuid().ToString("N"));
         try
         {
             using var serverIdentity = DeviceIdentity.LoadOrCreate(Path.Combine(root, "server"));
@@ -224,7 +226,11 @@ public static class IntegrationTests
                 await serverTask.WaitAsync(TimeSpan.FromSeconds(10));
             }
         }
-        finally { Directory.Delete(root, recursive: true); }
+        finally
+        {
+            Environment.SetEnvironmentVariable("XAS_LOCAL_IPC_INSTANCE", previousIpcInstance);
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     private static int ReservePort()
