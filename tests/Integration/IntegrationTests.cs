@@ -75,12 +75,14 @@ public static class IntegrationTests
                     var uiUrl = await localDaemon.GetUiUrlAsync(CancellationToken.None);
                     Assert(Uri.TryCreate(uiUrl, UriKind.Absolute, out var uiUri) && uiUri.IsLoopback && uiUri.Port > 0,
                         "The local daemon IPC did not return a valid loopback UI URL.");
+                    if (uiUri is null) throw new InvalidOperationException("The local daemon IPC returned an invalid UI URL.");
                     if (OperatingSystem.IsWindows())
                     {
                         var mounts = await localDaemon.ListRemoteMountsAsync(null, CancellationToken.None);
                         Assert(mounts.Count == 0,
                             "A fresh integration daemon unexpectedly reported a native remote mount.");
                     }
+                    await ExerciseWebUiAsync(uiUri, daemonConfiguration, permissions, clientIdentity.DeviceId);
                 }
 
                 try
@@ -243,15 +245,15 @@ public static class IntegrationTests
     {
         for (var attempt = 0; attempt < 100; attempt++)
         {
-            using var first = new TcpListener(IPAddress.Loopback, 0);
+            using var first = new TcpListener(IPAddress.Any, 0);
             first.Start();
             var port = ((IPEndPoint)first.LocalEndpoint).Port;
             first.Stop();
             if (port >= 65535) continue;
             try
             {
-                using var control = new TcpListener(IPAddress.Loopback, port);
-                using var pairing = new TcpListener(IPAddress.Loopback, port + 1);
+                using var control = new TcpListener(IPAddress.Any, port);
+                using var pairing = new TcpListener(IPAddress.Any, port + 1);
                 control.Start(); pairing.Start();
                 control.Stop(); pairing.Stop();
                 return port;
@@ -264,6 +266,84 @@ public static class IntegrationTests
     private static void Assert(bool condition, string message)
     {
         if (!condition) throw new Exception(message);
+    }
+
+    private static async Task ExerciseWebUiAsync(Uri uiUri, LocalConfiguration configuration,
+        PeerPermissionStore permissions, string peerId)
+    {
+        var cookies = new CookieContainer();
+        using var handler = new HttpClientHandler { CookieContainer = cookies, UseCookies = true };
+        using var client = new HttpClient(handler) { BaseAddress = uiUri, Timeout = TimeSpan.FromSeconds(5) };
+
+        var page = await client.GetStringAsync("/");
+        Assert(page.Contains("id=\"tab-storage\"", StringComparison.Ordinal),
+            "The local web UI did not render the Storage tab.");
+        Assert(page.Contains("id=\"volume-list\"", StringComparison.Ordinal),
+            "The local web UI did not render remote-volume controls.");
+        var marker = "const csrf='";
+        var csrfStart = page.IndexOf(marker, StringComparison.Ordinal);
+        Assert(csrfStart >= 0, "The local web UI did not embed its CSRF token.");
+        csrfStart += marker.Length;
+        var csrfEnd = page.IndexOf('\'', csrfStart);
+        Assert(csrfEnd > csrfStart, "The local web UI embedded an invalid CSRF token.");
+        var csrf = page[csrfStart..csrfEnd];
+
+        using (var stateRequest = new HttpRequestMessage(HttpMethod.Get, "/api/state"))
+        {
+            stateRequest.Headers.Add("X-Xas-CSRF", csrf);
+            using var stateResponse = await client.SendAsync(stateRequest);
+            Assert(stateResponse.IsSuccessStatusCode, "The local web UI state endpoint rejected a valid session.");
+            using var state = JsonDocument.Parse(await stateResponse.Content.ReadAsStringAsync());
+            Assert(state.RootElement.TryGetProperty("storage", out var storage),
+                "The local web UI state did not expose storage state.");
+            Assert(storage.TryGetProperty("AutoExposeRemovable", out _),
+                "The local web UI storage state omitted the local removable-drive setting.");
+            Assert(storage.TryGetProperty("Mounts", out _),
+                "The local web UI storage state omitted current native mounts.");
+        }
+
+        async Task<HttpResponseMessage> PostAsync(string path, string json)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, path)
+            {
+                Content = new StringContent(json, Encoding.UTF8, "application/json")
+            };
+            request.Headers.Add("X-Xas-CSRF", csrf);
+            request.Headers.Add("Origin", uiUri.GetLeftPart(UriPartial.Authority).TrimEnd('/'));
+            return await client.SendAsync(request);
+        }
+
+        using (var settingsResponse = await PostAsync("/api/storage/settings",
+                   "{\"autoExposeRemovable\":false,\"autoMountRemoteRemovable\":true}"))
+        {
+            Assert(settingsResponse.IsSuccessStatusCode, "The local web UI storage settings endpoint rejected valid settings.");
+            Assert(!configuration.AutoExposeRemovable && configuration.AutoMountRemoteRemovable,
+                "Camel-case web UI storage settings were not applied to daemon configuration.");
+        }
+
+        using (var permissionResponse = await PostAsync("/api/permission",
+                   $"{{\"deviceId\":\"{peerId}\",\"capability\":\"Clipboard\",\"allowed\":false}}"))
+        {
+            Assert(permissionResponse.IsSuccessStatusCode,
+                "The local web UI permission endpoint rejected a valid camel-case request.");
+            Assert(!permissions.IsAllowed(peerId, Capability.Clipboard),
+                "Camel-case web UI permission changes were not applied to the peer permission store.");
+        }
+        permissions.SetAllowed(peerId, Capability.Clipboard, true);
+
+        using (var badMount = await PostAsync("/api/storage/mount",
+                   $"{{\"deviceId\":\"{peerId}\",\"volume\":\"missing-volume\"}}"))
+        {
+            Assert(badMount.StatusCode == HttpStatusCode.BadRequest,
+                "An invalid web UI storage mount did not return HTTP 400.");
+            using var error = JsonDocument.Parse(await badMount.Content.ReadAsStringAsync());
+            Assert(error.RootElement.TryGetProperty("error", out var message) && !string.IsNullOrWhiteSpace(message.GetString()),
+                "An invalid web UI storage mount did not return a readable JSON error.");
+        }
+
+        using var restore = await PostAsync("/api/storage/settings",
+            "{\"autoExposeRemovable\":true,\"autoMountRemoteRemovable\":true}");
+        Assert(restore.IsSuccessStatusCode, "The local web UI could not restore storage settings after the test.");
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition)

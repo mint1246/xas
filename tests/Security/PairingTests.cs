@@ -66,15 +66,15 @@ public static class PairingTests
     {
         for (var attempt = 0; attempt < 100; attempt++)
         {
-            using var first = new TcpListener(IPAddress.Loopback, 0);
+            using var first = new TcpListener(IPAddress.Any, 0);
             first.Start();
             var port = ((IPEndPoint)first.LocalEndpoint).Port;
             first.Stop();
             if (port >= 65535 || port == avoid || port + 1 == avoid) continue;
             try
             {
-                using var control = new TcpListener(IPAddress.Loopback, port);
-                using var pairing = new TcpListener(IPAddress.Loopback, port + 1);
+                using var control = new TcpListener(IPAddress.Any, port);
+                using var pairing = new TcpListener(IPAddress.Any, port + 1);
                 control.Start(); pairing.Start();
                 control.Stop(); pairing.Stop();
                 return port;

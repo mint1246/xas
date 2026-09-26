@@ -77,7 +77,7 @@ public sealed class DaemonHost
             ? new RemoteMountManager(configuration, PeerSessions, log: message => Console.Error.WriteLine(message))
             : null;
         await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, configuration,
-            peerAdministration, pairing, _webPort);
+            peerAdministration, pairing, remoteMounts, _webPort);
         var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration, _trust, _permissions,
             _dispatcher.Clipboard, peerAdministration, remoteMounts, () => $"http://127.0.0.1:{web.Port}/");
         using var daemonStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
