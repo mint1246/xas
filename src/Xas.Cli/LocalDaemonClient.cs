@@ -7,6 +7,7 @@ using Xas.Core.Services;
 using Xas.Cli.Interactive;
 using Xas.Cli.Terminal;
 using Xas.Cli.FileTransfer;
+using Xas.Input;
 
 namespace Xas.Cli;
 
@@ -260,8 +261,22 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
         await writer.WriteLineAsync(status.Message).ConfigureAwait(false);
         return status.Active ? 0 : 1;
     }
-    public Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken) =>
-        throw new NotSupportedException("Manual input forwarding through the local daemon is not available yet.");
+
+    public async Task<string> RevokeAsync(string deviceId, CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.Revoke,
+            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<string>(reply.Payload, LocalIpcProtocol.Json)
+            ?? throw new InvalidDataException("The daemon returned an invalid revoke response.");
+    }
+    public async Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken)
+    {
+        var configured = new LocalConfiguration().Resolve(deviceId)
+            ?? throw new InvalidOperationException("No matching configured device.");
+        await using var connection = await LocalIpcConnection.ConnectAsync(configured.DeviceId, cancellationToken).ConfigureAwait(false);
+        await InputControlClient.RunOnPeerAsync(connection.Peer, configured.DeviceId, cancellationToken).ConfigureAwait(false);
+        return 0;
+    }
 
     public void Dispose()
     {

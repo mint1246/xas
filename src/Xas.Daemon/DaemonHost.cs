@@ -71,8 +71,11 @@ public sealed class DaemonHost
         await using var sessions = PeerSessions;
         await using var pairing = new PairingService(_identity, _trust, checked(_port + 1), Environment.MachineName);
         var configuration = _configuration;
-        await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, configuration, pairing, _webPort);
-        var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration, _trust, _permissions, _dispatcher.Clipboard);
+        var peerAdministration = new PeerAdministrationService(configuration, _trust, _permissions, PeerSessions);
+        await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, configuration,
+            peerAdministration, pairing, _webPort);
+        var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration, _trust, _permissions,
+            _dispatcher.Clipboard, peerAdministration);
         using var daemonStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         listener.Start();
         Task kvmCoordinator = Task.CompletedTask;

@@ -17,9 +17,9 @@ using Xas.Daemon.Clipboard;
 namespace Xas.Daemon.LocalIpc;
 
 /// <summary>Per-user command endpoint. It exposes trusted daemon state without exposing network credentials.</summary>
-public sealed class LocalIpcServer(PeerSessionManager sessions, PairingService pairing,
+internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService pairing,
     LocalConfiguration configuration, PeerTrustStore trust, PeerPermissionStore permissions,
-    ClipboardService clipboard)
+    ClipboardService clipboard, PeerAdministrationService peerAdministration)
 {
     private readonly PeerSessionManager _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
     private readonly PairingService _pairing = pairing ?? throw new ArgumentNullException(nameof(pairing));
@@ -27,6 +27,7 @@ public sealed class LocalIpcServer(PeerSessionManager sessions, PairingService p
     private readonly PeerTrustStore _trust = trust ?? throw new ArgumentNullException(nameof(trust));
     private readonly PeerPermissionStore _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
     private readonly ClipboardService _clipboard = clipboard ?? throw new ArgumentNullException(nameof(clipboard));
+    private readonly PeerAdministrationService _peerAdministration = peerAdministration ?? throw new ArgumentNullException(nameof(peerAdministration));
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -254,6 +255,13 @@ public sealed class LocalIpcServer(PeerSessionManager sessions, PairingService p
                     return Response(request, JsonSerializer.SerializeToUtf8Bytes(
                         new LocalClipboardStatus(false, $"Clipboard sync is unavailable: {ex.Message}"), LocalIpcProtocol.Json));
                 }
+            }
+            case LocalIpcProtocol.Revoke:
+            {
+                var target = ReadTarget(request.Payload).DeviceId
+                    ?? throw new InvalidDataException("Device ID is required.");
+                var revoked = await _peerAdministration.RevokeAsync(target).ConfigureAwait(false);
+                return Response(request, JsonSerializer.SerializeToUtf8Bytes(revoked, LocalIpcProtocol.Json));
             }
             case LocalIpcProtocol.PairBegin:
             {

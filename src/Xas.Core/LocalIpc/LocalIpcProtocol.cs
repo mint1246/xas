@@ -25,6 +25,7 @@ public static class LocalIpcProtocol
     public const string ClipboardPush = "local.clipboard.push";
     public const string ClipboardPull = "local.clipboard.pull";
     public const string ClipboardStatus = "local.clipboard.status";
+    public const string Revoke = "local.revoke";
     public const string Bind = "local.bind";
     public const string ShellOpen = "local.shell.open";
     public const string ShellStdin = ShellExecWire.Stdin;

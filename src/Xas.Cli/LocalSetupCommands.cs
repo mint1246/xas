@@ -57,12 +57,11 @@ internal static class LocalSetupCommands
                 return DisplayCommands.Run(args);
             case "revoke":
                 if (args.Length != 2) return Usage("Usage: xas revoke <device-id>");
-                var config = new LocalConfiguration();
-                var revoked = config.Resolve(args[1]) ?? throw new InvalidOperationException("No matching paired device.");
-                var removed = new PeerTrustStore(AppPaths.TrustDirectory).Revoke(revoked.DeviceId);
-                new PeerPermissionStore(AppPaths.TrustDirectory).RemovePeer(revoked.DeviceId);
-                config.RemovePeer(revoked.DeviceId);
-                Console.WriteLine(removed ? $"Revoked {revoked.DeviceId}." : $"Removed local configuration for {revoked.DeviceId}.");
+                using (var revokeClient = new LocalDaemonClient(Stream.Null, Console.OpenStandardOutput(), Console.OpenStandardError()))
+                {
+                    var revoked = await revokeClient.RevokeAsync(args[1], CancellationToken.None);
+                    Console.WriteLine($"Revoked {revoked} and disconnected all live sessions.");
+                }
                 return 0;
             case "endpoint":
                 if (args.Length is < 3 or > 4 || !int.TryParse(args.ElementAtOrDefault(3) ?? XasProtocol.DefaultPort.ToString(), out var endpointPort)

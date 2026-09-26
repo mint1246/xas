@@ -32,6 +32,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
     private readonly ConcurrentDictionary<string, PeerSession> _sessions = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, Task> _dialers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<MultiplexedProtocolPeer, PeerLane> _lanes = new();
+    private readonly ConcurrentDictionary<MultiplexedProtocolPeer, string> _connections = new();
     private readonly CancellationTokenSource _shutdown = new();
     private LanDiscoveryService? _discovery;
     private Task? _maintenance;
@@ -62,6 +63,23 @@ public sealed class PeerSessionManager : IAsyncDisposable
     public IReadOnlyList<DiscoveredPeer> GetDiscoveredPeers() => _discovery?.GetPeers() ?? [];
 
     public PeerSession? GetSession(string deviceId) => _sessions.GetValueOrDefault(deviceId);
+
+    public async Task RemovePeerAsync(string deviceId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
+        var live = _connections.Where(item => string.Equals(item.Value, deviceId, StringComparison.Ordinal))
+            .Select(item => item.Key).ToArray();
+        foreach (var connection in live)
+        {
+            try { await connection.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception) { }
+        }
+        if (_sessions.TryRemove(deviceId, out var session))
+        {
+            await session.DisposeAsync().ConfigureAwait(false);
+            SessionRemoved?.Invoke(deviceId);
+        }
+    }
 
     public void UpdateConfiguredPeers(IReadOnlyList<ConfiguredPeer> peers)
     {
@@ -149,10 +167,11 @@ public sealed class PeerSessionManager : IAsyncDisposable
             while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
             {
                 var discovered = _discovery?.GetPeers() ?? [];
-                var peers = discovered.Concat(ConfiguredPeers
-                    .Where(configured => discovered.All(p => p.DeviceId != configured.DeviceId))
-                    .Select(configured => new DiscoveredPeer(configured.DeviceId, configured.Name,
-                        configured.Host, configured.Port, DateTimeOffset.UtcNow)));
+                var trusted = _trust.List().Select(p => p.DeviceId).ToHashSet(StringComparer.Ordinal);
+                var peers = ConfiguredPeers.Where(configured => trusted.Contains(configured.DeviceId))
+                    .Select(configured => discovered.FirstOrDefault(p => p.DeviceId == configured.DeviceId) ??
+                        new DiscoveredPeer(configured.DeviceId, configured.Name,
+                            configured.Host, configured.Port, DateTimeOffset.UtcNow));
                 foreach (var peer in peers)
                 {
                     // One deterministic dialer per pair prevents two daemons repeatedly replacing each other's lane.
@@ -175,8 +194,8 @@ public sealed class PeerSessionManager : IAsyncDisposable
     private async Task DialLoopAsync(DiscoveredPeer peer, PeerLane lane, CancellationToken token)
     {
         var delay = TimeSpan.FromSeconds(1);
-        while (!token.IsCancellationRequested && (_discovery?.GetPeers().Any(p => p.DeviceId == peer.DeviceId) == true ||
-               ConfiguredPeers.Any(p => p.DeviceId == peer.DeviceId)))
+        while (!token.IsCancellationRequested && ConfiguredPeers.Any(p => p.DeviceId == peer.DeviceId) &&
+               _trust.List().Any(p => p.DeviceId == peer.DeviceId))
         {
             try
             {
@@ -263,6 +282,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
                         ? await input.HandleRequestAsync(message, ct).ConfigureAwait(false)
                         : await _dispatcher.HandleAsync(deviceId, message, frames.SendAsync, ct).ConfigureAwait(false);
         });
+        _connections.TryAdd(protocol, deviceId);
         protocol.MessageReceived += message =>
         {
             var selected = SelectLane(message);
@@ -313,6 +333,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
             try { await clipboardPublisher.ConfigureAwait(false); }
             catch (OperationCanceledException) when (clipboardStop.IsCancellationRequested) { }
             _lanes.TryRemove(protocol, out _);
+            _connections.TryRemove(protocol, out _);
             if (attached) session.Detach(lane ?? PeerLane.Control, protocol);
             await protocol.DisposeAsync().ConfigureAwait(false);
         }
@@ -394,7 +415,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
             await _discovery.DisposeAsync().ConfigureAwait(false);
         }
         try { await Task.WhenAll(_dialers.Values).ConfigureAwait(false); } catch (OperationCanceledException) { }
-        foreach (var lane in _lanes.Keys) await lane.DisposeAsync().ConfigureAwait(false);
+        foreach (var connection in _connections.Keys) await connection.DisposeAsync().ConfigureAwait(false);
         foreach (var session in _sessions.Values)
         {
             await session.DisposeAsync().ConfigureAwait(false);

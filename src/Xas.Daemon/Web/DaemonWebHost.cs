@@ -13,7 +13,7 @@ using Xas.Daemon.Sessions;
 namespace Xas.Daemon.Web;
 
 /// <summary>Loopback-only local management UI. Mutations require a same-origin session and CSRF token.</summary>
-public sealed class DaemonWebHost : IAsyncDisposable
+internal sealed class DaemonWebHost : IAsyncDisposable
 {
     private const string CookieName = "xas_local_session";
     private const int MaxRequestBytes = 16 * 1024;
@@ -22,6 +22,7 @@ public sealed class DaemonWebHost : IAsyncDisposable
     private readonly PeerPermissionStore _permissions;
     private readonly PairingService? _pairing;
     private readonly LocalConfiguration _configuration;
+    private readonly PeerAdministrationService _peerAdministration;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stop = new();
     private readonly Dictionary<string, string> _csrfBySession = new(StringComparer.Ordinal);
@@ -29,12 +30,14 @@ public sealed class DaemonWebHost : IAsyncDisposable
     private Task? _acceptLoop;
 
     public DaemonWebHost(PeerSessionManager sessions, PeerTrustStore trust, PeerPermissionStore permissions,
-        LocalConfiguration configuration, PairingService? pairing = null, int port = 47832)
+        LocalConfiguration configuration, PeerAdministrationService peerAdministration,
+        PairingService? pairing = null, int port = 47832)
     {
         _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
         _trust = trust ?? throw new ArgumentNullException(nameof(trust));
         _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        _peerAdministration = peerAdministration ?? throw new ArgumentNullException(nameof(peerAdministration));
         _pairing = pairing;
         if (port is < 0 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
         _listener = new TcpListener(IPAddress.Loopback, port);
@@ -168,8 +171,7 @@ public sealed class DaemonWebHost : IAsyncDisposable
                 if (request.Method == "POST" && request.Path == "/api/revoke")
                 {
                     var body = JsonSerializer.Deserialize<DeviceRequest>(request.Body) ?? throw new InvalidDataException();
-                    _trust.Revoke(body.DeviceId);
-                    _permissions.RemovePeer(body.DeviceId);
+                    _ = await _peerAdministration.RevokeAsync(body.DeviceId).ConfigureAwait(false);
                     await RespondAsync(stream, 200, "application/json", "{\"ok\":true}", null, token);
                     return;
                 }

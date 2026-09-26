@@ -20,19 +20,35 @@ public static class InputControlClient
         ArgumentNullException.ThrowIfNull(configured);
         if (!WindowsInputCapture.IsAvailable)
             throw new PlatformNotSupportedException("Manual input capture requires a Windows user session.");
-        using var setup = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        if (region is not null) setup.CancelAfter(TimeSpan.FromSeconds(55));
+        using var connect = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        connect.CancelAfter(region is null ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(3));
         await using var connection = await MutualTlsTransport.ConnectAsync(configured.Host, configured.Port,
             identity, trust, configured.DeviceId, region is null ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(3),
-            setup.Token).ConfigureAwait(false);
+            connect.Token).ConfigureAwait(false);
         await using var frames = new BinaryFrameConnection(connection.Stream, leaveOpen: true);
         await using var peer = new MultiplexedProtocolPeer(frames, (_, _) =>
             ValueTask.FromException<ProtocolMessage>(new NotSupportedException("The input controller does not accept remote requests.")));
+        await RunOnPeerAsync(peer, configured.DeviceId, cancellationToken, region, monitorHint, trace, metrics)
+            .ConfigureAwait(false);
+    }
+
+    public static async Task RunOnPeerAsync(MultiplexedProtocolPeer peer, string? expectedDeviceId,
+        CancellationToken cancellationToken, WindowsCaptureRegion? region = null,
+        string? monitorHint = null, Action<string>? trace = null,
+        IInputPipelineMetrics? metrics = null)
+    {
+        ArgumentNullException.ThrowIfNull(peer);
+        if (!WindowsInputCapture.IsAvailable)
+            throw new PlatformNotSupportedException("Manual input capture requires a Windows user session.");
+        using var setup = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        if (region is not null) setup.CancelAfter(TimeSpan.FromSeconds(55));
         var infoReply = await peer.RequestAsync("device.info", [], cancellationToken: setup.Token).ConfigureAwait(false);
         DeviceInfo? info;
         try { info = JsonSerializer.Deserialize<DeviceInfo>(infoReply.Payload); }
         catch (JsonException ex) { throw new InvalidDataException("Invalid device.info response.", ex); }
-        if (info?.DeviceId != configured.DeviceId) throw new InvalidDataException("Device identity changed during input setup.");
+        if (info is null) throw new InvalidDataException("The remote device returned no device information.");
+        if (expectedDeviceId is not null && !string.Equals(info.DeviceId, expectedDeviceId, StringComparison.Ordinal))
+            throw new InvalidDataException("Device identity changed during input setup.");
         if (!info.Capabilities.Any(c => c.Capability == Capability.Input && c.Version >= 1))
             throw new NotSupportedException("The remote device has no available input injection backend.");
         DisplayMetadata? display = null;
