@@ -25,14 +25,25 @@ if ($existing -and $existing.Status -ne 'Stopped') {
 # upgrade, be defensive: a crashed/older supervisor may leave that user-session process alive, which keeps
 # Xas.Daemon.exe locked and prevents the new package from replacing it. Kill only the installed daemon path.
 $installedDaemonPath = Join-Path $target 'Xas.Daemon.exe'
-foreach ($process in @(Get-Process -Name 'Xas.Daemon' -ErrorAction SilentlyContinue)) {
-    try {
-        if ($process.Path -and [string]::Equals([IO.Path]::GetFullPath($process.Path), [IO.Path]::GetFullPath($installedDaemonPath), [StringComparison]::OrdinalIgnoreCase)) {
-            Stop-Process -Id $process.Id -Force
-            $process.WaitForExit(5000)
-        }
-    } catch [System.ComponentModel.Win32Exception] { }
-      catch [System.InvalidOperationException] { }
+function Get-InstalledXasDaemonProcesses {
+    $expected = [IO.Path]::GetFullPath($installedDaemonPath)
+    @(Get-CimInstance Win32_Process -Filter "Name='Xas.Daemon.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -and [string]::Equals([IO.Path]::GetFullPath($_.ExecutablePath), $expected, [StringComparison]::OrdinalIgnoreCase)
+    })
+}
+
+# Give a current supervisor a brief chance to perform its normal cleanup first.
+for ($attempt = 0; $attempt -lt 12 -and (Get-InstalledXasDaemonProcesses).Count -gt 0; $attempt++) {
+    Start-Sleep -Milliseconds 250
+}
+foreach ($process in @(Get-InstalledXasDaemonProcesses)) {
+    Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+}
+for ($attempt = 0; $attempt -lt 20 -and (Get-InstalledXasDaemonProcesses).Count -gt 0; $attempt++) {
+    Start-Sleep -Milliseconds 100
+}
+if ((Get-InstalledXasDaemonProcesses).Count -gt 0) {
+    throw 'Could not stop the installed Xas.Daemon process for upgrade.'
 }
 foreach ($name in @('xas.exe', 'Xas.Daemon.exe', 'Xas.PrivilegedService.exe', $winFspFile)) {
     $file = Join-Path $source $name
@@ -85,15 +96,14 @@ if ($existingDaemonTask) {
 
 $servicePath = Join-Path $target 'Xas.PrivilegedService.exe'
 $existing = Get-Service -Name 'XasAdminBroker' -ErrorAction SilentlyContinue
-if ($existing) {
-    & sc.exe delete XasAdminBroker | Out-Null
-    for ($attempt = 0; $attempt -lt 20 -and (Get-Service -Name 'XasAdminBroker' -ErrorAction SilentlyContinue); $attempt++) {
-        Start-Sleep -Milliseconds 250
-    }
-    if (Get-Service -Name 'XasAdminBroker' -ErrorAction SilentlyContinue) { throw 'The existing XasAdminBroker service is still being removed.' }
+if (-not $existing) {
+    New-Service -Name 'XasAdminBroker' -BinaryPathName "`"$servicePath`"" -StartupType Automatic `
+        -DisplayName 'XAS Background Service' | Out-Null
+} else {
+    # The install path is stable, so upgrades do not need to delete/recreate the service. Reusing it avoids
+    # the SCM's asynchronous "marked for deletion" state and makes in-place upgrades deterministic.
+    Set-Service -Name 'XasAdminBroker' -StartupType Automatic -DisplayName 'XAS Background Service'
 }
-New-Service -Name 'XasAdminBroker' -BinaryPathName "`"$servicePath`"" -StartupType Automatic `
-    -DisplayName 'XAS Background Service' | Out-Null
 & sc.exe description XasAdminBroker 'Supervises the interactive Xas daemon and runs approved administrator commands.' | Out-Null
 & sc.exe failure XasAdminBroker 'reset= 86400' 'actions= restart/5000/restart/15000/restart/30000' | Out-Null
 & sc.exe failureflag XasAdminBroker 1 | Out-Null
