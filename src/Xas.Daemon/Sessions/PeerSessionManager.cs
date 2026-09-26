@@ -374,8 +374,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
         if (info.Kind != MessageKind.Response) return;
         var device = JsonSerializer.Deserialize<DeviceInfo>(info.Payload);
         session.UpdateMetadata(device: device);
-        if (device?.Capabilities.Any(c => c.Capability == Capability.Display && c.Version > 0) != true ||
-            !_permissions.IsAllowed(deviceId, Capability.Input)) return;
+        if (device?.Capabilities.Any(c => c.Capability == Capability.Display && c.Version > 0) != true) return;
         try
         {
             var display = await protocol.RequestAsync("display.info", [], cancellationToken: token).ConfigureAwait(false);
