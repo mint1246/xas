@@ -13,6 +13,7 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
     private readonly Task _reader;
     private uint _nextId;
     private int _disposed;
+    private Exception? _terminalException;
 
     public MultiplexedProtocolPeer(IFrameConnection connection,
         Func<ProtocolMessage, CancellationToken, ValueTask<ProtocolMessage>> requestHandler)
@@ -27,6 +28,9 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
 
     /// <summary>Completes when the connection closes or the receive loop stops.</summary>
     public Task Completion => _reader;
+
+    /// <summary>The transport or protocol failure that ended the receive loop, if any.</summary>
+    public Exception? TerminalException => Volatile.Read(ref _terminalException);
 
     public ValueTask SendAsync(ProtocolMessage message, CancellationToken cancellationToken = default)
     {
@@ -110,7 +114,9 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
                         break;
                     default:
                         var handler = MessageReceived;
-                        if (handler is not null) await handler(message).ConfigureAwait(false);
+                        if (handler is not null)
+                            foreach (Func<ProtocolMessage, ValueTask> subscriber in handler.GetInvocationList())
+                                await subscriber(message).ConfigureAwait(false);
                         break;
                 }
             }
@@ -119,6 +125,7 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
         catch (Exception ex) { failure = ex; }
         finally
         {
+            Volatile.Write(ref _terminalException, failure);
             var terminal = failure ?? new ObjectDisposedException(nameof(MultiplexedProtocolPeer));
             foreach (var item in _pending.Values) item.TrySetException(terminal);
             _pending.Clear();

@@ -11,6 +11,8 @@ public static class ProtocolTests
         await FrameRoundTripAndPartialReadsAsync();
         await RejectMalformedFramesAsync();
         await MultiplexConcurrentRequestsAsync();
+        await AllEventSubscribersAreAwaitedAsync();
+        await TerminalFailureIsObservableAsync();
     }
 
     private static async Task FrameRoundTripAndPartialReadsAsync()
@@ -57,6 +59,41 @@ public static class ProtocolTests
         var responses = await Task.WhenAll(first, second);
         Assert(responses[0].Payload[0] == 1 && responses[1].Payload[0] == 2, "Concurrent replies were mis-correlated.");
         Assert(responses[0].RequestId != responses[1].RequestId, "Concurrent requests reused an id.");
+    }
+
+    private static async Task AllEventSubscribersAreAwaitedAsync()
+    {
+        var (left, right) = InMemoryFrameConnection.CreatePair();
+        await using var receiver = new MultiplexedProtocolPeer(left, (_, _) =>
+            ValueTask.FromException<ProtocolMessage>(new Exception("Unexpected request.")));
+        var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var second = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sawFirstCompletion = false;
+        receiver.MessageReceived += async _ =>
+        {
+            await Task.Delay(20);
+            first.TrySetResult();
+        };
+        receiver.MessageReceived += _ =>
+        {
+            sawFirstCompletion = first.Task.IsCompleted;
+            second.TrySetResult();
+            return ValueTask.CompletedTask;
+        };
+        await right.SendAsync(new ProtocolMessage(MessageKind.Event, 0, 0, "changed", []), default);
+        await Task.WhenAll(first.Task, second.Task).WaitAsync(TimeSpan.FromSeconds(2));
+        Assert(sawFirstCompletion, "The next subscriber ran before the prior async subscriber completed.");
+    }
+
+    private static async Task TerminalFailureIsObservableAsync()
+    {
+        var (left, right) = InMemoryFrameConnection.CreatePair();
+        await using var receiver = new MultiplexedProtocolPeer(left, (_, _) =>
+            ValueTask.FromException<ProtocolMessage>(new Exception("Unexpected request.")));
+        await right.DisposeAsync();
+        await receiver.Completion.WaitAsync(TimeSpan.FromSeconds(2));
+        Assert(receiver.TerminalException is ChannelClosedException,
+            "A disconnected peer must retain the receive failure for reconnect diagnostics.");
     }
 
     private static void Assert(bool condition, string message)
