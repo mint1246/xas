@@ -20,8 +20,7 @@
 - [x] Continuous plain-text clipboard sync with reconnect, echo suppression, deterministic simultaneous-edit resolution, and a network loopback test.
 - [x] Managed automatic Windows monitor-boundary handoff, absolute pointer protocol, Linux display metadata RPC, and topology/coordinate tests.
 - [x] Linux display metadata for GNOME on Wayland, read over Mutter's DisplayConfig D-Bus API, including logical-layout scale and transform handling.
-- [x] Source for one-monitor Windows IddCx driver and Wayland portal/libei input helper.
-- [x] Build the Windows x64 IddCx DLL with the Microsoft-signed WDK NuGet toolchain; verify its INF with Windows Driver, Universal, and WHQL rules.
+- [x] Wayland portal/libei input helper source.
 - [x] Replace the in-tree unsigned driver with the SudoVDA control channel: automatic monitor create/remove at the Linux display's mode, stable per-display monitor identity, driver watchdog keepalive, and adapter-based monitor discovery that needs no configuration.
 
 ## In progress
