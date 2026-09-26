@@ -37,7 +37,10 @@ internal static class BrokerServer
 
     private static NamedPipeServerStream CreatePipe()
     {
-        var sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)";
+        // Local interactive user-session daemons may connect. The pipe also uses
+        // PIPE_REJECT_REMOTE_CLIENTS below, and HandleAsync independently verifies
+        // the connecting process image before accepting any broker request.
+        var sddl = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;IU)";
         if (!ConvertStringSecurityDescriptorToSecurityDescriptor(sddl, 1, out var descriptor, out _))
             throw new Win32Exception(Marshal.GetLastWin32Error());
         try
@@ -56,6 +59,7 @@ internal static class BrokerServer
         var accepted = false;
         try
         {
+            VerifyXasDaemonClient(pipe);
             using var headerTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             var request = await AdminBrokerWire.ReadHeaderAsync<AdminBrokerRequest>(pipe, headerTimeout.Token).ConfigureAwait(false);
             using var caller = GetPipeClientIdentity(pipe);
@@ -94,6 +98,27 @@ internal static class BrokerServer
             }
             await AdminBrokerWire.WriteHeaderAsync(pipe, new AdminBrokerStatus(false, ex.Message), CancellationToken.None).ConfigureAwait(false);
         }
+    }
+
+    private static void VerifyXasDaemonClient(NamedPipeServerStream pipe)
+    {
+        if (!GetNamedPipeClientProcessId(pipe.SafePipeHandle, out var processId) || processId == 0)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not identify the administrator broker client process.");
+
+        const uint ProcessQueryLimitedInformation = 0x1000;
+        using var process = OpenProcess(ProcessQueryLimitedInformation, false, processId);
+        if (process.IsInvalid)
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not inspect the administrator broker client process.");
+
+        var capacity = 32768u;
+        var path = new StringBuilder((int)capacity);
+        if (!QueryFullProcessImageName(process, 0, path, ref capacity))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not resolve the administrator broker client executable.");
+
+        var actual = Path.GetFullPath(path.ToString());
+        var expected = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "Xas.Daemon.exe"));
+        if (!StringComparer.OrdinalIgnoreCase.Equals(actual, expected))
+            throw new UnauthorizedAccessException("Only the installed Xas user-session daemon may use the administrator broker.");
     }
 
     private static async Task RunInteractiveAsync(NamedPipeServerStream pipe,
@@ -303,6 +328,9 @@ internal static class BrokerServer
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool CreatePipe(out SafeFileHandle read, out SafeFileHandle write, ref SecurityAttributes security, uint size);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetHandleInformation(SafeFileHandle handle, uint mask, uint flags);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetNamedPipeClientSessionId(SafePipeHandle pipe, out uint sessionId);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint processId);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern SafeFileHandle OpenProcess(uint desiredAccess, bool inheritHandle, uint processId);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool QueryFullProcessImageName(SafeFileHandle process, uint flags, StringBuilder imageName, ref uint size);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool ImpersonateNamedPipeClient(SafePipeHandle pipe);
     [DllImport("advapi32.dll", SetLastError = true)] private static extern bool OpenThreadToken(IntPtr thread, uint access, bool openAsSelf, out SafeAccessTokenHandle token);
     [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentThread();
