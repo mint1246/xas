@@ -75,7 +75,7 @@ public sealed class DaemonHost
         await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, configuration,
             peerAdministration, pairing, _webPort);
         var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration, _trust, _permissions,
-            _dispatcher.Clipboard, peerAdministration);
+            _dispatcher.Clipboard, peerAdministration, () => $"http://127.0.0.1:{web.Port}/");
         using var daemonStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         listener.Start();
         Task kvmCoordinator = Task.CompletedTask;

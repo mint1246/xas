@@ -263,6 +263,7 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         writer.WriteLine("  display                 Report virtual display driver and handoff state (Windows)");
         writer.WriteLine("  (no arguments)          Open an interactive shell (requires PTY support)");
         writer.WriteLine("  identity                Show local device ID and fingerprint");
+        writer.WriteLine("  ui                      Open the local xas configuration UI");
         writer.WriteLine("  pair [name|short-id] [--kvm|--trust-only]  Pair a discovered nearby device");
         writer.WriteLine("  pair-manual <id> <fp> <host> [port]       Recovery/manual pairing");
         writer.WriteLine("  peers                   List locally approved peers");

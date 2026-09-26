@@ -19,7 +19,7 @@ namespace Xas.Daemon.LocalIpc;
 /// <summary>Per-user command endpoint. It exposes trusted daemon state without exposing network credentials.</summary>
 internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService pairing,
     LocalConfiguration configuration, PeerTrustStore trust, PeerPermissionStore permissions,
-    ClipboardService clipboard, PeerAdministrationService peerAdministration)
+    ClipboardService clipboard, PeerAdministrationService peerAdministration, Func<string> uiUrl)
 {
     private readonly PeerSessionManager _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
     private readonly PairingService _pairing = pairing ?? throw new ArgumentNullException(nameof(pairing));
@@ -28,6 +28,7 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
     private readonly PeerPermissionStore _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
     private readonly ClipboardService _clipboard = clipboard ?? throw new ArgumentNullException(nameof(clipboard));
     private readonly PeerAdministrationService _peerAdministration = peerAdministration ?? throw new ArgumentNullException(nameof(peerAdministration));
+    private readonly Func<string> _uiUrl = uiUrl ?? throw new ArgumentNullException(nameof(uiUrl));
 
     public async Task RunAsync(CancellationToken cancellationToken)
     {
@@ -256,12 +257,25 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
                         new LocalClipboardStatus(false, $"Clipboard sync is unavailable: {ex.Message}"), LocalIpcProtocol.Json));
                 }
             }
+            case LocalIpcProtocol.UiInfo:
+                return Response(request, JsonSerializer.SerializeToUtf8Bytes(
+                    new LocalUiInfo(_uiUrl()), LocalIpcProtocol.Json));
             case LocalIpcProtocol.Revoke:
             {
                 var target = ReadTarget(request.Payload).DeviceId
                     ?? throw new InvalidDataException("Device ID is required.");
                 var revoked = await _peerAdministration.RevokeAsync(target).ConfigureAwait(false);
                 return Response(request, JsonSerializer.SerializeToUtf8Bytes(revoked, LocalIpcProtocol.Json));
+            }
+            case LocalIpcProtocol.Endpoint:
+            {
+                var update = JsonSerializer.Deserialize<LocalEndpointUpdate>(request.Payload, LocalIpcProtocol.Json)
+                    ?? throw new InvalidDataException("Invalid endpoint update.");
+                if (string.IsNullOrWhiteSpace(update.Host) || update.Port is < 1 or > 65535)
+                    throw new InvalidDataException("Endpoint host and port are invalid.");
+                var configured = Resolve(update.DeviceId) ?? throw new InvalidOperationException("No matching paired device.");
+                _configuration.UpsertPeer(configured with { Host = update.Host, Port = update.Port });
+                return Response(request, JsonSerializer.SerializeToUtf8Bytes(configured.DeviceId, LocalIpcProtocol.Json));
             }
             case LocalIpcProtocol.PairBegin:
             {

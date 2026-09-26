@@ -70,6 +70,9 @@ public static class IntegrationTests
                     await localDaemon.SetDefaultDeviceAsync(clientIdentity.DeviceId, CancellationToken.None);
                     Assert(daemonConfiguration.DefaultDeviceId == clientIdentity.DeviceId,
                         "The local daemon IPC default-device update did not mutate daemon configuration.");
+                    var uiUrl = await localDaemon.GetUiUrlAsync(CancellationToken.None);
+                    Assert(Uri.TryCreate(uiUrl, UriKind.Absolute, out var uiUri) && uiUri.IsLoopback && uiUri.Port > 0,
+                        "The local daemon IPC did not return a valid loopback UI URL.");
                 }
 
                 try

@@ -46,6 +46,16 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
         return reply.Payload[0] == 1;
     }
 
+    public async Task<string> GetUiUrlAsync(CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.UiInfo, [], cancellationToken).ConfigureAwait(false);
+        var info = JsonSerializer.Deserialize<LocalUiInfo>(reply.Payload, LocalIpcProtocol.Json)
+            ?? throw new InvalidDataException("The daemon returned invalid UI information.");
+        if (!Uri.TryCreate(info.Url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttp || !uri.IsLoopback)
+            throw new InvalidDataException("The daemon returned a non-loopback UI URL.");
+        return uri.AbsoluteUri;
+    }
+
     public async Task<LocalPairPending> BeginPairingAsync(string host, int controlPort, string? expectedDeviceId,
         CancellationToken cancellationToken)
     {
@@ -268,6 +278,15 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
             JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
         return JsonSerializer.Deserialize<string>(reply.Payload, LocalIpcProtocol.Json)
             ?? throw new InvalidDataException("The daemon returned an invalid revoke response.");
+    }
+    public async Task<string> UpdateEndpointAsync(string deviceId, string host, int port,
+        CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync(LocalIpcProtocol.Endpoint,
+            JsonSerializer.SerializeToUtf8Bytes(new LocalEndpointUpdate(deviceId, host, port), LocalIpcProtocol.Json),
+            cancellationToken).ConfigureAwait(false);
+        return JsonSerializer.Deserialize<string>(reply.Payload, LocalIpcProtocol.Json)
+            ?? throw new InvalidDataException("The daemon returned an invalid endpoint response.");
     }
     public async Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken)
     {

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Xas.Core;
 using Xas.Core.Configuration;
 using Xas.Core.LocalIpc;
@@ -20,6 +21,23 @@ internal static class LocalSetupCommands
                     Console.WriteLine($"Fingerprint: {PairingFingerprint.Format(identity.Fingerprint)}");
                 }
                 return 0;
+            case "ui":
+                if (args.Length != 1) return Usage("Usage: xas ui");
+                using (var uiClient = new LocalDaemonClient(Stream.Null, Console.OpenStandardOutput(), Console.OpenStandardError()))
+                {
+                    var url = await uiClient.GetUiUrlAsync(CancellationToken.None);
+                    Console.WriteLine(url);
+                    try
+                    {
+                        Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+                        return 0;
+                    }
+                    catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or PlatformNotSupportedException)
+                    {
+                        Console.Error.WriteLine($"Could not open the default browser: {ex.Message}");
+                        return 1;
+                    }
+                }
             case "pair":
                 return await RunPairAsync(args.Skip(1).ToArray());
             case "pair-manual":
@@ -67,10 +85,11 @@ internal static class LocalSetupCommands
                 if (args.Length is < 3 or > 4 || !int.TryParse(args.ElementAtOrDefault(3) ?? XasProtocol.DefaultPort.ToString(), out var endpointPort)
                     || endpointPort is < 1 or > 65535)
                     return Usage("Usage: xas endpoint <device-id> <host> [port]");
-                var localConfig = new LocalConfiguration();
-                var configured = localConfig.Resolve(args[1]) ?? throw new InvalidOperationException("No matching paired device.");
-                localConfig.UpsertPeer(configured with { Host = args[2], Port = endpointPort });
-                Console.WriteLine($"Endpoint for {configured.DeviceId}: {args[2]}:{endpointPort}");
+                using (var endpointClient = new LocalDaemonClient(Stream.Null, Console.OpenStandardOutput(), Console.OpenStandardError()))
+                {
+                    var updated = await endpointClient.UpdateEndpointAsync(args[1], args[2], endpointPort, CancellationToken.None);
+                    Console.WriteLine($"Endpoint for {updated}: {args[2]}:{endpointPort}");
+                }
                 return 0;
             default:
                 return null;
