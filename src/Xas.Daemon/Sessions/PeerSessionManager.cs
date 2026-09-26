@@ -1,5 +1,9 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Net;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Security.Authentication;
 using System.Text.Json;
 using Xas.Core;
 using Xas.Core.Configuration;
@@ -34,6 +38,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
     private readonly ConcurrentDictionary<string, Task> _dialers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<MultiplexedProtocolPeer, PeerLane> _lanes = new();
     private readonly ConcurrentDictionary<MultiplexedProtocolPeer, string> _connections = new();
+    private readonly ConcurrentDictionary<string, Task<PathSelection>> _pathSelections = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _shutdown = new();
     private LanDiscoveryService? _discovery;
     private Task? _maintenance;
@@ -210,8 +215,10 @@ public sealed class PeerSessionManager : IAsyncDisposable
                 if (endpoint is null) break;
                 EnsureSession(endpoint.DeviceId, endpoint.Name).UpdateEndpoint(
                     $"{endpoint.Address}:{endpoint.TcpPort}", endpoint.Name, endpoint.LastSeen);
+                var paths = await GetPathSelectionAsync(endpoint, token).ConfigureAwait(false);
+                var localAddress = lane == PeerLane.Bulk ? paths.BulkAddress : paths.LatencyAddress;
                 var tls = await MutualTlsTransport.ConnectAsync(endpoint.Address, endpoint.TcpPort, _identity, _trust,
-                    endpoint.DeviceId, TimeSpan.FromSeconds(10), token).ConfigureAwait(false);
+                    endpoint.DeviceId, TimeSpan.FromSeconds(10), token, localAddress).ConfigureAwait(false);
                 await using (tls.ConfigureAwait(false))
                     await RunConnectionAsync(endpoint.DeviceId, endpoint.Name, tls.Stream, outbound: true, expectedLane: lane, token).ConfigureAwait(false);
                 delay = TimeSpan.FromSeconds(1);
@@ -224,6 +231,131 @@ public sealed class PeerSessionManager : IAsyncDisposable
                 delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2));
             }
         }
+    }
+
+    private Task<PathSelection> GetPathSelectionAsync(DiscoveredPeer peer, CancellationToken token)
+        => _pathSelections.GetOrAdd(peer.DeviceId, _ => SelectPathsAsync(peer, token));
+
+    private async Task<PathSelection> SelectPathsAsync(DiscoveredPeer peer, CancellationToken token)
+    {
+        var remote = await ResolveIpv4Async(peer.Address, token).ConfigureAwait(false);
+        if (remote is null) return PathSelection.Default;
+        var candidates = GetLocalIpv4Candidates(remote);
+        if (candidates.Count <= 1)
+            return candidates.Count == 1
+                ? new PathSelection(candidates[0].Address, candidates[0].Address)
+                : PathSelection.Default;
+
+        var results = new List<PathProbeResult>();
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                var result = await ProbePathAsync(peer, candidate, token).ConfigureAwait(false);
+                results.Add(result);
+                Console.Error.WriteLine($"Path probe to {peer.Name} via {candidate.Name} ({candidate.Address}): " +
+                    $"{result.RoundTripMilliseconds:F2} ms, {result.MebibytesPerSecond:F1} MiB/s bidirectional");
+            }
+            catch (Exception ex) when (ex is IOException or SocketException or TimeoutException or RemoteProtocolException or AuthenticationException)
+            {
+                Console.Error.WriteLine($"Path probe to {peer.Name} via {candidate.Name} ({candidate.Address}) failed: {ex.Message}");
+            }
+        }
+
+        if (results.Count == 0) return PathSelection.Default;
+        var latency = results.MinBy(r => r.RoundTripMilliseconds)!;
+        var bulk = results.MaxBy(r => r.MebibytesPerSecond)!;
+        Console.Error.WriteLine($"Selected paths to {peer.Name}: latency={latency.Candidate.Name} ({latency.Candidate.Address}), " +
+            $"bulk={bulk.Candidate.Name} ({bulk.Candidate.Address})");
+        return new PathSelection(latency.Candidate.Address, bulk.Candidate.Address);
+    }
+
+    private async Task<PathProbeResult> ProbePathAsync(DiscoveredPeer peer, LocalPathCandidate candidate,
+        CancellationToken token)
+    {
+        await using var tls = await MutualTlsTransport.ConnectAsync(peer.Address, peer.TcpPort, _identity, _trust,
+            peer.DeviceId, TimeSpan.FromSeconds(5), token, candidate.Address).ConfigureAwait(false);
+        await using var frames = new BinaryFrameConnection(tls.Stream, leaveOpen: true);
+        await using var protocol = new MultiplexedProtocolPeer(frames, static (_, _) =>
+            ValueTask.FromResult(new ProtocolMessage(MessageKind.Error, 0, 0, "device.path.probe", [])));
+
+        var small = new byte[32];
+        var rtts = new double[4];
+        for (var i = 0; i < rtts.Length; i++)
+        {
+            var sw = Stopwatch.StartNew();
+            var reply = await protocol.RequestAsync("device.path.probe", small, cancellationToken: token).ConfigureAwait(false);
+            sw.Stop();
+            if (reply.Kind != MessageKind.Response || reply.Payload.Length != small.Length)
+                throw new InvalidDataException("Invalid path-probe response.");
+            rtts[i] = sw.Elapsed.TotalMilliseconds;
+        }
+        Array.Sort(rtts);
+        var medianRtt = (rtts[1] + rtts[2]) / 2;
+
+        var large = new byte[768 * 1024];
+        const int rounds = 3;
+        var throughput = Stopwatch.StartNew();
+        for (var i = 0; i < rounds; i++)
+        {
+            var reply = await protocol.RequestAsync("device.path.probe", large, cancellationToken: token).ConfigureAwait(false);
+            if (reply.Kind != MessageKind.Response || reply.Payload.Length != large.Length)
+                throw new InvalidDataException("Invalid bulk path-probe response.");
+        }
+        throughput.Stop();
+        var mebibytes = (large.LongLength * rounds * 2d) / (1024 * 1024);
+        return new PathProbeResult(candidate, medianRtt, mebibytes / Math.Max(0.001, throughput.Elapsed.TotalSeconds));
+    }
+
+    private static async Task<IPAddress?> ResolveIpv4Async(string host, CancellationToken token)
+    {
+        if (IPAddress.TryParse(host, out var literal))
+            return literal.AddressFamily == AddressFamily.InterNetwork ? literal : null;
+        var addresses = await Dns.GetHostAddressesAsync(host, token).ConfigureAwait(false);
+        return addresses.FirstOrDefault(a => a.AddressFamily == AddressFamily.InterNetwork);
+    }
+
+    private static List<LocalPathCandidate> GetLocalIpv4Candidates(IPAddress remote)
+    {
+        var candidates = new List<LocalPathCandidate>();
+        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus != OperationalStatus.Up ||
+                nic.NetworkInterfaceType is NetworkInterfaceType.Loopback or NetworkInterfaceType.Tunnel)
+                continue;
+            IPInterfaceProperties properties;
+            try { properties = nic.GetIPProperties(); }
+            catch (NetworkInformationException) { continue; }
+            foreach (var unicast in properties.UnicastAddresses)
+            {
+                var address = unicast.Address;
+                if (address.AddressFamily != AddressFamily.InterNetwork || IPAddress.IsLoopback(address) ||
+                    address.GetAddressBytes()[0] == 169) continue;
+                if (unicast.PrefixLength is > 0 and <= 32 && !SameSubnet(address, remote, unicast.PrefixLength)) continue;
+                candidates.Add(new LocalPathCandidate(nic.Name, address));
+            }
+        }
+        return candidates.DistinctBy(c => c.Address).ToList();
+    }
+
+    private static bool SameSubnet(IPAddress left, IPAddress right, int prefixLength)
+    {
+        var a = left.GetAddressBytes();
+        var b = right.GetAddressBytes();
+        var fullBytes = prefixLength / 8;
+        var remaining = prefixLength % 8;
+        for (var i = 0; i < fullBytes; i++) if (a[i] != b[i]) return false;
+        if (remaining == 0) return true;
+        var mask = (byte)(0xFF << (8 - remaining));
+        return (a[fullBytes] & mask) == (b[fullBytes] & mask);
+    }
+
+    private sealed record LocalPathCandidate(string Name, IPAddress Address);
+    private sealed record PathProbeResult(LocalPathCandidate Candidate, double RoundTripMilliseconds,
+        double MebibytesPerSecond);
+    private sealed record PathSelection(IPAddress? LatencyAddress, IPAddress? BulkAddress)
+    {
+        public static readonly PathSelection Default = new(null, null);
     }
 
     private async Task RunConnectionAsync(string deviceId, string peerName, Stream stream, bool outbound,

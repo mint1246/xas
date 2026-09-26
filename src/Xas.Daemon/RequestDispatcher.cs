@@ -49,6 +49,13 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
             }
             case "device.ping":
                 return Reply(request, Array.Empty<byte>());
+            case "device.path.probe":
+                if (request.Payload.Length > 768 * 1024)
+                    throw new InvalidDataException("Path probe payload exceeds 768 KiB.");
+                // Echo the caller's bytes without changing them. This intentionally exercises the same TLS
+                // and protocol framing in both directions so peers can choose a real transport path instead
+                // of trusting interface metrics or Wi-Fi PHY rates.
+                return Reply(request, request.Payload);
             case "display.info":
             {
                 if (request.Payload.Length != 0) throw new InvalidDataException("display.info takes no payload.");

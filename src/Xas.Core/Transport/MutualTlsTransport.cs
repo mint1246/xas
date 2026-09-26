@@ -28,7 +28,8 @@ public static class MutualTlsTransport
     /// <summary>Connects and authenticates a peer. The returned connection owns the TCP socket.</summary>
     public static async Task<AuthenticatedPeerConnection> ConnectAsync(
         string host, int port, DeviceIdentity identity, PeerTrustStore trustStore,
-        string expectedPeerDeviceId, TimeSpan handshakeTimeout, CancellationToken cancellationToken = default)
+        string expectedPeerDeviceId, TimeSpan handshakeTimeout, CancellationToken cancellationToken = default,
+        IPAddress? localAddress = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(host);
         ArgumentNullException.ThrowIfNull(identity);
@@ -36,7 +37,10 @@ public static class MutualTlsTransport
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedPeerDeviceId);
         ValidateTimeout(handshakeTimeout);
 
-        var client = new TcpClient { NoDelay = true };
+        var client = localAddress is null ? new TcpClient() : new TcpClient(localAddress.AddressFamily);
+        client.NoDelay = true;
+        if (localAddress is not null)
+            client.Client.Bind(new IPEndPoint(localAddress, 0));
         using var timeout = CreateTimeout(handshakeTimeout, cancellationToken);
         try
         {
