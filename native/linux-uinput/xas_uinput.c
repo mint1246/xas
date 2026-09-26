@@ -29,10 +29,11 @@
 #define DEFAULT_WIDTH 1920
 #define DEFAULT_HEIGHT 1080
 
-static int tablet_fd = -1, mouse_fd = -1, keyboard_fd = -1;
+static int absolute_fd = -1, relative_fd = -1, keyboard_fd = -1;
 static int abs_max_x = DEFAULT_WIDTH - 1, abs_max_y = DEFAULT_HEIGHT - 1;
-static int tool_in_proximity = 0;
+static int last_pointer_fd = -1;
 static unsigned char held_keys[768], held_buttons[9];
+static int held_button_fd[9];
 
 static void emit(int fd, int type, int code, int value) {
     struct input_event ev = { .type = (unsigned short)type, .code = (unsigned short)code, .value = value };
@@ -94,29 +95,27 @@ static void prop(int fd, int code) {
     }
 }
 
-static int setup_tablet(int width, int height, int physical_width_mm, int physical_height_mm) {
-    int fd = create_device("XAS Remote Tablet");
+static void enable_mouse_buttons(int fd) {
+    bit(fd, UI_SET_EVBIT, EV_KEY);
+    bit(fd, UI_SET_KEYBIT, BTN_LEFT);
+    bit(fd, UI_SET_KEYBIT, BTN_RIGHT);
+    bit(fd, UI_SET_KEYBIT, BTN_MIDDLE);
+    bit(fd, UI_SET_KEYBIT, BTN_SIDE);
+    bit(fd, UI_SET_KEYBIT, BTN_EXTRA);
+}
+
+static int setup_absolute_mouse(int width, int height) {
+    int fd = create_device("XAS Remote Absolute Mouse");
     if (fd < 0) return -1;
 
-    /* Linux input's tablet guidelines require both DIRECT and POINTER for new tablet devices. */
+    /* Match Sunshine/libvirtualhid's proven absolute-mouse shape: absolute axes, buttons and
+       INPUT_PROP_DIRECT, but no relative axes and no pen/tablet tool bits. */
     prop(fd, INPUT_PROP_DIRECT);
-    prop(fd, INPUT_PROP_POINTER);
-
-    bit(fd, UI_SET_EVBIT, EV_KEY);
+    enable_mouse_buttons(fd);
     bit(fd, UI_SET_EVBIT, EV_ABS);
     bit(fd, UI_SET_EVBIT, EV_SYN);
-
-    bit(fd, UI_SET_KEYBIT, BTN_TOOL_PEN);
-    bit(fd, UI_SET_KEYBIT, BTN_STYLUS);
-
-    int resolution_x = physical_width_mm > 0 ? width / physical_width_mm : 4;
-    int resolution_y = physical_height_mm > 0 ? height / physical_height_mm : 4;
-    if (resolution_x < 1) resolution_x = 1;
-    if (resolution_y < 1) resolution_y = 1;
-    struct uinput_abs_setup abs_x = { .code = ABS_X, .absinfo = {
-        .minimum = 0, .maximum = width - 1, .resolution = resolution_x } };
-    struct uinput_abs_setup abs_y = { .code = ABS_Y, .absinfo = {
-        .minimum = 0, .maximum = height - 1, .resolution = resolution_y } };
+    struct uinput_abs_setup abs_x = { .code = ABS_X, .absinfo = { .minimum = 0, .maximum = width - 1 } };
+    struct uinput_abs_setup abs_y = { .code = ABS_Y, .absinfo = { .minimum = 0, .maximum = height - 1 } };
     if (ioctl(fd, UI_ABS_SETUP, &abs_x) < 0 || ioctl(fd, UI_ABS_SETUP, &abs_y) < 0) {
         fprintf(stderr, "UI_ABS_SETUP failed: %s\n", strerror(errno));
         close(fd);
@@ -132,18 +131,13 @@ static int setup_tablet(int width, int height, int physical_width_mm, int physic
     return fd;
 }
 
-static int setup_mouse(void) {
+static int setup_relative_mouse(void) {
     int fd = create_device("XAS Remote Mouse");
     if (fd < 0) return -1;
     prop(fd, INPUT_PROP_POINTER);
-    bit(fd, UI_SET_EVBIT, EV_KEY);
+    enable_mouse_buttons(fd);
     bit(fd, UI_SET_EVBIT, EV_REL);
     bit(fd, UI_SET_EVBIT, EV_SYN);
-    bit(fd, UI_SET_KEYBIT, BTN_LEFT);
-    bit(fd, UI_SET_KEYBIT, BTN_RIGHT);
-    bit(fd, UI_SET_KEYBIT, BTN_MIDDLE);
-    bit(fd, UI_SET_KEYBIT, BTN_SIDE);
-    bit(fd, UI_SET_KEYBIT, BTN_EXTRA);
     bit(fd, UI_SET_RELBIT, REL_X);
     bit(fd, UI_SET_RELBIT, REL_Y);
     bit(fd, UI_SET_RELBIT, REL_WHEEL);
@@ -177,14 +171,15 @@ static int setup_keyboard(void) {
 static void release_all(void) {
     for (unsigned i = 0; i < sizeof held_keys; i++)
         if (held_keys[i]) { emit(keyboard_fd, EV_KEY, (int)i, 0); held_keys[i] = 0; }
-    for (unsigned i = 1; i < 8; i++)
-        if (held_buttons[i]) { emit(mouse_fd, EV_KEY, button_evdev((int)i), 0); held_buttons[i] = 0; }
-    if (tool_in_proximity) {
-        emit(tablet_fd, EV_KEY, BTN_TOOL_PEN, 0);
-        tool_in_proximity = 0;
+    for (unsigned i = 1; i < 8; i++) {
+        if (!held_buttons[i]) continue;
+        int fd = held_button_fd[i] >= 0 ? held_button_fd[i] : relative_fd;
+        emit(fd, EV_KEY, button_evdev((int)i), 0);
+        held_buttons[i] = 0;
+        held_button_fd[i] = -1;
     }
-    commit(tablet_fd);
-    commit(mouse_fd);
+    commit(absolute_fd);
+    commit(relative_fd);
     commit(keyboard_fd);
 }
 
@@ -199,20 +194,29 @@ static int handle_event(const unsigned char *event) {
         if (x > abs_max_x) x = abs_max_x;
         if (y < 0) y = 0;
         if (y > abs_max_y) y = abs_max_y;
-        if (!tool_in_proximity) {
-            emit(tablet_fd, EV_KEY, BTN_TOOL_PEN, 1);
-            tool_in_proximity = 1;
-        }
-        emit(tablet_fd, EV_ABS, ABS_X, x);
-        emit(tablet_fd, EV_ABS, ABS_Y, y);
+        emit(absolute_fd, EV_ABS, ABS_X, x);
+        emit(absolute_fd, EV_ABS, ABS_Y, y);
+        last_pointer_fd = absolute_fd;
     } else if (kind == 1) {
-        emit(mouse_fd, EV_REL, REL_X, x);
-        emit(mouse_fd, EV_REL, REL_Y, y);
+        emit(relative_fd, EV_REL, REL_X, x);
+        emit(relative_fd, EV_REL, REL_Y, y);
+        last_pointer_fd = relative_fd;
     } else if (kind == 2) {
         int b = button_code((int)code);
         if (!b) return 0;
-        emit(mouse_fd, EV_KEY, b, down != 0);
-        if (down) held_buttons[code & 7] = 1; else held_buttons[code & 7] = 0;
+        unsigned index = code & 7;
+        int fd;
+        if (down) {
+            fd = last_pointer_fd >= 0 ? last_pointer_fd : relative_fd;
+            held_buttons[index] = 1;
+            held_button_fd[index] = fd;
+        } else {
+            fd = held_button_fd[index] >= 0 ? held_button_fd[index]
+                : (last_pointer_fd >= 0 ? last_pointer_fd : relative_fd);
+            held_buttons[index] = 0;
+            held_button_fd[index] = -1;
+        }
+        emit(fd, EV_KEY, b, down != 0);
     } else if (kind == 4) {
         uint32_t key = xas_hid_key((uint16_t)code);
         if (!key || key >= sizeof held_keys) return -1;
@@ -220,8 +224,8 @@ static int handle_event(const unsigned char *event) {
         else emit(keyboard_fd, EV_KEY, key, down != 0);
         if (down || repeat) held_keys[key] = 1; else held_keys[key] = 0;
     } else if (kind == 3) {
-        emit(mouse_fd, EV_REL, REL_WHEEL, -y);
-        if (x) emit(mouse_fd, EV_REL, REL_HWHEEL, x);
+        emit(relative_fd, EV_REL, REL_WHEEL, -y);
+        if (x) emit(relative_fd, EV_REL, REL_HWHEEL, x);
     } else return -1;
 
     return 0;
@@ -238,17 +242,17 @@ int main(int argc, char **argv) {
     int height = argc > 2 ? atoi(argv[2]) : DEFAULT_HEIGHT;
     if (width < 1 || height < 1) { width = DEFAULT_WIDTH; height = DEFAULT_HEIGHT; }
 
-    int physical_width_mm = argc > 3 ? atoi(argv[3]) : 0;
-    int physical_height_mm = argc > 4 ? atoi(argv[4]) : 0;
-    tablet_fd = setup_tablet(width, height, physical_width_mm, physical_height_mm);
-    if (tablet_fd < 0) return 1;
-    mouse_fd = setup_mouse();
-    if (mouse_fd < 0) { ioctl(tablet_fd, UI_DEV_DESTROY); close(tablet_fd); return 1; }
+    absolute_fd = setup_absolute_mouse(width, height);
+    if (absolute_fd < 0) return 1;
+    relative_fd = setup_relative_mouse();
+    if (relative_fd < 0) { ioctl(absolute_fd, UI_DEV_DESTROY); close(absolute_fd); return 1; }
     keyboard_fd = setup_keyboard();
     if (keyboard_fd < 0) {
-        ioctl(tablet_fd, UI_DEV_DESTROY); ioctl(mouse_fd, UI_DEV_DESTROY);
-        close(tablet_fd); close(mouse_fd); return 1;
+        ioctl(absolute_fd, UI_DEV_DESTROY); ioctl(relative_fd, UI_DEV_DESTROY);
+        close(absolute_fd); close(relative_fd); return 1;
     }
+    for (unsigned i = 0; i < sizeof held_button_fd / sizeof held_button_fd[0]; i++) held_button_fd[i] = -1;
+    last_pointer_fd = relative_fd;
 
     /* Give udev and libinput a moment to notice the new devices before events start arriving. */
     struct timespec settle = { .tv_sec = 0, .tv_nsec = 400 * 1000 * 1000 };
@@ -264,17 +268,17 @@ int main(int argc, char **argv) {
         if (status <= 0) break;
         if (count == 0) { release_all(); continue; }
         for (unsigned i = 0; i < count; i++) if (handle_event(events + i * XAS_INPUT_EVENT_BYTES) < 0) fprintf(stderr, "unsupported input event in batch\n");
-        commit(tablet_fd);
-        commit(mouse_fd);
+        commit(absolute_fd);
+        commit(relative_fd);
         commit(keyboard_fd);
     }
     free(events);
     release_all();
-    ioctl(tablet_fd, UI_DEV_DESTROY);
-    ioctl(mouse_fd, UI_DEV_DESTROY);
+    ioctl(absolute_fd, UI_DEV_DESTROY);
+    ioctl(relative_fd, UI_DEV_DESTROY);
     ioctl(keyboard_fd, UI_DEV_DESTROY);
-    close(tablet_fd);
-    close(mouse_fd);
+    close(absolute_fd);
+    close(relative_fd);
     close(keyboard_fd);
     return 0;
 }

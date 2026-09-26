@@ -72,11 +72,7 @@ public sealed class LinuxUinputInputBackend(Func<DisplayMetadata?>? resolveDispl
         var display = resolveDisplay?.Invoke();
         var width = display?.WidthPixels is > 0 ? display.WidthPixels : 1920;
         var height = display?.HeightPixels is > 0 ? display.HeightPixels : 1080;
-        var physicalWidth = display?.PhysicalWidthMillimeters is > 0 ? display.PhysicalWidthMillimeters.Value : 0;
-        var physicalHeight = display?.PhysicalHeightMillimeters is > 0 ? display.PhysicalHeightMillimeters.Value : 0;
-        if (display?.RotationDegrees is 90 or 270)
-            (physicalWidth, physicalHeight) = (physicalHeight, physicalWidth);
-        var p = Process.Start(new ProcessStartInfo(path, $"{width} {height} {physicalWidth} {physicalHeight}")
+        var p = Process.Start(new ProcessStartInfo(path, $"{width} {height}")
         {
             UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true,
             RedirectStandardError = true, CreateNoWindow = true
