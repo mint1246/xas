@@ -12,6 +12,7 @@ using Xas.Daemon.Input;
 using Xas.Daemon.Sessions;
 using Xas.Daemon.Pairing;
 using Xas.Daemon.Web;
+using Xas.Daemon.LocalIpc;
 using Xas.Input;
 
 namespace Xas.Daemon;
@@ -65,16 +66,21 @@ public sealed class DaemonHost
         await using var sessions = PeerSessions;
         await using var pairing = new PairingService(_identity, _trust, checked(_port + 1), Environment.MachineName);
         await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, pairing);
-        using var handoffStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var configuration = new LocalConfiguration();
+        var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration);
+        using var daemonStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var handoffStop = CancellationTokenSource.CreateLinkedTokenSource(daemonStop.Token);
         listener.Start();
         Task handoff = Task.CompletedTask;
+        Task localIpcTask = Task.CompletedTask;
         try
         {
             await pairing.StartAsync(cancellationToken);
             try { await PeerSessions.StartAsync(cancellationToken); }
             catch (SocketException ex) { Console.Error.WriteLine($"LAN discovery unavailable: {ex.Message}"); }
             await web.StartAsync(cancellationToken);
-            if (OperatingSystem.IsWindows() && new LocalConfiguration().Resolve(null) is { } configured &&
+            localIpcTask = localIpc.RunAsync(daemonStop.Token);
+            if (OperatingSystem.IsWindows() && configuration.Resolve(null) is { } configured &&
                 PeerSessions.GetSession(configured.DeviceId) is { } hotPeer)
                 handoff = WindowsMonitorHandoff.RunAsync(hotPeer, handoffStop.Token,
                     message => Console.Error.WriteLine(message));
@@ -94,9 +100,12 @@ public sealed class DaemonHost
         finally
         {
             listener.Stop();
+            daemonStop.Cancel();
             handoffStop.Cancel();
             try { await handoff.ConfigureAwait(false); }
             catch (OperationCanceledException) when (handoffStop.IsCancellationRequested) { }
+            try { await localIpcTask.ConfigureAwait(false); }
+            catch (OperationCanceledException) when (daemonStop.IsCancellationRequested) { }
             await _input.DisposeAsync();
         }
     }
