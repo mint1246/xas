@@ -10,7 +10,8 @@ public interface IRemoteFileSystemMountAdapter : IAsyncDisposable
 {
     bool IsAvailable { get; }
     string PlatformName { get; }
-    ValueTask MountAsync(string mountPoint, IRemoteFileSystemOperations remoteFileSystem, CancellationToken cancellationToken);
+    ValueTask MountAsync(string mountPoint, RemoteVolume volume, IRemoteFileSystemOperations remoteFileSystem,
+        CancellationToken cancellationToken);
     ValueTask UnmountAsync(CancellationToken cancellationToken);
 }
 
@@ -24,6 +25,9 @@ public interface IRemoteFileSystemOperations
     ValueTask CreateAsync(string path, bool directory, bool replace, CancellationToken cancellationToken);
     ValueTask DeleteAsync(string path, bool directory, CancellationToken cancellationToken);
     ValueTask RenameAsync(string path, string newPath, bool replace, CancellationToken cancellationToken);
+    ValueTask SetLengthAsync(string path, long length, CancellationToken cancellationToken);
+    ValueTask SetInfoAsync(string path, long? creationUnixMs, long? lastAccessUnixMs,
+        long? lastWriteUnixMs, bool? readOnly, CancellationToken cancellationToken);
 }
 
 /// <summary>Explicit unavailable boundary used until a WinFsp or FUSE adapter is installed.</summary>
@@ -31,7 +35,8 @@ public sealed class UnavailableRemoteFileSystemMountAdapter(string platformName)
 {
     public bool IsAvailable => false;
     public string PlatformName { get; } = platformName;
-    public ValueTask MountAsync(string mountPoint, IRemoteFileSystemOperations remoteFileSystem, CancellationToken cancellationToken) =>
+    public ValueTask MountAsync(string mountPoint, RemoteVolume volume, IRemoteFileSystemOperations remoteFileSystem,
+        CancellationToken cancellationToken) =>
         ValueTask.FromException(new PlatformNotSupportedException($"A {PlatformName} filesystem mount adapter is not installed."));
     public ValueTask UnmountAsync(CancellationToken cancellationToken) => ValueTask.CompletedTask;
     public ValueTask DisposeAsync() => ValueTask.CompletedTask;

@@ -55,6 +55,12 @@ public sealed class FileSystemService(PeerPermissionStore permissions, LocalConf
                 case "fs.rename":
                     _backend.Rename(Decode<RemoteRenamePath>(request.Payload));
                     return Reply(request, []);
+                case "fs.truncate":
+                    _backend.SetLength(Decode<RemoteSetLength>(request.Payload));
+                    return Reply(request, []);
+                case "fs.setinfo":
+                    _backend.SetInfo(Decode<RemoteSetInfo>(request.Payload));
+                    return Reply(request, []);
                 default: throw new NotSupportedException($"Unknown filesystem method: {request.Method}");
             }
         }
@@ -87,7 +93,9 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
                 RejectLinks(root);
                 var id = "export-" + export.Id;
                 roots[id] = new VolumeRoot(root, export.ReadOnly);
-                result.Add(new RemoteVolume(id, export.Name, "export", export.ReadOnly));
+                var storage = GetStorageInfo(root);
+                result.Add(new RemoteVolume(id, export.Name, "export", export.ReadOnly,
+                    storage.TotalBytes, storage.FreeBytes, storage.FileSystem));
             }
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
@@ -105,7 +113,9 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
                     var id = "removable-" + StableVolumeId(root);
                     if (roots.ContainsKey(id)) continue;
                     roots[id] = new VolumeRoot(root, volume.ReadOnly);
-                    result.Add(new RemoteVolume(id, volume.Name, "removable", volume.ReadOnly));
+                    var storage = GetStorageInfo(root);
+                    result.Add(new RemoteVolume(id, volume.Name, "removable", volume.ReadOnly,
+                        storage.TotalBytes, storage.FreeBytes, storage.FileSystem));
                 }
                 catch (IOException) { }
                 catch (UnauthorizedAccessException) { }
@@ -227,6 +237,35 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
         }
     }
 
+    public void SetLength(RemoteSetLength request)
+    {
+        if (request.Length < 0) throw new InvalidDataException("File length cannot be negative.");
+        var (path, volume) = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        EnsureWritable(volume);
+        RejectLinks(path);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
+        stream.SetLength(request.Length);
+    }
+
+    public void SetInfo(RemoteSetInfo request)
+    {
+        var (path, volume) = Resolve(request.VolumeId, request.Path, allowRoot: false);
+        EnsureWritable(volume);
+        RejectLinks(path);
+        if (request.CreationUnixMs is { } creation && OperatingSystem.IsWindows())
+            File.SetCreationTimeUtc(path, DateTimeOffset.FromUnixTimeMilliseconds(creation).UtcDateTime);
+        if (request.LastAccessUnixMs is { } access)
+            File.SetLastAccessTimeUtc(path, DateTimeOffset.FromUnixTimeMilliseconds(access).UtcDateTime);
+        if (request.LastWriteUnixMs is { } write)
+            File.SetLastWriteTimeUtc(path, DateTimeOffset.FromUnixTimeMilliseconds(write).UtcDateTime);
+        if (request.ReadOnly is { } readOnly)
+        {
+            var attributes = File.GetAttributes(path);
+            attributes = readOnly ? attributes | FileAttributes.ReadOnly : attributes & ~FileAttributes.ReadOnly;
+            File.SetAttributes(path, attributes);
+        }
+    }
+
     private (string Path, VolumeRoot Volume) Resolve(string id, string relative, bool allowRoot)
     {
         if (relative is null || relative.Length > RemoteFileSystemWire.MaxPathChars || relative.IndexOf('\0') >= 0) throw new InvalidDataException("Invalid filesystem path.");
@@ -326,6 +365,24 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
         System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(
             OperatingSystem.IsWindows() ? root.ToUpperInvariant() : root)))[..16];
 
+    private static StorageInfo GetStorageInfo(string root)
+    {
+        try
+        {
+            var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+            var full = Path.GetFullPath(root);
+            var drive = DriveInfo.GetDrives()
+                .Where(item => item.IsReady && full.StartsWith(Path.GetFullPath(item.RootDirectory.FullName), comparison))
+                .OrderByDescending(item => item.RootDirectory.FullName.Length)
+                .FirstOrDefault();
+            if (drive is null) return default;
+            return new StorageInfo(drive.TotalSize, drive.AvailableFreeSpace,
+                string.IsNullOrWhiteSpace(drive.DriveFormat) ? null : drive.DriveFormat);
+        }
+        catch (IOException) { return default; }
+        catch (UnauthorizedAccessException) { return default; }
+    }
+
     private static void RejectLinks(string path)
     {
         var full = Path.GetFullPath(path);
@@ -345,4 +402,5 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
 
     private sealed record VolumeRoot(string Root, bool ReadOnly);
     private sealed record MountedVolume(string Root, string Name, bool ReadOnly);
+    private readonly record struct StorageInfo(long? TotalBytes, long? FreeBytes, string? FileSystem);
 }

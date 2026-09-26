@@ -3,7 +3,8 @@ using System.Text.Json;
 namespace Xas.Core.FileSystem;
 
 /// <summary>Paths are relative to an advertised volume. Volume IDs are opaque and may disappear on eject.</summary>
-public sealed record RemoteVolume(string Id, string Name, string Kind, bool ReadOnly);
+public sealed record RemoteVolume(string Id, string Name, string Kind, bool ReadOnly,
+    long? TotalBytes = null, long? FreeBytes = null, string? FileSystem = null);
 public sealed record RemoteFileEntry(string Name, bool Directory, long Length, long LastWriteUnixMs);
 public sealed record RemoteDirectoryPage(RemoteFileEntry[] Entries, bool HasMore);
 public sealed record RemotePath(string VolumeId, string Path);
@@ -13,6 +14,9 @@ public sealed record RemoteWriteRange(string VolumeId, string Path, long Offset,
 public sealed record RemoteCreatePath(string VolumeId, string Path, bool Directory, bool Replace);
 public sealed record RemoteRenamePath(string VolumeId, string Path, string NewPath, bool Replace);
 public sealed record RemoteDeletePath(string VolumeId, string Path, bool Directory);
+public sealed record RemoteSetLength(string VolumeId, string Path, long Length);
+public sealed record RemoteSetInfo(string VolumeId, string Path, long? CreationUnixMs,
+    long? LastAccessUnixMs, long? LastWriteUnixMs, bool? ReadOnly);
 public sealed record RemoteFileStat(string Name, bool Directory, long Length, long LastWriteUnixMs, bool ReadOnly);
 public sealed record RemoteWriteResult(long BytesWritten);
 

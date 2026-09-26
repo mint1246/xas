@@ -19,6 +19,10 @@ public static class FileSystemTests
         var page = new RemoteDirectoryPage([new RemoteFileEntry("item", false, 5, 10)], true);
         var decodedPage = RemoteFileSystemWire.Decode<RemoteDirectoryPage>(RemoteFileSystemWire.Encode(page));
         Assert(decodedPage.HasMore && decodedPage.Entries.Single().Length == 5, "Filesystem directory page did not round-trip.");
+        var volume = new RemoteVolume("vol", "SD", "removable", false, 1_000_000, 250_000, "exfat");
+        var decodedVolume = RemoteFileSystemWire.Decode<RemoteVolume>(RemoteFileSystemWire.Encode(volume));
+        Assert(decodedVolume.TotalBytes == 1_000_000 && decodedVolume.FreeBytes == 250_000 && decodedVolume.FileSystem == "exfat",
+            "Filesystem volume capacity metadata did not round-trip.");
 
         try
         {
@@ -82,7 +86,7 @@ public static class FileSystemTests
                 "fs.list" => RemoteFileSystemWire.Encode(new RemoteDirectoryPage([], false)),
                 "fs.read" => [1, 2, 3],
                 "fs.write" => RemoteFileSystemWire.Encode(new RemoteWriteResult(3)),
-                "fs.create" or "fs.delete" or "fs.rename" => [],
+                "fs.create" or "fs.delete" or "fs.rename" or "fs.truncate" or "fs.setinfo" => [],
                 _ => throw new Exception("Unexpected filesystem method: " + method)
             };
             return ValueTask.FromResult(new ProtocolMessage(MessageKind.Response, 1, 0, method, response));
@@ -98,6 +102,8 @@ public static class FileSystemTests
         await client.CreateAsync("/folder/new.bin", false, false, CancellationToken.None);
         await client.DeleteAsync("/folder/new.bin", false, CancellationToken.None);
         await client.RenameAsync("/folder/file.bin", "/folder/renamed.bin", false, CancellationToken.None);
+        await client.SetLengthAsync("/folder/renamed.bin", 123, CancellationToken.None);
+        await client.SetInfoAsync("/folder/renamed.bin", 10, 20, 30, true, CancellationToken.None);
 
         var statRequest = RemoteFileSystemWire.Decode<RemotePath>(calls.Single(c => c.Method == "fs.stat").Payload);
         Assert(statRequest.VolumeId == "vol-test" && statRequest.Path == "folder/file.bin",
@@ -105,6 +111,13 @@ public static class FileSystemTests
         var rename = RemoteFileSystemWire.Decode<RemoteRenamePath>(calls.Single(c => c.Method == "fs.rename").Payload);
         Assert(rename.Path == "folder/file.bin" && rename.NewPath == "folder/renamed.bin",
             "Filesystem client did not normalize rename paths.");
+        var truncate = RemoteFileSystemWire.Decode<RemoteSetLength>(calls.Single(c => c.Method == "fs.truncate").Payload);
+        Assert(truncate.VolumeId == "vol-test" && truncate.Path == "folder/renamed.bin" && truncate.Length == 123,
+            "Filesystem client did not encode truncation correctly.");
+        var setInfo = RemoteFileSystemWire.Decode<RemoteSetInfo>(calls.Single(c => c.Method == "fs.setinfo").Payload);
+        Assert(setInfo.Path == "folder/renamed.bin" && setInfo.CreationUnixMs == 10 && setInfo.LastAccessUnixMs == 20 &&
+               setInfo.LastWriteUnixMs == 30 && setInfo.ReadOnly == true,
+            "Filesystem client did not encode basic metadata updates correctly.");
     }
 
     private static void Assert(bool condition, string message)

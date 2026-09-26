@@ -85,6 +85,22 @@ public sealed class RemoteFileSystemOperationsClient : IRemoteFileSystemOperatio
         RequireEmpty(reply, "fs.rename");
     }
 
+    public async ValueTask SetLengthAsync(string path, long length, CancellationToken cancellationToken)
+    {
+        if (length < 0) throw new ArgumentOutOfRangeException(nameof(length));
+        var reply = await RequestAsync("fs.truncate",
+            RemoteFileSystemWire.Encode(new RemoteSetLength(_volumeId, Normalize(path), length)), cancellationToken).ConfigureAwait(false);
+        RequireEmpty(reply, "fs.truncate");
+    }
+
+    public async ValueTask SetInfoAsync(string path, long? creationUnixMs, long? lastAccessUnixMs,
+        long? lastWriteUnixMs, bool? readOnly, CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync("fs.setinfo", RemoteFileSystemWire.Encode(new RemoteSetInfo(_volumeId,
+            Normalize(path), creationUnixMs, lastAccessUnixMs, lastWriteUnixMs, readOnly)), cancellationToken).ConfigureAwait(false);
+        RequireEmpty(reply, "fs.setinfo");
+    }
+
     private ValueTask<ProtocolMessage> RequestAsync(string method, byte[] payload, CancellationToken cancellationToken) =>
         _request(method, payload, cancellationToken);
 
