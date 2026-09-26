@@ -20,6 +20,20 @@ if ($existing -and $existing.Status -ne 'Stopped') {
     Stop-Service -Name 'XasAdminBroker' -Force
     $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
 }
+
+# The service normally owns the interactive daemon and should reap it on shutdown. During an in-place
+# upgrade, be defensive: a crashed/older supervisor may leave that user-session process alive, which keeps
+# Xas.Daemon.exe locked and prevents the new package from replacing it. Kill only the installed daemon path.
+$installedDaemonPath = Join-Path $target 'Xas.Daemon.exe'
+foreach ($process in @(Get-Process -Name 'Xas.Daemon' -ErrorAction SilentlyContinue)) {
+    try {
+        if ($process.Path -and [string]::Equals([IO.Path]::GetFullPath($process.Path), [IO.Path]::GetFullPath($installedDaemonPath), [StringComparison]::OrdinalIgnoreCase)) {
+            Stop-Process -Id $process.Id -Force
+            $process.WaitForExit(5000)
+        }
+    } catch [System.ComponentModel.Win32Exception] { }
+      catch [System.InvalidOperationException] { }
+}
 foreach ($name in @('xas.exe', 'Xas.Daemon.exe', 'Xas.PrivilegedService.exe', $winFspFile)) {
     $file = Join-Path $source $name
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Package is missing ${name}: $file" }
