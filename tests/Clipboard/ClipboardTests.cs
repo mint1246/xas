@@ -39,6 +39,23 @@ public static class ClipboardTests
                 new ClipboardPayload("other", 1, "spoof"), new JsonSerializerOptions(JsonSerializerDefaults.Web)) };
             try { await service.HandleAsync("peer", spoof, CancellationToken.None); throw new Exception("Spoofed clipboard origin succeeded."); }
             catch (InvalidDataException) { }
+
+            var notifications = new NotificationClipboard("remote text", 2,
+                [new ClipboardTextSnapshot("remote text", 2), new ClipboardTextSnapshot("local edit", 3)]);
+            var eventService = new ClipboardService("local", permissions, notifications);
+            await eventService.HandleAsync("peer", set, CancellationToken.None);
+            var events = new List<ProtocolMessage>();
+            await eventService.RunChangeNotificationsAsync("peer", (message, _) =>
+            {
+                events.Add(message);
+                return ValueTask.CompletedTask;
+            }, CancellationToken.None);
+            Assert(events.Count == 1 && events[0].Kind == MessageKind.Event &&
+                events[0].Method == "clipboard.changed", "Clipboard change event was not published.");
+            var changedEvent = JsonSerializer.Deserialize<ClipboardPayload>(events[0].Payload,
+                new JsonSerializerOptions(JsonSerializerDefaults.Web));
+            Assert(changedEvent is { Origin: "local", Version: 3, Text: "local edit" },
+                "Clipboard event did not carry the new local value.");
         }
         finally { Directory.Delete(root, recursive: true); }
     }
@@ -61,6 +78,25 @@ public static class ClipboardTests
             _text = value;
             _version++;
             return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class NotificationClipboard(string text, ulong version, ClipboardTextSnapshot[] changes)
+        : ITextClipboardBackend, IClipboardChangeSource
+    {
+        public bool IsAvailable => true;
+        public ValueTask<ClipboardTextSnapshot> GetSnapshotAsync(CancellationToken cancellationToken) =>
+            ValueTask.FromResult(new ClipboardTextSnapshot(text, version));
+        public ValueTask SetTextAsync(string value, CancellationToken cancellationToken) => ValueTask.CompletedTask;
+        public async IAsyncEnumerable<ClipboardTextSnapshot> WatchChangesAsync(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+        {
+            foreach (var change in changes)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                yield return change;
+                await Task.Yield();
+            }
         }
     }
 }

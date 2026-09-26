@@ -15,8 +15,44 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
     private ulong? _importedChangeId;
     private string? _importedOrigin;
     private ulong _importedVersion;
+    private string? _importedText;
 
     public bool IsAvailable => backend.IsAvailable;
+
+    /// <summary>Publishes clipboard changes as events for the lifetime of an authenticated peer session.</summary>
+    public async Task RunChangeNotificationsAsync(string peerId,
+        Func<ProtocolMessage, CancellationToken, ValueTask> send, CancellationToken cancellationToken)
+    {
+        if (!permissions.IsAllowed(peerId, Capability.Clipboard) || !backend.IsAvailable || backend is not IClipboardChangeSource source)
+            return;
+
+        ClipboardTextSnapshot? lastPublished = null;
+        await foreach (var snapshot in source.WatchChangesAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (!permissions.IsAllowed(peerId, Capability.Clipboard)) return;
+            if (Encoding.UTF8.GetByteCount(snapshot.Text) > MaxTextBytes) continue;
+            ClipboardPayload? payload = null;
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                if (lastPublished is { } last && last.ChangeId == snapshot.ChangeId && last.Text == snapshot.Text)
+                    continue;
+                lastPublished = snapshot;
+
+                // A set operation is reflected back by native change notifications. Suppress the
+                // echo to its sender, while preserving that sender's origin for other peers.
+                var imported = _importedChangeId == snapshot.ChangeId && _importedText == snapshot.Text && _importedOrigin is not null;
+                if (imported && _importedOrigin == peerId) continue;
+                payload = new ClipboardPayload(imported ? _importedOrigin! : localDeviceId,
+                    imported ? _importedVersion : snapshot.ChangeId, snapshot.Text);
+            }
+            finally { _gate.Release(); }
+
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions);
+            await send(new ProtocolMessage(MessageKind.Event, 0, 0, "clipboard.changed", bytes), cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
 
     public async ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
         CancellationToken cancellationToken)
@@ -41,7 +77,7 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
             var snapshot = await backend.GetSnapshotAsync(token).ConfigureAwait(false);
             if (Encoding.UTF8.GetByteCount(snapshot.Text) > MaxTextBytes)
                 throw new InvalidDataException("Clipboard text exceeds 256 KiB.");
-            var imported = _importedChangeId == snapshot.ChangeId;
+            var imported = _importedChangeId == snapshot.ChangeId && _importedText == snapshot.Text;
             var payload = new ClipboardPayload(imported ? _importedOrigin! : localDeviceId,
                 imported ? _importedVersion : snapshot.ChangeId, snapshot.Text);
             return Reply(request, JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions));
@@ -68,6 +104,7 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
             _importedChangeId = after.ChangeId;
             _importedOrigin = peerId;
             _importedVersion = payload.Version;
+            _importedText = after.Text;
             return Reply(request, []);
         }
         finally { _gate.Release(); }

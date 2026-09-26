@@ -9,13 +9,16 @@ namespace Xas.Core;
 /// CF_UNICODETEXT format is used; .NET strings are Unicode and can be encoded as UTF-8 by callers.
 /// Calls run on a worker thread because the Win32 clipboard is synchronous and may be busy.
 /// </summary>
-public sealed class WindowsTextClipboard : ITextClipboardBackend
+public sealed class WindowsTextClipboard : ITextClipboardBackend, IClipboardChangeSource
 {
     private const uint CfUnicodeText = 13;
     private const uint GmemMoveable = 0x0002;
 
     /// <summary>Whether this host supports the Windows clipboard APIs.</summary>
     public bool IsAvailable => OperatingSystem.IsWindows();
+
+    public IAsyncEnumerable<ClipboardTextSnapshot> WatchChangesAsync(CancellationToken cancellationToken) =>
+        WindowsClipboardNotificationSource.WatchAsync(this, cancellationToken);
 
     /// <summary>Gets Unicode clipboard text and the observed system change sequence number.</summary>
     /// <exception cref="PlatformNotSupportedException">The host is not Windows.</exception>

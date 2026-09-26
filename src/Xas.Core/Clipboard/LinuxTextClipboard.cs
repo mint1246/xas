@@ -9,7 +9,7 @@ namespace Xas.Core;
 /// Wayland uses wl-clipboard (wl-paste/wl-copy); X11 uses xclip or xsel. The process runs in
 /// the daemon's user session and inherits its display environment. No shell is involved.
 /// </remarks>
-public sealed class LinuxTextClipboard : ITextClipboardBackend
+public sealed class LinuxTextClipboard : ITextClipboardBackend, IClipboardChangeSource
 {
     private const int MaxTextBytes = 256 * 1024;
     private static readonly TimeSpan ProcessTimeout = TimeSpan.FromSeconds(5);
@@ -73,6 +73,22 @@ public sealed class LinuxTextClipboard : ITextClipboardBackend
             _ => throw new PlatformNotSupportedException()
         };
         await RunWriteAsync(_copyProgram!, args, bytes, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Polls the desktop clipboard because Linux clipboard tools do not expose a portable notification API.</summary>
+    public async IAsyncEnumerable<ClipboardTextSnapshot> WatchChangesAsync(
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var previous = await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        yield return previous;
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
+        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+        {
+            var current = await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+            if (current.ChangeId == previous.ChangeId && current.Text == previous.Text) continue;
+            previous = current;
+            yield return current;
+        }
     }
 
     private void EnsureAvailable()
