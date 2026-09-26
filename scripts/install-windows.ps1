@@ -78,8 +78,8 @@ if ($existing) {
     }
     if (Get-Service -Name 'XasAdminBroker' -ErrorAction SilentlyContinue) { throw 'The existing XasAdminBroker service is still being removed.' }
 }
-& sc.exe create XasAdminBroker "binPath= `"$servicePath`"" 'start= auto' 'obj= LocalSystem' 'DisplayName= XAS Background Service' | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'Could not register the Xas administrator broker service.' }
+New-Service -Name 'XasAdminBroker' -BinaryPathName "`"$servicePath`"" -StartupType Automatic `
+    -DisplayName 'XAS Background Service' | Out-Null
 & sc.exe description XasAdminBroker 'Supervises the interactive Xas daemon and runs approved administrator commands.' | Out-Null
 & sc.exe failure XasAdminBroker 'reset= 86400' 'actions= restart/5000/restart/15000/restart/30000' | Out-Null
 & sc.exe failureflag XasAdminBroker 1 | Out-Null
