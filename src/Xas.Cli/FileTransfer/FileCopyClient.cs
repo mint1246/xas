@@ -347,6 +347,13 @@ public static class FileCopyClient
         public static Operand Parse(string value, LocalConfiguration config)
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(value);
+            if (value[0] == ':')
+            {
+                if (value.Length == 1) throw new ArgumentException("Default-device copy operand requires a path after ':'.", nameof(value));
+                var defaultPeer = config.Resolve(null)
+                    ?? throw new InvalidOperationException("No default device is configured; use <device>:<path> or run 'xas default <device>'.");
+                return new(true, value[1..], defaultPeer);
+            }
             var colon = value.IndexOf(':');
             if (colon <= 0 || (colon == 1 && char.IsLetter(value[0]) && value.Length > 2 && value[2] is '\\' or '/')) return new(false, value, null);
             var peer = config.Resolve(value[..colon]) ?? throw new InvalidOperationException($"No configured peer matches '{value[..colon]}'.");

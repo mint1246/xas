@@ -257,7 +257,7 @@ public sealed class XasCommandLine(IXasClient client, TextWriter output, TextWri
         writer.WriteLine("  ping [device-id]        Check device connectivity");
         writer.WriteLine("  [--sudo] -c <command>  Run a shell command (optionally elevated)");
         writer.WriteLine("  exec [--sudo] [--] <exe> [args]  Run an executable (optionally elevated)");
-        writer.WriteLine("  cp [-r] [-f] <src> <dst>  Copy files to or from a paired device");
+        writer.WriteLine("  cp [-r] [-f] <src> <dst>  Copy files to or from a paired device (:path uses the default device)");
         writer.WriteLine("  clipboard push|pull|sync [id]  Transfer or continuously sync plain text");
         writer.WriteLine("  input [device-id]       Capture Windows input manually (Ctrl+Alt+Esc releases)");
         writer.WriteLine("  display                 Report virtual display driver and handoff state (Windows)");

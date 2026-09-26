@@ -1,5 +1,7 @@
 using Xas.Cli;
+using Xas.Cli.FileTransfer;
 using Xas.Core;
+using Xas.Core.Configuration;
 
 namespace Xas.Tests;
 
@@ -13,6 +15,7 @@ public static class CliTests
         await InvalidTargetAndExtraCommandArgumentsAreRejected();
         await InteractiveDefaultUsesClient();
         await CopyParsesFlagsAndOperands();
+        CopyDefaultDeviceShorthandResolves();
         await ClipboardParsesDirectionAndTarget();
         await ClipboardSyncParsesTarget();
         await InputParsesTarget();
@@ -80,6 +83,30 @@ public static class CliTests
         Equal(true, client.CopyOverwrite);
         Equal(2, await cli.RunAsync(["cp", "-r", "only-one"]));
         Equal(2, await cli.RunAsync(["-d", "laptop", "cp", "a", "b"]));
+    }
+
+    private static void CopyDefaultDeviceShorthandResolves()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "xas-cli-copy-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var config = new LocalConfiguration(root);
+            var deviceId = "xas-0123456789abcdef0123456789abcdef";
+            config.UpsertPeer(new ConfiguredPeer(deviceId, "laptop", "127.0.0.1", 47821));
+            config.SetDefault(deviceId);
+            Equal(deviceId, FileCopyClient.ResolveTargetDeviceId("screenshot.png", ":/home/mint/", config));
+            Equal(deviceId, FileCopyClient.ResolveTargetDeviceId(":/home/mint/screenshot.png", ".", config));
+
+            var noDefault = new LocalConfiguration(Path.Combine(root, "no-default"));
+            try
+            {
+                _ = FileCopyClient.ResolveTargetDeviceId("screenshot.png", ":/home/mint/", noDefault);
+                throw new InvalidOperationException("Default-device shorthand unexpectedly worked without a default device.");
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("No default device", StringComparison.Ordinal)) { }
+        }
+        finally { Directory.Delete(root, true); }
     }
 
     private static async Task ClipboardParsesDirectionAndTarget()
