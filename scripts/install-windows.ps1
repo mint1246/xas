@@ -14,9 +14,7 @@ $winFspFile = 'winfsp-2.1.25156.msi'
 $winFspSha256 = '073A70E00F77423E34BED98B86E600DEF93393BA5822204FAC57A29324DB9F7A'
 $daemonTaskName = 'Xas User Daemon'
 $existingDaemonTask = Get-ScheduledTask -TaskName $daemonTaskName -ErrorAction SilentlyContinue
-if ($existingDaemonTask) {
-    Stop-ScheduledTask -TaskName $daemonTaskName -ErrorAction SilentlyContinue
-}
+if ($existingDaemonTask) { Stop-ScheduledTask -TaskName $daemonTaskName -ErrorAction SilentlyContinue }
 $existing = Get-Service -Name 'XasAdminBroker' -ErrorAction SilentlyContinue
 if ($existing -and $existing.Status -ne 'Stopped') {
     Stop-Service -Name 'XasAdminBroker' -Force
@@ -65,19 +63,11 @@ Copy-Item -LiteralPath (Join-Path $source 'xas.exe') -Destination $target -Force
 Copy-Item -LiteralPath (Join-Path $source 'Xas.Daemon.exe') -Destination $target -Force
 Copy-Item -LiteralPath (Join-Path $source 'Xas.PrivilegedService.exe') -Destination $target -Force
 
-# Run the normal daemon in the logged-in user's interactive session. The packaged Windows daemon
-# is built as WinExe, so launching it directly does not allocate a console window.
-$daemonPath = Join-Path $target 'Xas.Daemon.exe'
-$installingIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
-$userSid = $installingIdentity.User.Value
-$userName = $installingIdentity.Name
-$daemonAction = New-ScheduledTaskAction -Execute $daemonPath -Argument 'serve'
-$daemonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $userName
-$daemonPrincipal = New-ScheduledTaskPrincipal -UserId $userSid -LogonType Interactive -RunLevel Limited
-$daemonSettings = New-ScheduledTaskSettingsSet -Hidden -StartWhenAvailable -RestartCount 5 `
-    -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero)
-Register-ScheduledTask -TaskName $daemonTaskName -Action $daemonAction -Trigger $daemonTrigger `
-    -Principal $daemonPrincipal -Settings $daemonSettings -Force | Out-Null
+# Older packages launched the user daemon from Task Scheduler. The Windows service now supervises the
+# daemon in the active interactive session instead, so remove the legacy task to guarantee one owner.
+if ($existingDaemonTask) {
+    Unregister-ScheduledTask -TaskName $daemonTaskName -Confirm:$false
+}
 
 $servicePath = Join-Path $target 'Xas.PrivilegedService.exe'
 $existing = Get-Service -Name 'XasAdminBroker' -ErrorAction SilentlyContinue
@@ -88,13 +78,12 @@ if ($existing) {
     }
     if (Get-Service -Name 'XasAdminBroker' -ErrorAction SilentlyContinue) { throw 'The existing XasAdminBroker service is still being removed.' }
 }
-& sc.exe create XasAdminBroker "binPath= `"$servicePath`"" 'start= auto' 'obj= LocalSystem' 'DisplayName= Xas Administrator Broker' | Out-Null
+& sc.exe create XasAdminBroker "binPath= `"$servicePath`"" 'start= auto' 'obj= LocalSystem' 'DisplayName= XAS Background Service' | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'Could not register the Xas administrator broker service.' }
-& sc.exe description XasAdminBroker 'Runs approved Xas commands with the active administrator user token.' | Out-Null
+& sc.exe description XasAdminBroker 'Supervises the interactive Xas daemon and runs approved administrator commands.' | Out-Null
 & sc.exe failure XasAdminBroker 'reset= 86400' 'actions= restart/5000/restart/15000/restart/30000' | Out-Null
 & sc.exe failureflag XasAdminBroker 1 | Out-Null
 Start-Service -Name 'XasAdminBroker'
-Start-ScheduledTask -TaskName $daemonTaskName
 
 if (-not $NoPathUpdate) {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -104,6 +93,6 @@ if (-not $NoPathUpdate) {
         [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
     }
 }
-Write-Host "Installed xas, the per-user Xas daemon, and the XasAdminBroker service to $target"
+Write-Host "Installed xas and the XasAdminBroker service to $target. The service keeps Xas.Daemon running in the active user session."
 if ($NoPathUpdate) { Write-Host 'PATH was not changed (-NoPathUpdate).' }
 else { Write-Host 'User PATH includes the install directory. Open a new terminal to use xas.' }

@@ -29,7 +29,7 @@ After=graphical-session.target network-online.target
 [Service]
 Type=simple
 ExecStart="$BIN_DIR/Xas.Daemon" serve
-Restart=on-failure
+Restart=always
 RestartSec=2
 Environment="PATH=$BIN_DIR:/usr/local/bin:/usr/bin:/bin"
 

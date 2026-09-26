@@ -32,7 +32,8 @@ internal static class Program
         try
         {
             SetStatus(ServiceState.Running, ServiceAcceptedControls.Stop | ServiceAcceptedControls.Shutdown, 0);
-            BrokerServer.RunAsync(StopEvent).GetAwaiter().GetResult();
+            Task.WhenAll(BrokerServer.RunAsync(StopEvent), UserDaemonSupervisor.RunAsync(StopEvent))
+                .GetAwaiter().GetResult();
             SetStatus(ServiceState.Stopped, 0, 0);
         }
         catch

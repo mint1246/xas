@@ -72,7 +72,7 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
         Copy-Item (Join-Path $stage 'Xas.PrivilegedService\Xas.PrivilegedService.exe') $package
         Copy-Item (Join-Path $PSScriptRoot 'install-windows.ps1') $package
         Copy-Item -LiteralPath $winFspMsi -Destination $package
-        @('xas Windows x64 package', '', 'Run install-windows.ps1 from an elevated PowerShell window. It installs the client and background daemon under %ProgramFiles%\xas, installs the pinned WinFsp runtime when needed, registers the daemon to start silently at user logon, and installs the automatic XasAdminBroker Windows service.', 'Open a new terminal after installation if PATH was changed.', '', 'Only the installed Xas.Daemon process may connect to the privileged broker. Remote administrator execution still requires the peer PrivilegedShell grant.') | Set-Content -LiteralPath $readme
+        @('xas Windows x64 package', '', 'Run install-windows.ps1 from an elevated PowerShell window. It installs the client under %ProgramFiles%\xas, installs the pinned WinFsp runtime when needed, and installs the automatic XAS Background Service. The service keeps Xas.Daemon running inside the active user desktop session; no Scheduled Task or manual daemon start is required.', 'Open a new terminal after installation if PATH was changed.', '', 'Only the installed Xas.Daemon process may connect to the privileged broker. Remote administrator execution still requires the peer PrivilegedShell grant.') | Set-Content -LiteralPath $readme
     } else {
         Copy-Item (Join-Path $PSScriptRoot 'install-linux.sh') $package
         foreach ($helper in @('xas-linux-pty', 'xas-wayland-eis', 'xas-uinput')) {
