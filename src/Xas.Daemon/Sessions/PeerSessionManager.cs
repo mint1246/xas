@@ -40,6 +40,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
     private readonly ConcurrentDictionary<MultiplexedProtocolPeer, string> _connections = new();
     private readonly ConcurrentDictionary<string, Task<PathSelection>> _pathSelections = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _shutdown = new();
+    private readonly NetworkAddressChangedEventHandler _networkChangedHandler;
     private LanDiscoveryService? _discovery;
     private Task? _maintenance;
     private Task? _displayPublisher;
@@ -57,6 +58,8 @@ public sealed class PeerSessionManager : IAsyncDisposable
         _dispatcher = dispatcher ?? throw new ArgumentNullException(nameof(dispatcher));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _configuredPeers = _configuration.Peers;
+        _networkChangedHandler = (_, _) => OnNetworkAddressChanged();
+        NetworkChange.NetworkAddressChanged += _networkChangedHandler;
         if (port is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
         _port = port;
     }
@@ -226,11 +229,25 @@ public sealed class PeerSessionManager : IAsyncDisposable
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
             catch (Exception ex)
             {
+                _pathSelections.TryRemove(peer.DeviceId, out _);
                 Console.Error.WriteLine($"Peer lane {lane} to {peer.Name} ({peer.DeviceId}) failed: {ex.Message}");
                 await Task.Delay(delay, token).ConfigureAwait(false);
                 delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2));
             }
         }
+    }
+
+    private void OnNetworkAddressChanged()
+    {
+        _pathSelections.Clear();
+        // Existing lanes are bound to the local source address they were created with. Reconnect them so
+        // newly-added/removed Ethernet or Wi-Fi interfaces immediately trigger a fresh path measurement.
+        foreach (var protocol in _lanes.Keys.ToArray())
+            _ = Task.Run(async () =>
+            {
+                try { await protocol.DisposeAsync().ConfigureAwait(false); }
+                catch (Exception) { }
+            });
     }
 
     private Task<PathSelection> GetPathSelectionAsync(DiscoveredPeer peer, CancellationToken token)
@@ -598,6 +615,7 @@ public sealed class PeerSessionManager : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        NetworkChange.NetworkAddressChanged -= _networkChangedHandler;
         _configuration.Changed -= OnConfigurationChanged;
         _shutdown.Cancel();
         if (_maintenance is not null) { try { await _maintenance.ConfigureAwait(false); } catch (OperationCanceledException) { } }
