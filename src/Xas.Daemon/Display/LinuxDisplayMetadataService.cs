@@ -57,6 +57,7 @@ public sealed class LinuxDisplayMetadataService
         if (string.IsNullOrWhiteSpace(text)) return null;
         var displays = new List<(DisplayMetadata Data, bool Primary, bool BuiltIn)>();
         string? name = null; bool primary = false; int physicalWidth = 0, physicalHeight = 0, rotation = 0;
+        int? originX = null, originY = null, geometryWidth = null, geometryHeight = null;
         foreach (var line in text.Split('\n'))
         {
             var output = Regex.Match(line, @"^([A-Za-z0-9_.-]+) connected(?: (primary))?(.*)$");
@@ -68,6 +69,11 @@ public sealed class LinuxDisplayMetadataService
                 physicalWidth = physical.Success ? ParsePositive(physical.Groups[1].Value) : 0;
                 physicalHeight = physical.Success ? ParsePositive(physical.Groups[2].Value) : 0;
                 rotation = RotationFromText(line);
+                var geometry = Regex.Match(output.Groups[3].Value, @"(\d+)x(\d+)\+(-?\d+)\+(-?\d+)");
+                geometryWidth = geometry.Success ? int.Parse(geometry.Groups[1].Value) : null;
+                geometryHeight = geometry.Success ? int.Parse(geometry.Groups[2].Value) : null;
+                originX = geometry.Success ? int.Parse(geometry.Groups[3].Value) : null;
+                originY = geometry.Success ? int.Parse(geometry.Groups[4].Value) : null;
                 continue;
             }
             if (name is null) continue;
@@ -76,7 +82,8 @@ public sealed class LinuxDisplayMetadataService
             var active = Regex.Match(mode.Groups[3].Value, @"(?<![\d.])(\d+(?:\.\d+)?)\*");
             if (!active.Success) continue;
             var builtIn = name.StartsWith("eDP", StringComparison.OrdinalIgnoreCase) || name.StartsWith("LVDS", StringComparison.OrdinalIgnoreCase);
-            displays.Add((Make(name, int.Parse(mode.Groups[1].Value), int.Parse(mode.Groups[2].Value), HZ(active.Groups[1].Value), physicalWidth, physicalHeight, rotation, null), primary, builtIn));
+            displays.Add((Make(name, int.Parse(mode.Groups[1].Value), int.Parse(mode.Groups[2].Value), HZ(active.Groups[1].Value), physicalWidth, physicalHeight, rotation, null,
+                originX, originY, geometryWidth, geometryHeight), primary, builtIn));
             name = null;
         }
         return Choose(displays);
@@ -88,6 +95,7 @@ public sealed class LinuxDisplayMetadataService
         if (string.IsNullOrWhiteSpace(text)) return null;
         var displays = new List<(DisplayMetadata Data, bool Primary, bool BuiltIn)>();
         string? name = null; bool focused = false, enabled = false; int pw = 0, ph = 0, rotation = 0, modeWidth = 0, modeHeight = 0; int? refresh = null; double? scale = null;
+        int? originX = null, originY = null;
         foreach (var line in text.Split('\n'))
         {
             if (!char.IsWhiteSpace(line.FirstOrDefault()) && !string.IsNullOrWhiteSpace(line))
@@ -97,6 +105,7 @@ public sealed class LinuxDisplayMetadataService
                 name = head.Success ? head.Groups[1].Value : null;
                 focused = line.Contains("(focused)", StringComparison.OrdinalIgnoreCase);
                 enabled = false; pw = ph = rotation = modeWidth = modeHeight = 0; refresh = null; scale = null;
+                originX = originY = null;
                 continue;
             }
             if (name is null) continue;
@@ -106,6 +115,8 @@ public sealed class LinuxDisplayMetadataService
             if (size.Success) { pw = ParsePositive(size.Groups[1].Value); ph = ParsePositive(size.Groups[2].Value); }
             var sc = Regex.Match(t, @"^Scale:\s*(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
             if (sc.Success && double.TryParse(sc.Groups[1].Value, CultureInfo.InvariantCulture, out var s) && s > 0) scale = s;
+            var position = Regex.Match(t, @"^Position:\s*(-?\d+)\s*,\s*(-?\d+)", RegexOptions.IgnoreCase);
+            if (position.Success) { originX = int.Parse(position.Groups[1].Value); originY = int.Parse(position.Groups[2].Value); }
             var tr = Regex.Match(t, @"^Transform:\s*(\S+)", RegexOptions.IgnoreCase);
             if (tr.Success) rotation = RotationFromTransform(tr.Groups[1].Value);
             var mode = Regex.Match(t, @"^(\d+)x(\d+) px,\s*(\d+(?:\.\d+)?) Hz\s*\(current\)", RegexOptions.IgnoreCase);
@@ -123,7 +134,7 @@ public sealed class LinuxDisplayMetadataService
         {
             if (name is null || !enabled || modeWidth <= 0 || modeHeight <= 0) return;
             var builtIn = name.StartsWith("eDP", StringComparison.OrdinalIgnoreCase) || name.StartsWith("LVDS", StringComparison.OrdinalIgnoreCase);
-            displays.Add((Make(name, modeWidth, modeHeight, refresh, pw, ph, rotation, scale), focused, builtIn));
+            displays.Add((Make(name, modeWidth, modeHeight, refresh, pw, ph, rotation, scale, originX, originY), focused, builtIn));
         }
     }
 
@@ -136,12 +147,12 @@ public sealed class LinuxDisplayMetadataService
         foreach (var block in blocks)
         {
             var head = Regex.Match(block, @"^Output:\s*\d+\s+(\S+)(.*)$", RegexOptions.Multiline);
-            var geom = Regex.Match(block, @"^\s*Geometry:\s*-?\d+,-?\d+\s+(\d+)x(\d+)", RegexOptions.Multiline);
+            var geom = Regex.Match(block, @"^\s*Geometry:\s*(-?\d+),(-?\d+)\s+(\d+)x(\d+)", RegexOptions.Multiline);
             if (!head.Success || !geom.Success) continue;
             var name = head.Groups[1].Value;
             var modes = Regex.Match(block, @"^\s*Modes:\s*.*?(\d+)x(\d+)@(\d+(?:\.\d+)?)(?:\*|!)", RegexOptions.Multiline);
-            int width = modes.Success ? int.Parse(modes.Groups[1].Value) : int.Parse(geom.Groups[1].Value);
-            int height = modes.Success ? int.Parse(modes.Groups[2].Value) : int.Parse(geom.Groups[2].Value);
+            int width = modes.Success ? int.Parse(modes.Groups[1].Value) : int.Parse(geom.Groups[3].Value);
+            int height = modes.Success ? int.Parse(modes.Groups[2].Value) : int.Parse(geom.Groups[4].Value);
             int? refresh = modes.Success ? HZ(modes.Groups[3].Value) : null;
             var physical = Regex.Match(block, @"^\s*Physical size:\s*(\d+)x(\d+)", RegexOptions.Multiline);
             var rot = Regex.Match(block, @"^\s*Rotation:\s*(\d+)", RegexOptions.Multiline);
@@ -150,7 +161,9 @@ public sealed class LinuxDisplayMetadataService
             var rotation = rot.Success ? KScreenRotation(int.Parse(rot.Groups[1].Value)) : 0;
             var priority = Regex.Match(head.Groups[2].Value, @"\bpriority\s+(\d+)", RegexOptions.IgnoreCase);
             displays.Add((Make(name, width, height, refresh, physical.Success ? ParsePositive(physical.Groups[1].Value) : 0, physical.Success ? ParsePositive(physical.Groups[2].Value) : 0,
-                rotation, scale), priority.Success && priority.Groups[1].Value == "1", name.StartsWith("eDP", StringComparison.OrdinalIgnoreCase) || name.StartsWith("LVDS", StringComparison.OrdinalIgnoreCase)));
+                rotation, scale, int.Parse(geom.Groups[1].Value), int.Parse(geom.Groups[2].Value),
+                int.Parse(geom.Groups[3].Value), int.Parse(geom.Groups[4].Value)),
+                priority.Success && priority.Groups[1].Value == "1", name.StartsWith("eDP", StringComparison.OrdinalIgnoreCase) || name.StartsWith("LVDS", StringComparison.OrdinalIgnoreCase)));
         }
         return Choose(displays);
     }
@@ -167,7 +180,7 @@ public sealed class LinuxDisplayMetadataService
         if (reply is null) return null;
         // (serial, monitors, logical_monitors, properties)
         var fields = SplitTopLevel(reply, ',');
-        if (fields.Count < 3) return null;
+        if (fields.Count < 4) return null;
         var layoutLogical = Regex.Match(fields[3] ?? string.Empty, @"'layout-mode':\s*<\s*uint32\s+(\d+)").Groups[1].Value == "1";
 
         // Each monitor is ((connector, vendor, product, serial), [modes], {properties}).
@@ -183,7 +196,7 @@ public sealed class LinuxDisplayMetadataService
             foreach (var candidate in SplitElements(parts[1]))
             {
                 var fieldsOfMode = SplitTopLevel(candidate, ',');
-                if (fieldsOfMode.Count < 4) continue;
+                if (fieldsOfMode.Count < 7) continue;
                 // Only the mode Mutter marks current describes the live desktop.
                 if (!fieldsOfMode[6].Contains("'is-current': <true>", StringComparison.Ordinal)) continue;
                 if (!int.TryParse(fieldsOfMode[1], out var width) ||
@@ -206,7 +219,7 @@ public sealed class LinuxDisplayMetadataService
             // gdbus annotates the transform as "uint32 1"; a bare digit match would read the 32.
             var transform = int.TryParse(Regex.Match(logical[3].Trim(), @"^(?:u?int32\s+)?(\d+)$")
                 .Groups[1].Value, out var parsedTransform) ? parsedTransform : 0;
-            var primary = logical[5].TrimStart().StartsWith("true", StringComparison.Ordinal);
+            var primary = logical[4].TrimStart().StartsWith("true", StringComparison.Ordinal);
             // Under logical layout the desktop the user works in is the mode divided by the scale, and that is
             // the coordinate space absolute input has to be expressed in. Under physical layout it is the mode.
             var logicalWidth = layoutLogical ? Math.Max(1, (int)Math.Round(mode.Width / scale)) : mode.Width;
@@ -217,6 +230,13 @@ public sealed class LinuxDisplayMetadataService
             {
                 Id = connector,
                 Name = displayName.Length > 0 ? displayName : connector,
+                ConnectorId = connector,
+                NativeWidthPixels = mode.Width,
+                NativeHeightPixels = mode.Height,
+                LogicalX = int.TryParse(logical[0], out var x) ? x : null,
+                LogicalY = int.TryParse(logical[1], out var y) ? y : null,
+                LogicalWidth = rotation is 90 or 270 ? logicalHeight : logicalWidth,
+                LogicalHeight = rotation is 90 or 270 ? logicalWidth : logicalHeight,
                 WidthPixels = rotation is 90 or 270 ? logicalHeight : logicalWidth,
                 HeightPixels = rotation is 90 or 270 ? logicalWidth : logicalHeight,
                 RefreshMilliHertz = mode.MilliHertz,
@@ -329,12 +349,24 @@ public sealed class LinuxDisplayMetadataService
 
     private static DisplayMetadata? Choose(List<(DisplayMetadata Data, bool Primary, bool BuiltIn)> items) => items
         .OrderByDescending(x => x.Primary).ThenByDescending(x => x.BuiltIn).Select(x => x.Data).FirstOrDefault();
-    private static DisplayMetadata Make(string id, int w, int h, int? hz, int pw, int ph, int rotation, double? scale) => new()
+    private static DisplayMetadata Make(string id, int w, int h, int? hz, int pw, int ph, int rotation, double? scale,
+        int? x = null, int? y = null, int? logicalWidth = null, int? logicalHeight = null)
     {
-        Id = id, Name = id, WidthPixels = rotation is 90 or 270 ? h : w, HeightPixels = rotation is 90 or 270 ? w : h,
-        RefreshMilliHertz = hz, PhysicalWidthMillimeters = pw > 0 ? pw : null, PhysicalHeightMillimeters = ph > 0 ? ph : null,
-        RotationDegrees = rotation, Scale = scale
-    };
+        var orientedWidth = rotation is 90 or 270 ? h : w;
+        var orientedHeight = rotation is 90 or 270 ? w : h;
+        // A compositor's reported geometry takes precedence over mode / scale rounding.
+        var width = logicalWidth ?? Math.Max(1, (int)Math.Round(orientedWidth / (scale is > 0 ? scale.Value : 1)));
+        var height = logicalHeight ?? Math.Max(1, (int)Math.Round(orientedHeight / (scale is > 0 ? scale.Value : 1)));
+        return new DisplayMetadata
+        {
+            Id = id, Name = id, ConnectorId = id,
+            NativeWidthPixels = w, NativeHeightPixels = h,
+            LogicalX = x, LogicalY = y, LogicalWidth = width, LogicalHeight = height,
+            WidthPixels = width, HeightPixels = height,
+            RefreshMilliHertz = hz, PhysicalWidthMillimeters = pw > 0 ? pw : null, PhysicalHeightMillimeters = ph > 0 ? ph : null,
+            RotationDegrees = rotation, Scale = scale
+        };
+    }
     private static int? HZ(string text) => double.TryParse(text, CultureInfo.InvariantCulture, out var hz) && hz > 0 ? (int)Math.Round(hz * 1000) : null;
     private static int ParsePositive(string text) => int.TryParse(text, out var x) && x > 0 ? x : 0;
     private static int RotationFromText(string line) => Regex.Match(line, @"\((normal|left|inverted|right)\s", RegexOptions.IgnoreCase).Groups[1].Value.ToLowerInvariant() switch
