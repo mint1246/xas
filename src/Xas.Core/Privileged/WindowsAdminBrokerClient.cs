@@ -1,8 +1,8 @@
 using System.Buffers.Binary;
 using System.IO.Pipes;
-using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace Xas.Core.Privileged;
 
@@ -60,23 +60,84 @@ public sealed class WindowsAdminBrokerClient : IShellBackend
         }
     }
 
-    internal static void VerifyInstalledBrokerServer(Microsoft.Win32.SafeHandles.SafePipeHandle pipe)
+    internal static void VerifyInstalledBrokerServer(SafePipeHandle pipe)
     {
-        if (!GetNamedPipeServerProcessId(pipe, out var processId)) throw new IOException("Could not identify the administrator broker service.");
+        if (!GetNamedPipeServerProcessId(pipe, out var pipeProcessId) || pipeProcessId == 0)
+            throw new IOException("Could not identify the administrator broker pipe owner.");
+        VerifyBrokerServiceProcessId(pipeProcessId);
+    }
+
+    internal static void VerifyBrokerServiceProcessId(uint pipeProcessId)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();
+        if (pipeProcessId == 0) throw new ArgumentOutOfRangeException(nameof(pipeProcessId));
+
+        const uint ScManagerConnect = 0x0001;
+        const uint ServiceQueryStatus = 0x0004;
+        const int ScStatusProcessInfo = 0;
+        const uint ServiceRunning = 0x00000004;
+
+        var scm = OpenSCManager(null, null, ScManagerConnect);
+        if (scm == IntPtr.Zero)
+            throw new IOException("Could not open the Windows Service Control Manager.",
+                new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
         try
         {
-            using var server = Process.GetProcessById((int)processId);
-            var actual = Path.GetFullPath(server.MainModule?.FileName ?? throw new IOException("Could not identify the administrator broker executable."));
-            var expected = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "Xas.PrivilegedService.exe"));
-            if (!StringComparer.OrdinalIgnoreCase.Equals(actual, expected))
-                throw new UnauthorizedAccessException("The named pipe is not owned by the installed Xas administrator broker.");
+            var service = OpenService(scm, "XasAdminBroker", ServiceQueryStatus);
+            if (service == IntPtr.Zero)
+                throw new IOException("The Xas administrator broker service is not installed or cannot be queried.",
+                    new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+            try
+            {
+                var size = Marshal.SizeOf<ServiceStatusProcess>();
+                var buffer = Marshal.AllocHGlobal(size);
+                try
+                {
+                    if (!QueryServiceStatusEx(service, ScStatusProcessInfo, buffer, size, out _))
+                        throw new IOException("Could not query the Xas administrator broker service status.",
+                            new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()));
+                    var status = Marshal.PtrToStructure<ServiceStatusProcess>(buffer);
+                    if (status.CurrentState != ServiceRunning || status.ProcessId == 0)
+                        throw new IOException("The Xas administrator broker service is not running.");
+                    if (status.ProcessId != pipeProcessId)
+                        throw new UnauthorizedAccessException("The administrator broker pipe is not owned by the registered Xas service process.");
+                }
+                finally { Marshal.FreeHGlobal(buffer); }
+            }
+            finally { CloseServiceHandle(service); }
         }
-        catch (ArgumentException ex) { throw new IOException("The administrator broker service process is unavailable.", ex); }
-        catch (System.ComponentModel.Win32Exception ex) { throw new IOException("The administrator broker service process could not be verified.", ex); }
+        finally { CloseServiceHandle(scm); }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ServiceStatusProcess
+    {
+        public uint ServiceType;
+        public uint CurrentState;
+        public uint ControlsAccepted;
+        public uint Win32ExitCode;
+        public uint ServiceSpecificExitCode;
+        public uint CheckPoint;
+        public uint WaitHint;
+        public uint ProcessId;
+        public uint ServiceFlags;
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint processId);
+    private static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint processId);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr OpenSCManager(string? machineName, string? databaseName, uint desiredAccess);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr OpenService(IntPtr serviceManager, string serviceName, uint desiredAccess);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool QueryServiceStatusEx(IntPtr service, int infoLevel, IntPtr buffer, int bufferSize,
+        out int bytesNeeded);
+
+    [DllImport("advapi32.dll")]
+    private static extern bool CloseServiceHandle(IntPtr serviceHandle);
 
     private static async Task PumpInputAsync(Stream source, Stream destination, CancellationToken ct)
     {

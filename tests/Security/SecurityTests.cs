@@ -1,6 +1,7 @@
 using Xas.Core.Security;
 using Xas.Core.Configuration;
 using Xas.Core;
+using Xas.Core.Privileged;
 
 namespace Xas.Tests;
 
@@ -34,6 +35,16 @@ public static class SecurityTests
                 throw new InvalidOperationException("Device ID is not derived from the public key.");
             if (!PairingVerification.IsProvisionalCertificate(identity.Certificate))
                 throw new InvalidOperationException("A generated identity certificate is not valid for provisional pairing.");
+
+            if (OperatingSystem.IsWindows())
+            {
+                try
+                {
+                    WindowsAdminBrokerClient.VerifyBrokerServiceProcessId((uint)Environment.ProcessId);
+                    throw new InvalidOperationException("An arbitrary local process was accepted as the administrator broker service.");
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
+            }
 
             var trust = new PeerTrustStore(directory);
             if (trust.IsTrusted(identity.Certificate)) throw new InvalidOperationException("A peer was trusted before approval.");

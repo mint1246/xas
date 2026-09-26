@@ -205,27 +205,73 @@ internal static class BrokerServer
             using var user = new WindowsIdentity(sessionToken.DangerousGetHandle());
             if (!StringComparer.OrdinalIgnoreCase.Equals(user.User?.Value, caller.User?.Value))
                 throw new UnauthorizedAccessException("The broker caller is not the active desktop user.");
-            var adminSid = CreateAdminSid();
-            bool isAdmin;
-            try { if (!CheckTokenMembership(sessionToken, adminSid, out isAdmin) || !isAdmin)
-                throw new UnauthorizedAccessException("Administrator privileges are required for brokered commands.");
-            }
-            finally { LocalFree(adminSid); }
-            if (!GetTokenInformation(sessionToken, 18, out var elevationType, sizeof(int), out _))
+
+            if (!GetTokenInformation(sessionToken, TokenElevationTypeInfoClass, out var elevationType, sizeof(int), out _))
                 throw new Win32Exception(Marshal.GetLastWin32Error());
-            if (elevationType == 3 && GetLinkedToken(sessionToken, 19, out var linkedToken, IntPtr.Size, out _))
+
+            switch (elevationType)
             {
-                if (!GetTokenInformation(linkedToken, 20, out var isElevated, sizeof(int), out _) || isElevated == 0)
-                { linkedToken.Dispose(); throw new UnauthorizedAccessException("The linked administrator token is not elevated."); }
-                return linkedToken;
+                case TokenElevationTypeLimited:
+                    if (!GetLinkedToken(sessionToken, TokenLinkedTokenInfoClass, out var linkedToken, IntPtr.Size, out _))
+                        throw new UnauthorizedAccessException("The active user does not have a linked administrator token.",
+                            new Win32Exception(Marshal.GetLastWin32Error()));
+                    using (linkedToken)
+                    {
+                        EnsureElevatedAdministrator(linkedToken, requireElevationFlag: true);
+                        return DuplicatePrimaryToken(linkedToken);
+                    }
+
+                case TokenElevationTypeFull:
+                    EnsureElevatedAdministrator(sessionToken, requireElevationFlag: true);
+                    return DuplicatePrimaryToken(sessionToken);
+
+                case TokenElevationTypeDefault:
+                    // With UAC disabled, an administrator can legitimately have no linked token.
+                    // Enabled Administrators membership is sufficient here; standard-user tokens fail.
+                    EnsureElevatedAdministrator(sessionToken, requireElevationFlag: false);
+                    return DuplicatePrimaryToken(sessionToken);
+
+                default:
+                    throw new InvalidDataException($"Unexpected Windows token elevation type: {elevationType}.");
             }
-            if (!GetTokenInformation(sessionToken, 20, out var elevated, sizeof(int), out _) || elevated == 0)
-                throw new UnauthorizedAccessException("The active user does not have an elevated administrator token.");
-            if (!DuplicateTokenEx(sessionToken, 0xF01FF, IntPtr.Zero, 2, 1, out var duplicate))
-                throw new Win32Exception(Marshal.GetLastWin32Error());
-            return duplicate;
         }
     }
+
+    private static void EnsureElevatedAdministrator(SafeAccessTokenHandle token, bool requireElevationFlag)
+    {
+        var adminSid = CreateAdminSid();
+        try
+        {
+            if (!CheckTokenMembership(token, adminSid, out var isAdmin))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not verify administrator token membership.");
+            if (!isAdmin)
+                throw new UnauthorizedAccessException("Administrator privileges are required for brokered commands.");
+        }
+        finally { LocalFree(adminSid); }
+
+        if (!requireElevationFlag) return;
+        if (!GetTokenInformation(token, TokenElevationInfoClass, out var elevated, sizeof(int), out _))
+            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not inspect token elevation state.");
+        if (elevated == 0)
+            throw new UnauthorizedAccessException("The selected administrator token is not elevated.");
+    }
+
+    private static SafeAccessTokenHandle DuplicatePrimaryToken(SafeAccessTokenHandle token)
+    {
+        const uint TokenAllAccess = 0xF01FF;
+        const int SecurityImpersonation = 2;
+        const int TokenPrimary = 1;
+        if (!DuplicateTokenEx(token, TokenAllAccess, IntPtr.Zero, SecurityImpersonation, TokenPrimary, out var duplicate))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        return duplicate;
+    }
+
+    private const int TokenElevationTypeInfoClass = 18;
+    private const int TokenLinkedTokenInfoClass = 19;
+    private const int TokenElevationInfoClass = 20;
+    private const int TokenElevationTypeDefault = 1;
+    private const int TokenElevationTypeFull = 2;
+    private const int TokenElevationTypeLimited = 3;
 
     private static IntPtr CreateAdminSid()
     {
