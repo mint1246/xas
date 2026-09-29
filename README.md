@@ -52,6 +52,8 @@ Extract the appropriate archive, then install:
 
 Open a new terminal after installation to pick up PATH changes. SudoVDA is installed separately. Linux remote mounts need `fusermount3`, `libfuse3.so.3`, and access to `/dev/fuse`; the installer checks these prerequisites.
 
+On Windows, add `-NoStart` to install or upgrade while leaving the service stopped. Start it later from an elevated PowerShell window with `Start-Service XasAdminBroker`. The service still uses automatic startup on the next boot.
+
 For development, start one daemon per machine with `dotnet run --project src/Xas.Daemon -- serve`, and run the CLI with `dotnet run --project src/Xas.Cli -- <arguments>`. Both daemons need access to their users' desktop sessions for clipboard and input features.
 
 ## Pair devices

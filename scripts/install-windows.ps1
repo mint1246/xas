@@ -1,7 +1,8 @@
 #requires -RunAsAdministrator
 param(
     [string]$PackageDirectory = $PSScriptRoot,
-    [switch]$NoPathUpdate
+    [switch]$NoPathUpdate,
+    [switch]$NoStart
 )
 
 # The service runs as LocalSystem, so its binaries live in the admin-writable Program Files tree.
@@ -107,7 +108,7 @@ if (-not $existing) {
 & sc.exe description XasAdminBroker 'Supervises the interactive Xas daemon and runs approved administrator commands.' | Out-Null
 & sc.exe failure XasAdminBroker 'reset= 86400' 'actions= restart/5000/restart/15000/restart/30000' | Out-Null
 & sc.exe failureflag XasAdminBroker 1 | Out-Null
-Start-Service -Name 'XasAdminBroker'
+if (-not $NoStart) { Start-Service -Name 'XasAdminBroker' }
 
 if (-not $NoPathUpdate) {
     $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -117,6 +118,8 @@ if (-not $NoPathUpdate) {
         [Environment]::SetEnvironmentVariable('Path', $updated, 'User')
     }
 }
-Write-Host "Installed xas and the XasAdminBroker service to $target. The service keeps Xas.Daemon running in the active user session."
+Write-Host "Installed xas and the XasAdminBroker service to $target."
+if ($NoStart) { Write-Host 'The service remains stopped (-NoStart). Start it with: Start-Service XasAdminBroker' }
+else { Write-Host 'The service keeps Xas.Daemon running in the active user session.' }
 if ($NoPathUpdate) { Write-Host 'PATH was not changed (-NoPathUpdate).' }
 else { Write-Host 'User PATH includes the install directory. Open a new terminal to use xas.' }
