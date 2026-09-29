@@ -172,6 +172,8 @@ static int portal_probe(void) {
     return valid && version >= 2 && (devices & 3u) == 3u;
 }
 
+static int resolve_absolute_coordinates(double x, double y, double *out_x, double *out_y);
+
 static int handle_event(const unsigned char *event) {
     unsigned kind = event[0], code = xas_u16(event + 1);
     int flags = event[3], down = flags & 1, repeat = flags & 2;
@@ -234,7 +236,7 @@ int main(int argc, char **argv) {
         if (fds[0].revents & (POLLERR | POLLHUP | POLLNVAL)) break;
         if (fds[0].revents & POLLIN) {
             unsigned count=0;
-            int status=xas_read_frame(STDIN_FILENO,events,&count);
+            int status=xas_read_frame(events,&count);
             if (status<=0) break;
             if (count==0) { release_all(); puts("OK"); fflush(stdout); }
             else {
