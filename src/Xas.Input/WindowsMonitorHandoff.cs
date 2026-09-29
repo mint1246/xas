@@ -75,7 +75,7 @@ public static class WindowsMonitorHandoff
                     continue;
                 }
 
-                if (!Equals(display, attachedDisplay) || attachment is null ||
+                if (!HasSameVirtualMonitorMode(display, attachedDisplay) || attachment is null ||
                     !attachmentExists(attachment))
                 {
                     log?.Invoke($"Attaching virtual display for {display.Name} at {display.WidthPixels}x{display.HeightPixels}.");
@@ -152,6 +152,8 @@ public static class WindowsMonitorHandoff
                 {
                     var updatedDisplay = peer.Display;
                     var metadataChanged = !Equals(updatedDisplay, attachedDisplay);
+                    var monitorModeChanged = updatedDisplay is not null &&
+                        !HasSameVirtualMonitorMode(updatedDisplay, attachedDisplay);
                     if (!metadataChanged && topologyChanged)
                     {
                         // Moving/rearranging monitors in Windows must only rebind the capture rectangle.
@@ -166,10 +168,17 @@ public static class WindowsMonitorHandoff
                         attachment = null;
                         attachedDisplay = null;
                     }
-                    else if (metadataChanged)
+                    else if (monitorModeChanged)
                     {
-                        log?.Invoke("Remote display metadata changed; refreshing the virtual monitor.");
+                        log?.Invoke("Remote display mode changed; refreshing the virtual monitor.");
                         attachment = await controller.AttachAsync(updatedDisplay, token).ConfigureAwait(false);
+                        attachedDisplay = updatedDisplay;
+                    }
+                    else if (metadataChanged && updatedDisplay is not null)
+                    {
+                        // Logical coordinates, scale, and other compositor metadata affect input mapping,
+                        // but not the SudoVDA panel mode. Remember them so the router is rebound without
+                        // tearing down and recreating the physical virtual monitor.
                         attachedDisplay = updatedDisplay;
                     }
                 }
@@ -192,6 +201,17 @@ public static class WindowsMonitorHandoff
 
     private static bool IsTransientTopologyFailure(Exception exception) =>
         exception is InvalidOperationException or System.ComponentModel.Win32Exception;
+
+    private static bool HasSameVirtualMonitorMode(DisplayMetadata current, DisplayMetadata? attached)
+    {
+        if (attached is null || !string.Equals(current.Id, attached.Id, StringComparison.Ordinal)) return false;
+        return SudoVdaDisplayController.ResolveVirtualWidth(current) ==
+                   SudoVdaDisplayController.ResolveVirtualWidth(attached) &&
+               SudoVdaDisplayController.ResolveVirtualHeight(current) ==
+                   SudoVdaDisplayController.ResolveVirtualHeight(attached) &&
+               SudoVdaDisplayController.ResolveRefreshHertz(current.RefreshMilliHertz) ==
+                   SudoVdaDisplayController.ResolveRefreshHertz(attached.RefreshMilliHertz);
+    }
 
     private static Task StartRouter(
         Func<IHotInputPeer, WindowsCaptureRegion, CancellationToken, Action, Task> runRouter,

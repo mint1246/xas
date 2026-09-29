@@ -97,7 +97,7 @@ public sealed class DaemonHost
             if (OperatingSystem.IsWindows() && _enableNativeOrchestration)
             {
                 kvmCoordinator = WindowsKvmCoordinator.RunAsync(configuration, PeerSessions, daemonStop.Token,
-                    message => Console.Error.WriteLine(message));
+                    KvmDiagnosticLog.Write);
             }
             if (remoteMounts is not null && _enableNativeOrchestration)
                 remoteMountTask = remoteMounts.RunAsync(daemonStop.Token);

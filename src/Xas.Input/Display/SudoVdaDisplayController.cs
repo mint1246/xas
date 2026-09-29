@@ -46,8 +46,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
     private Guid? _ownedMonitorId;
     private string? _ownedMonitorDeviceName;
     private string? _ownedMonitorHardwareId;
-    private CancellationTokenSource? _keepAlive;
-    private Task? _keepAliveLoop;
+    private DriverWatchdog? _watchdog;
     private (int Left, int Top)? _preferredPosition;
 
     /// <summary>
@@ -97,6 +96,9 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
                 "The SudoVDA control device disappeared; restart the Windows session.");
             ResolveAdapterDeviceName(cancellationToken);
             await ReclaimAbandonedAsync(device, cancellationToken).ConfigureAwait(false);
+            // The watchdog timer starts when Add is issued. Start keepalive before the first Add so slow
+            // PnP publication and position restoration cannot consume its three-second grace period.
+            StartKeepAlive();
 
             // Each monitor on the adapter gets its own GDI device name, so the new one has to be identified by
             // what appeared rather than by the adapter name. Without this, a re-attach onto an adapter that
@@ -126,7 +128,6 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
                 else log?.Invoke($"Could not restore virtual display position to ({position.Left},{position.Top}).");
             }
             Remember(created);
-            StartKeepAlive();
             log?.Invoke($"Virtual display {created.DeviceName} active at " +
                 $"{modeWidth}x{modeHeight}@{refreshHertz}.");
             return created with { RefreshHertz = refreshHertz };
@@ -219,15 +220,18 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
         var before = VirtualMonitorKeys();
         // Only claim identities after Add succeeds. A failed Add can mean another application owns a
         // monitor on this adapter; adopting it would make DetachAsync remove someone else's display.
-            SudoVdaDriver.Add(device, monitorId, ResolveVirtualWidth(display), ResolveVirtualHeight(display),
-                refreshHertz, MonitorDeviceName);
+        var addStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        SudoVdaDriver.Add(device, monitorId, ResolveVirtualWidth(display), ResolveVirtualHeight(display),
+            refreshHertz, MonitorDeviceName);
+        log?.Invoke($"SudoVDA accepted monitor {monitorId} in " +
+            $"{System.Diagnostics.Stopwatch.GetElapsedTime(addStarted).TotalMilliseconds:F0} ms.");
         _ownedMonitorId = monitorId;
         var published = await TryWaitForMonitorAsync(before, display, cancellationToken).ConfigureAwait(false);
         if (published is not null)
             return new(published.DeviceName, published.HardwareId, monitorId,
                 ResolveVirtualWidth(display), ResolveVirtualHeight(display), refreshHertz);
         // Leave nothing half-created behind before the next attempt uses a different identity.
-        await DetachCoreAsync().ConfigureAwait(false);
+        await DetachCoreAsync(stopKeepAlive: false).ConfigureAwait(false);
         return null;
     }
 
@@ -247,22 +251,21 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
         finally { _gate.Release(); }
     }
 
-    private async Task DetachCoreAsync()
+    private async Task DetachCoreAsync(bool stopKeepAlive = true)
     {
-        if (_keepAlive is { } keepAlive) keepAlive.Cancel();
-        if (_keepAliveLoop is { } loop)
+        if (stopKeepAlive && _watchdog is { } watchdog)
         {
-            try { await loop.ConfigureAwait(false); }
-            catch (OperationCanceledException) { }
+            await watchdog.StopAsync().ConfigureAwait(false);
+            _watchdog = null;
         }
-        _keepAliveLoop = null;
-        _keepAlive?.Dispose();
-        _keepAlive = null;
         if (_device is { } device && _ownedMonitorId is { } monitorId)
         {
+            var removeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
             try
             {
                 SudoVdaDriver.Remove(device, monitorId);
+                log?.Invoke($"Removed SudoVDA monitor {monitorId} in " +
+                    $"{System.Diagnostics.Stopwatch.GetElapsedTime(removeStarted).TotalMilliseconds:F0} ms.");
                 if (_ownedMonitorDeviceName is { } deviceName)
                 {
                     var departing = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -282,20 +285,26 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
 
     private void StartKeepAlive()
     {
+        if (_watchdog is not null) return;
         var device = _device!;
-        var source = _keepAlive = new CancellationTokenSource();
-        _keepAliveLoop = Task.Run(async () =>
+        _watchdog = new DriverWatchdog(() =>
         {
-            // The driver's watchdog defaults to three seconds and reaps monitors that stop being pinged.
-            while (!source.IsCancellationRequested)
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            bool succeeded;
+            try { succeeded = SudoVdaDriver.Ping(device); }
+            catch (Exception ex)
             {
-                try { await Task.Delay(KeepAliveInterval, source.Token).ConfigureAwait(false); }
-                catch (OperationCanceledException) { return; }
-                if (!SudoVdaDriver.Ping(device))
-                    log?.Invoke("SudoVDA keepalive ping failed; the driver may drop the virtual display.");
-                RememberCurrentPosition();
+                log?.Invoke($"SudoVDA keepalive ping raised {ex.GetType().Name}: {ex.Message}");
+                return false;
             }
-        });
+            if (!succeeded)
+                log?.Invoke("SudoVDA keepalive ping failed after " +
+                    $"{System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F0} ms; " +
+                    "the driver may drop the virtual display.");
+            RememberCurrentPosition();
+            return succeeded;
+        }, KeepAliveInterval);
+        _watchdog.Start();
     }
 
     private void RememberCurrentPosition()
