@@ -65,11 +65,16 @@ public static class RemoteMountManagerTests
                     if (failEject) return ValueTask.FromException(new IOException("remote media is busy"));
                     current = [];
                     return ValueTask.CompletedTask;
-                });
+                },
+                mountPointFactory: (_, _, volume) => $"mount/{volume.Id}",
+                availabilityProbe: () => true);
             var run = manager.RunAsync(CancellationToken.None);
 
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 1);
+            Assert(manager.NativeMountsAvailable, "Injected native mount availability probe was ignored.");
             Equal(1, adapters.Count, "Initial removable volume mounted more than once.");
+            Equal("mount/sd-1", adapters[0].RequestedMountPoint,
+                "Remote mount manager did not pass the platform mount point to the native adapter.");
             Equal("Z:", manager.GetSnapshots()[0].MountPoint, "Mounted drive letter was not surfaced.");
             Equal("CAMERA_SD", manager.GetSnapshots()[0].VolumeName, "Original remote volume name was not retained in state.");
 
@@ -131,12 +136,49 @@ public static class RemoteMountManagerTests
             ];
             var exportMount = await manager.MountVolumeAsync(peerId, "PROJECTS", CancellationToken.None);
             Equal("export", exportMount.Kind, "Manual export mount lost its remote volume kind.");
+            Equal(6, adapters.Count, "Manual export mount did not create exactly one native mount.");
+
+            configuration.SetAutoMountRemoteRemovable(false);
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1);
+            Equal("export-projects", manager.GetSnapshots()[0].VolumeId,
+                "Disabling automatic removable mounts removed an explicitly requested export mount.");
+            Equal(1, adapters[4].UnmountCount,
+                "Disabling automatic removable mounts did not remove the automatic removable mount.");
+
+            configuration.SetAutoMountRemoteRemovable(true);
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 2 && adapters.Count == 7);
+            Assert(manager.GetSnapshots().Any(m => m.VolumeId == "export-projects"),
+                "Re-enabling automatic mounts removed the explicit export mount.");
+
+            session.Detach(PeerLane.Bulk, bulk);
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
+            Equal(1, adapters[5].UnmountCount, "Disconnect did not close the explicit export mount.");
+            Assert(await session.AttachAsync(PeerLane.Bulk, bulk), "Could not restore the test bulk lane.");
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 2 && adapters.Count == 9);
+            Assert(manager.GetSnapshots().Any(m => m.VolumeId == "export-projects"),
+                "Reconnect did not restore the explicit export mount.");
+
+            current = [current[0]];
+            session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(5));
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1);
+            Equal(1, adapters[7].UnmountCount, "Removing the remote export did not clear its manual mount.");
+            current =
+            [
+                current[0],
+                new RemoteVolume("export-projects", "PROJECTS", "export", false, 128_000_000, 96_000_000, "ext4")
+            ];
+            session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(6));
+            await Task.Delay(150);
+            Equal(1, manager.GetSnapshots().Count,
+                "A disappeared export retained stale manual intent and was mounted when it reappeared.");
+
+            await manager.MountVolumeAsync(peerId, "PROJECTS", CancellationToken.None);
             Assert(await manager.UnmountVolumeAsync(peerId, "PROJECTS", CancellationToken.None),
                 "Manual export unmount did not report an existing native mount.");
 
             session.Detach(PeerLane.Bulk, bulk);
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
-            Equal(1, adapters[4].UnmountCount, "Losing the bulk lane left a stale drive mounted.");
+            Equal(1, adapters[8].UnmountCount, "Losing the bulk lane left a stale drive mounted.");
 
             await manager.DisposeAsync();
             await run;
@@ -180,6 +222,7 @@ public static class RemoteMountManagerTests
         public bool IsAvailable => true;
         public string PlatformName => "FakeMount";
         public string? MountedAt { get; private set; }
+        public string? RequestedMountPoint { get; private set; }
         public int MountCount { get; private set; }
         public int UnmountCount { get; private set; }
 
@@ -188,6 +231,7 @@ public static class RemoteMountManagerTests
         {
             cancellationToken.ThrowIfCancellationRequested();
             MountCount++;
+            RequestedMountPoint = requestedMountPoint;
             MountedAt = mountPoint;
             return ValueTask.CompletedTask;
         }

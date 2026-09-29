@@ -1,5 +1,8 @@
 using System.Text;
 using Xas.Core;
+using Xas.Core.Protocol;
+using Xas.Core.Security;
+using Xas.Core.Services;
 using Xas.Daemon.Shell;
 
 namespace Xas.Tests;
@@ -11,6 +14,8 @@ public static class ShellTests
         await ExecPreservesArgumentsAsync();
         await CommandUsesHostShellAndReturnsStreamsAndExitCodeAsync();
         await ExecForwardsStandardInputAsync();
+        await ShortLivedCommandDoesNotWaitForOpenStandardInputAsync();
+        await CompletedCommandSessionsAreRemovedAndCloseIsIdempotentAsync();
         await RejectsInteractiveAndElevatedRequestsAsync();
         await CancellationStopsTheChildAsync();
     }
@@ -46,6 +51,68 @@ public static class ShellTests
         var result = await Run(request, Encoding.UTF8.GetBytes(inputText));
         Equal(0, result.ExitCode, "Input echo process should succeed.");
         Equal(inputText, result.Stdout, "Standard input was not forwarded unchanged.");
+    }
+
+    private static async Task ShortLivedCommandDoesNotWaitForOpenStandardInputAsync()
+    {
+        var command = OperatingSystem.IsWindows() ? "echo finished" : "printf finished";
+        using var stdin = new NeverEndingInputStream();
+        using var stdout = new MemoryStream();
+        using var stderr = new MemoryStream();
+        var run = new ProcessShellBackend().RunAsync(
+            new ShellRequest(ShellMode.Command, command, null, []), stdin, stdout, stderr, default);
+        try
+        {
+            var exitCode = await run.WaitAsync(TimeSpan.FromSeconds(5));
+            Equal(0, exitCode, "Short-lived command should succeed with an open input stream.");
+            Equal(OperatingSystem.IsWindows() ? "finished\r\n" : "finished",
+                Encoding.UTF8.GetString(stdout.ToArray()), "Output was lost while stopping input forwarding.");
+        }
+        catch (TimeoutException)
+        {
+            stdin.Stop();
+            try { await run; } catch (OperationCanceledException) { }
+            throw new Exception("The shell waited for stdin to close after the child exited.");
+        }
+    }
+
+    private static async Task CompletedCommandSessionsAreRemovedAndCloseIsIdempotentAsync()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "xas-shell-manager-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            var permissions = new PeerPermissionStore(directory);
+            permissions.SetAllowed("test-peer", Capability.Shell, true);
+            var exitSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var manager = new StreamingCommandManager("test-peer", permissions, (message, _) =>
+            {
+                if (message.Method == ShellExecWire.Exit) exitSent.TrySetResult();
+                return ValueTask.CompletedTask;
+            }, new ImmediateShellBackend());
+
+            var open = new ProtocolMessage(MessageKind.Request, 1, 0, ShellExecWire.Open,
+                ShellWire.EncodeRequest(new ShellRequest(ShellMode.Command, "ignored", null, [])));
+            var response = await manager.HandleRequestAsync(open, default);
+            var id = ShellExecWire.DecodeSessionId(response.Payload);
+            await exitSent.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(() => manager.ActiveSessionCount == 0);
+
+            var close = new ProtocolMessage(MessageKind.Request, 2, 0, ShellExecWire.Close,
+                ShellExecWire.EncodeSessionId(id));
+            Equal(MessageKind.Response, (await manager.HandleRequestAsync(close, default)).Kind,
+                "Closing an already completed session should succeed.");
+            Equal(MessageKind.Response, (await manager.HandleRequestAsync(close with { RequestId = 3 }, default)).Kind,
+                "Closing the same session twice should be harmless.");
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    private static async Task WaitUntilAsync(Func<bool> predicate)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+        while (!predicate() && DateTime.UtcNow < deadline) await Task.Delay(10);
+        Assert(predicate(), "The completed command session remained registered.");
     }
 
     private static async Task RejectsInteractiveAndElevatedRequestsAsync()
@@ -107,5 +174,37 @@ public static class ShellTests
     private static void Assert(bool condition, string message)
     {
         if (!condition) throw new Exception(message);
+    }
+
+    private sealed class NeverEndingInputStream : Stream
+    {
+        private readonly CancellationTokenSource _stop = new();
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public void Stop() => _stop.Cancel();
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            WaitAsync(cancellationToken);
+        private async ValueTask<int> WaitAsync(CancellationToken cancellationToken)
+        {
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
+            await Task.Delay(Timeout.InfiniteTimeSpan, linked.Token);
+            return 0;
+        }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing) { if (disposing) _stop.Dispose(); base.Dispose(disposing); }
+    }
+
+    private sealed class ImmediateShellBackend : IShellBackend
+    {
+        public bool SupportsInteractive => false;
+        public Task<int> RunAsync(ShellRequest request, Stream stdin, Stream stdout, Stream stderr,
+            CancellationToken cancellationToken) => Task.FromResult(0);
     }
 }

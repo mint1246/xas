@@ -322,6 +322,7 @@ public sealed class RemoteWinFspFileSystem : FileSystemBase
         try
         {
             if (fileDesc is not RemoteHandle handle) return STATUS_SUCCESS;
+            Await(ct => _remote.FlushAsync(handle.Path, handle.Directory, ct));
             fileInfo = ToFileInfo(Await(ct => _remote.StatAsync(handle.Path, ct)));
             return STATUS_SUCCESS;
         }

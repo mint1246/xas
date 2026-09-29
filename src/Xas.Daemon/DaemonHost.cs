@@ -25,6 +25,7 @@ public sealed class DaemonHost
     private readonly PeerPermissionStore _permissions;
     private readonly int _port;
     private readonly int _webPort;
+    private readonly bool _enableNativeOrchestration;
     private readonly LocalConfiguration _configuration;
     private readonly InputControlService _input;
     private readonly RequestDispatcher _dispatcher;
@@ -33,13 +34,14 @@ public sealed class DaemonHost
     public DaemonHost(DeviceIdentity identity, PeerTrustStore trust, PeerPermissionStore permissions,
         int port = XasProtocol.DefaultPort, IInputInjectionBackend? inputBackend = null,
         ITextClipboardBackend? clipboardBackend = null, IInputPipelineMetrics? inputMetrics = null,
-        LocalConfiguration? configuration = null, int webPort = 47832)
+        LocalConfiguration? configuration = null, int webPort = 47832, bool enableNativeOrchestration = true)
     {
         _identity = identity ?? throw new ArgumentNullException(nameof(identity));
         _trust = trust ?? throw new ArgumentNullException(nameof(trust));
         _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
         _port = port;
         _webPort = webPort;
+        _enableNativeOrchestration = enableNativeOrchestration;
         _configuration = configuration ?? new LocalConfiguration();
         _input = new InputControlService(permissions,
             inputBackend ?? (OperatingSystem.IsWindows() ? new WindowsSendInputBackend() :
@@ -73,7 +75,7 @@ public sealed class DaemonHost
         await using var pairing = new PairingService(_identity, _trust, checked(_port + 1), Environment.MachineName);
         var configuration = _configuration;
         var peerAdministration = new PeerAdministrationService(configuration, _trust, _permissions, PeerSessions);
-        RemoteMountManager? remoteMounts = OperatingSystem.IsWindows()
+        RemoteMountManager? remoteMounts = OperatingSystem.IsWindows() || OperatingSystem.IsLinux()
             ? new RemoteMountManager(configuration, PeerSessions, log: message => Console.Error.WriteLine(message))
             : null;
         await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, configuration,
@@ -92,12 +94,13 @@ public sealed class DaemonHost
             catch (SocketException ex) { Console.Error.WriteLine($"LAN discovery unavailable: {ex.Message}"); }
             await web.StartAsync(cancellationToken);
             localIpcTask = localIpc.RunAsync(daemonStop.Token);
-            if (OperatingSystem.IsWindows())
+            if (OperatingSystem.IsWindows() && _enableNativeOrchestration)
             {
                 kvmCoordinator = WindowsKvmCoordinator.RunAsync(configuration, PeerSessions, daemonStop.Token,
                     message => Console.Error.WriteLine(message));
-                remoteMountTask = remoteMounts!.RunAsync(daemonStop.Token);
             }
+            if (remoteMounts is not null && _enableNativeOrchestration)
+                remoteMountTask = remoteMounts.RunAsync(daemonStop.Token);
             Console.WriteLine($"xas daemon listening on TCP {_port}; device {_identity.DeviceId}");
             var clients = new HashSet<Task>();
             while (!cancellationToken.IsCancellationRequested)

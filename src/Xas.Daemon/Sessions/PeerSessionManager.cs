@@ -486,6 +486,26 @@ public sealed class PeerSessionManager : IAsyncDisposable
             };
         };
         protocol.Start();
+        TaskCompletionSource? lifetimeDisposal = null;
+        var lifetimeDisposalGate = new object();
+        using var lifetimeRegistration = token.Register(() =>
+        {
+            // The manager's shutdown snapshot can race with a connection being added.
+            // Dispose here as well so even a late connection cannot keep its reader alive.
+            TaskCompletionSource completion;
+            lock (lifetimeDisposalGate)
+                completion = lifetimeDisposal ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _ = DisposeForLifetimeAsync(completion);
+        });
+        async Task DisposeForLifetimeAsync(TaskCompletionSource completion)
+        {
+            try
+            {
+                await protocol.DisposeAsync().ConfigureAwait(false);
+                completion.TrySetResult();
+            }
+            catch (Exception ex) { completion.TrySetException(ex); }
+        }
         try
         {
             if (expectedLane is { } outboundLane)
@@ -504,6 +524,10 @@ public sealed class PeerSessionManager : IAsyncDisposable
                 await LoadPeerMetadataAsync(deviceId, session, protocol, token).ConfigureAwait(false);
             await protocol.Completion.ConfigureAwait(false);
         }
+        catch (ObjectDisposedException) when (token.IsCancellationRequested)
+        {
+            // Shutdown may dispose the protocol before a late lane reaches its handshake.
+        }
         finally
         {
             clipboardStop.Cancel();
@@ -513,6 +537,9 @@ public sealed class PeerSessionManager : IAsyncDisposable
             _connections.TryRemove(protocol, out _);
             if (attached) session.Detach(lane ?? PeerLane.Control, protocol);
             await protocol.DisposeAsync().ConfigureAwait(false);
+            Task? pendingLifetimeDisposal;
+            lock (lifetimeDisposalGate) pendingLifetimeDisposal = lifetimeDisposal?.Task;
+            if (pendingLifetimeDisposal is not null) await pendingLifetimeDisposal.ConfigureAwait(false);
         }
     }
 
@@ -627,8 +654,11 @@ public sealed class PeerSessionManager : IAsyncDisposable
             _discovery.PeerExpired -= OnPeerExpired;
             await _discovery.DisposeAsync().ConfigureAwait(false);
         }
-        try { await Task.WhenAll(_dialers.Values).ConfigureAwait(false); } catch (OperationCanceledException) { }
+        // Closing an established protocol is what releases RunConnectionAsync from its
+        // Completion wait. Dialers include that task, so close the tracked connections
+        // before joining them. Cancellation alone only stops pending connects/requests.
         foreach (var connection in _connections.Keys) await connection.DisposeAsync().ConfigureAwait(false);
+        try { await Task.WhenAll(_dialers.Values).ConfigureAwait(false); } catch (OperationCanceledException) { }
         foreach (var session in _sessions.Values)
         {
             await session.DisposeAsync().ConfigureAwait(false);

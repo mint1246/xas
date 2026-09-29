@@ -14,6 +14,8 @@ using Xas.Core.Security;
 using Xas.Core.Services;
 using Xas.Core.Transport;
 using Xas.Daemon;
+using Xas.Daemon.Sessions;
+using Xas.Daemon.Shell;
 
 namespace Xas.Tests;
 
@@ -44,7 +46,8 @@ public static class IntegrationTests
             var port = ReservePort();
             using var stop = new CancellationTokenSource();
             var daemon = new DaemonHost(serverIdentity, serverTrust, permissions, port,
-                inputBackend, remoteClipboard, configuration: daemonConfiguration, webPort: 0);
+                inputBackend, remoteClipboard, configuration: daemonConfiguration, webPort: 0,
+                enableNativeOrchestration: false);
             var serverTask = daemon.RunAsync(stop.Token);
             try
             {
@@ -153,6 +156,69 @@ public static class IntegrationTests
                 var inputExit = await pipedClient.RunShellAsync(inputRequest, null, CancellationToken.None);
                 Assert(inputExit == 0 && Encoding.UTF8.GetString(output.ToArray()) == "piped input\n",
                     "The CLI client did not forward binary standard input.");
+
+                using var ipcOutputA = new MemoryStream();
+                using var ipcOutputB = new MemoryStream();
+                using var ipcClientA = new LocalDaemonClient(Stream.Null, ipcOutputA, Stream.Null);
+                using var ipcClientB = new LocalDaemonClient(Stream.Null, ipcOutputB, Stream.Null);
+                await using var ipcInteractiveTls = await MutualTlsTransport.ConnectAsync("127.0.0.1", port,
+                    clientIdentity, clientTrust, serverIdentity.DeviceId, TimeSpan.FromSeconds(10));
+                await using var ipcInteractiveFrames = new BinaryFrameConnection(ipcInteractiveTls.Stream, leaveOpen: true);
+                var clientPermissions = new PeerPermissionStore(Path.Combine(root, "client-trust"));
+                clientPermissions.SetAllowed(serverIdentity.DeviceId, Capability.Shell, true);
+                var ipcShellBackend = new GatedIpcShellBackend();
+                await using var remoteShell = new StreamingCommandManager(serverIdentity.DeviceId,
+                    clientPermissions, ipcInteractiveFrames.SendAsync, ipcShellBackend);
+                await using var ipcInteractivePeer = new MultiplexedProtocolPeer(ipcInteractiveFrames,
+                    (request, token) => request.Method is ShellExecWire.Open or ShellExecWire.Close
+                        ? remoteShell.HandleRequestAsync(request, token)
+                        : ValueTask.FromException<ProtocolMessage>(new NotSupportedException()));
+                ipcInteractivePeer.MessageReceived += message => remoteShell.HandleMessageAsync(message);
+                _ = await ipcInteractivePeer.RequestAsync("session.lane.open",
+                    Encoding.UTF8.GetBytes(PeerLane.Interactive.ToString()), cancellationToken: CancellationToken.None);
+                var ipcRequestA = new ShellRequest(ShellMode.Exec, null, "dotnet",
+                    ["ipc-alpha"]);
+                var ipcRequestB = new ShellRequest(ShellMode.Exec, null, "dotnet",
+                    ["ipc-beta"]);
+                var ipcRun = Task.WhenAll(
+                    ipcClientA.RunShellAsync(ipcRequestA, clientIdentity.DeviceId, CancellationToken.None),
+                    ipcClientB.RunShellAsync(ipcRequestB, clientIdentity.DeviceId, CancellationToken.None));
+                await ipcShellBackend.BothCommandsStarted.WaitAsync(TimeSpan.FromSeconds(5));
+                await ipcInteractivePeer.SendAsync(new ProtocolMessage(MessageKind.Event, 0, 0,
+                    "peer.notice", Encoding.UTF8.GetBytes("unrelated control event")));
+                ipcShellBackend.ReleaseCommands();
+                var ipcResults = await ipcRun.WaitAsync(TimeSpan.FromSeconds(10));
+                Assert(ipcResults.SequenceEqual([0, 0]) &&
+                    Encoding.UTF8.GetString(ipcOutputA.ToArray()) == "ipc-alpha" &&
+                    Encoding.UTF8.GetString(ipcOutputB.ToArray()) == "ipc-beta",
+                    $"Concurrent bound IPC shell commands received unexpected data (exit {string.Join(',', ipcResults)}, " +
+                    $"A='{Encoding.UTF8.GetString(ipcOutputA.ToArray())}', B='{Encoding.UTF8.GetString(ipcOutputB.ToArray())}').");
+
+                using var blockedInput = new SynchronousBlockingInputStream();
+                using var blockedOutput = new MemoryStream();
+                using var blockedClient = new LocalDaemonClient(blockedInput, blockedOutput, Stream.Null);
+                Task<int>? blockedRun = null;
+                try
+                {
+                    blockedRun = Task.Run(() => blockedClient.RunShellAsync(
+                        new ShellRequest(ShellMode.Exec, null, "fake", ["ipc-blocked"]),
+                        clientIdentity.DeviceId, CancellationToken.None));
+                    await blockedInput.ReadStarted.WaitAsync(TimeSpan.FromSeconds(5));
+                    await ipcShellBackend.BlockedCommandStarted.WaitAsync(TimeSpan.FromSeconds(5));
+                    ipcShellBackend.ReleaseBlockedCommand();
+                    var blockedExit = await blockedRun.WaitAsync(TimeSpan.FromSeconds(5));
+                    Assert(blockedExit == 0 && Encoding.UTF8.GetString(blockedOutput.ToArray()) == "ipc-blocked" &&
+                        !blockedInput.IsReleased,
+                        "Local IPC shell completion waited for a synchronous stdin read to return.");
+                }
+                finally
+                {
+                    ipcShellBackend.ReleaseBlockedCommand();
+                    blockedInput.Release();
+                    if (blockedRun is not null)
+                        try { await blockedRun.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
+                    await blockedInput.ReadFinished.WaitAsync(TimeSpan.FromSeconds(5));
+                }
 
                 if (OperatingSystem.IsWindows())
                 {
@@ -266,6 +332,67 @@ public static class IntegrationTests
     private static void Assert(bool condition, string message)
     {
         if (!condition) throw new Exception(message);
+    }
+
+    private sealed class GatedIpcShellBackend : IShellBackend
+    {
+        private readonly TaskCompletionSource _bothStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _blockedStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _blockedRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _started;
+
+        public bool SupportsInteractive => false;
+        public Task BothCommandsStarted => _bothStarted.Task;
+        public Task BlockedCommandStarted => _blockedStarted.Task;
+        public void ReleaseCommands() => _release.TrySetResult();
+        public void ReleaseBlockedCommand() => _blockedRelease.TrySetResult();
+
+        public async Task<int> RunAsync(ShellRequest request, Stream stdin, Stream stdout, Stream stderr,
+            CancellationToken cancellationToken)
+        {
+            var blocked = request.Arguments?.LastOrDefault() == "ipc-blocked";
+            if (blocked) _blockedStarted.TrySetResult();
+            else if (Interlocked.Increment(ref _started) == 2) _bothStarted.TrySetResult();
+            await (blocked ? _blockedRelease.Task : _release.Task).WaitAsync(cancellationToken).ConfigureAwait(false);
+            var output = Encoding.UTF8.GetBytes(request.Arguments?.LastOrDefault() ?? string.Empty);
+            await stdout.WriteAsync(output, cancellationToken).ConfigureAwait(false);
+            return 0;
+        }
+    }
+
+    private sealed class SynchronousBlockingInputStream : Stream
+    {
+        private readonly ManualResetEventSlim _release = new();
+        private readonly TaskCompletionSource _readStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _readFinished = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task ReadStarted => _readStarted.Task;
+        public Task ReadFinished => _readFinished.Task;
+        public bool IsReleased => _release.IsSet;
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            _readStarted.TrySetResult();
+            _release.Wait(); // Models terminal FileStream reads that block before returning a ValueTask.
+            _readFinished.TrySetResult();
+            return ValueTask.FromResult(0);
+        }
+        public void Release() => _release.Set();
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { Release(); _release.Dispose(); }
+            base.Dispose(disposing);
+        }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
     private static async Task ExerciseWebUiAsync(Uri uiUri, LocalConfiguration configuration,

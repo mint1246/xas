@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XAS repair verification — 30 September 2026</title><style>
+:root{color-scheme:light;--ink:#182a35;--muted:#52636d;--line:#d6e0e3;--accent:#146e63}
+*{box-sizing:border-box}body{margin:0;background:#edf2f2;color:var(--ink);font:16px/1.55 system-ui,sans-serif}
+main{max-width:1120px;margin:40px auto;padding:38px;background:#fff;border:1px solid var(--line);border-radius:16px}
+.eyebrow{font-size:12px;text-transform:uppercase;letter-spacing:.15em;color:var(--accent);font-weight:700}
+h1{font-size:38px;line-height:1.12;margin:12px 0 20px}h2{font-size:23px;margin-top:32px}
+p{max-width:900px}a{color:var(--accent)}.checks{display:flex;gap:12px;flex-wrap:wrap;margin:25px 0}.checks div{padding:15px 20px;background:#eff7f4;border:1px solid #cce2d9;border-radius:10px}.checks strong{display:block;font-size:23px}
+.context{border-left:4px solid var(--accent);padding:14px 20px;background:#f4f8f8}
+table{border-collapse:collapse;width:100%;font-size:14px}th{text-align:left;color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em}td,th{padding:17px 12px;border-bottom:1px solid var(--line);vertical-align:top}td p{margin:8px 0 0}.id{background:#edf4f4;padding:4px 7px;border-radius:5px;white-space:nowrap}
+details{margin:12px 0;border:1px solid var(--line);border-radius:8px;padding:13px 16px}summary{cursor:pointer;font-weight:600}pre{font-size:12px;line-height:1.6;white-space:pre-wrap;overflow-wrap:anywhere;background:#f3f6f7;padding:15px;border-radius:6px}.foot{font-size:13px;color:var(--muted)}
+@media(max-width:700px){main{margin:0;padding:22px;border-radius:0}h1{font-size:30px}td,th{padding:12px 5px}table{font-size:12px}}@media print{body{background:#fff}main{border:0;margin:0;padding:0}details{break-inside:avoid}}
+</style></head><body><main>
+<div class="eyebrow">XAS · code review follow-up · 30 September 2026</div>
+<h1>Repair verification</h1>
+<p>The ten review findings have source fixes and regression coverage. The Linux interactive-input problem and one-shot command hang are also addressed. Existing workspace changes were preserved; ten <code>gpt-6-luna</code> agents worked on the repairs and tests.</p>
+<div class="checks"><div><strong>26</strong>selected Windows suites passed</div><div><strong>11</strong>selected Linux suites passed</div><div><strong>Passed</strong>isolated network integration and Linux PTY probe</div><div><strong>0</strong>build warnings or errors</div></div>
+<div class="context"><strong>The installed daemon and administrator broker service remain stopped.</strong><br>These changes have not been deployed to the executable in PATH. Monitor lifecycle checks use fake controllers and routers; the physical driver and live handoff have not been exercised. Network integration disables native KVM and mount orchestration.</div>
+<h2>Changes and evidence</h2>
+<table><thead><tr><th>Finding</th><th>Resulting behavior</th><th>Verification</th></tr></thead><tbody><tr><td><span class="id">R1</span></td><td><strong>CLI stream isolation</strong><p>Bound shell output is matched by protocol family and remote session ID. Buffered output keeps its order; failed local subscribers cannot terminate the shared peer.</p></td><td>LocalIpcShellForwardingTests; two concurrent bound commands in IntegrationTests.</td></tr><tr><td><span class="id">R2</span></td><td><strong>Peer shutdown</strong><p>Shutdown closes established connections before joining dialers. Each connection also observes lifetime cancellation, including late registration.</p></td><td>PeerSessionManagerTests: idle outbound lane and already-cancelled connection.</td></tr><tr><td><span class="id">R3</span></td><td><strong>Filesystem error semantics</strong><p>Filesystem errors carry structured codes. Native operations recover missing-path, access-denied, I/O and unsupported-operation exceptions; legacy text errors remain supported.</p></td><td>FileSystemTests: real protocol round trips and legacy decoding.</td></tr><tr><td><span class="id">R4</span></td><td><strong>Virtual monitor churn</strong><p>Input acquisition failures retry while retaining the monitor. Transient topology failures preserve ownership. Driver identities use the device name when hardware IDs are empty; asynchronous removal is confirmed before replacement.</p></td><td>HandoffLifecycleTests, WindowsTopologyTests and VirtualDisplayTests use fake hardware.</td></tr><tr><td><span class="id">R5</span></td><td><strong>Administrator broker lifetime</strong><p>Stdin EOF closes the child input while the broker keeps watching for disconnect. Service cancellation and stream failures terminate the owned child process tree.</p></td><td>BrokerServerTests: EOF with open pipe, disconnect after EOF, and service cancellation.</td></tr><tr><td><span class="id">R6</span></td><td><strong>Manual remote mounts</strong><p>Explicit mount intent survives automatic-mount settings and reconnects. Missing volumes or revoked access clear that intent.</p></td><td>RemoteMountManagerTests use fake adapters and cover setting changes, reconnects and disappearance.</td></tr><tr><td><span class="id">R7</span></td><td><strong>Durable filesystem flush</strong><p>Native flush/sync callbacks wait for fs.flush. Files flush to disk; Linux directories use fsync. Unsupported operations return errors instead of reporting success.</p></td><td>FileSystemTests and adapter tests; Linux directory flush exercised under WSL.</td></tr><tr><td><span class="id">R8</span></td><td><strong>Linux upgrades</strong><p>Binaries are staged and atomically replaced. Active daemons restart; inactive units are enabled and started. Failed installation or service operations return failure.</p></td><td>LinuxInstallerTests run with mocked systemctl: active/inactive units, failed restart/start, and failed staging.</td></tr><tr><td><span class="id">R9</span></td><td><strong>Web sessions</strong><p>Reloads reuse the browser session and CSRF token. Sessions expire and the store is bounded; opening another browser preserves existing sessions.</p></td><td>WebSessionTests cover reloads, independent browsers, expiry and eviction.</td></tr><tr><td><span class="id">R10</span></td><td><strong>Command close and cleanup</strong><p>Bound close requests reach the remote command, local disconnect closes owned sessions, and completed commands release their session resources automatically.</p></td><td>ShellTests and IPC helper/integration coverage.</td></tr><tr><td><span class="id">Linux</span></td><td><strong>Interactive echo and xas -c</strong><p>Terminal input bypasses .NET&#x27;s line reader through a duplicated file descriptor. Client input pumps run on the thread pool so synchronous terminal reads cannot block protocol setup. Size polling uses ioctl. One-shot commands stop stdin forwarding when the child exits, then drain stdout/stderr.</p></td><td>Linux ShellTests, blocking-input IPC integration, and a real PTY probe: exact input delivery without newline, no local echo, repeated size polling, and terminal restoration.</td></tr></tbody></table>
+<h2>Linux terminal diagnosis</h2>
+<p>On .NET 10.0.10, <code>Console.OpenStandardInput()</code> selects a line reader for terminal input. The controlled PTY probe reproduced local echo and delayed input until newline. Using a raw duplicated descriptor delivered every byte immediately without local echo. Terminal size polling now uses <code>TIOCGWINSZ</code>, avoiding child processes during the interactive session. The implementation is consistent with the <a href="https://github.com/dotnet/runtime/blob/v10.0.10/src/libraries/System.Console/src/System/ConsolePal.Unix.cs">.NET 10.0.10 Console source</a>.</p>
+<p>The one-shot command hang had two additional causes: the backend awaited stdin forwarding after its child exited, and a synchronously blocking terminal read could prevent the client from reaching its output wait. The backend now stops input forwarding and drains output before returning the exit code; clients start input pumps on the thread pool. An IPC regression confirms command completion while a simulated terminal read remains blocked.</p>
+<h2>Verification records</h2>
+<p>The solution and both daemon targets (<code>win-x64</code>, <code>linux-x64</code>) compiled without warnings or errors. Linux tests ran in the existing KVM-Linux-Build WSL distribution using an official .NET runtime whose SHA-512 matched Microsoft release metadata. Installer tests use a mock service manager; native filesystem mount tests use fake adapters.</p>
+<details><summary>Final solution build</summary><pre>  Xas.Core -&gt; C:\Users\mint\Documents\KVM\src\Xas.Core\bin\Debug\net10.0\Xas.Core.dll
+  Xas.Input -&gt; C:\Users\mint\Documents\KVM\src\Xas.Input\bin\Debug\net10.0\Xas.Input.dll
+  Xas.PrivilegedService -&gt; C:\Users\mint\Documents\KVM\src\Xas.PrivilegedService\bin\Debug\net10.0\Xas.PrivilegedService.dll
+  Xas.Cli -&gt; C:\Users\mint\Documents\KVM\src\Xas.Cli\bin\Debug\net10.0\xas.dll
+  Xas.Daemon -&gt; C:\Users\mint\Documents\KVM\src\Xas.Daemon\bin\Debug\net10.0\Xas.Daemon.dll
+  Xas.Tests -&gt; C:\Users\mint\Documents\KVM\tests\Xas.Tests\bin\Debug\net10.0\Xas.Tests.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.71
+</pre></details><details><summary>Windows regression suites</summary><pre>Running VirtualDisplayTests...
+Passed VirtualDisplayTests
+Passed 1 test suites.
+Running WindowsTopologyTests...
+Passed WindowsTopologyTests
+Passed 1 test suites.
+Running InputControlTests...
+Passed InputControlTests
+Passed 1 test suites.
+Running WindowsInputBackendTests...
+Passed WindowsInputBackendTests
+Passed 1 test suites.
+Running DisplayMetadataTests...
+Passed DisplayMetadataTests
+Passed 1 test suites.
+Running InputWireTests...
+Passed InputWireTests
+Passed 1 test suites.
+Running ProtocolTests...
+Passed ProtocolTests
+Passed 1 test suites.
+Running CliTests...
+Passed CliTests
+Passed 1 test suites.
+Running FileSystemTests...
+Passed FileSystemTests
+Passed 1 test suites.
+Running WinFspAdapterTests...
+Passed WinFspAdapterTests
+Passed 1 test suites.
+Running FuseCoreTests...
+Passed FuseCoreTests
+Passed 1 test suites.
+Running RemoteMountManagerTests...
+Passed RemoteMountManagerTests
+Passed 1 test suites.
+Running SecurityTests...
+Passed SecurityTests
+Passed 1 test suites.
+Running TransportTests...
+Passed TransportTests
+Passed 1 test suites.
+Running PairingTests...
+Passed PairingTests
+Passed 1 test suites.
+Running ShellTests...
+Passed ShellTests
+Passed 1 test suites.
+Running ClipboardSyncTests...
+Passed ClipboardSyncTests
+Passed 1 test suites.
+Running HandoffLifecycleTests...
+Passed HandoffLifecycleTests
+Passed 1 test suites.
+Running BrokerServerTests...
+Passed BrokerServerTests
+Passed 1 test suites.
+Running WebSessionTests...
+Passed WebSessionTests
+Passed 1 test suites.
+Running PeerSessionManagerTests...
+Passed PeerSessionManagerTests
+Passed 1 test suites.
+Running LocalIpcShellForwardingTests...
+Passed LocalIpcShellForwardingTests
+Passed 1 test suites.
+Running ConPtyTests...
+Passed ConPtyTests
+Passed 1 test suites.
+Running PtyTests...
+Passed PtyTests
+Passed 1 test suites.
+Running TerminalTests...
+Passed TerminalTests
+Passed 1 test suites.
+Running DiscoveryTests...
+Passed DiscoveryTests
+Passed 1 test suites.
+</pre></details><details><summary>Isolated network integration</summary><pre>Command: dotnet build tests/Xas.Tests/Xas.Tests.csproj --no-restore
+Result: Build succeeded with 0 warnings and 0 errors.
+
+Command: dotnet tests/Xas.Tests/bin/Debug/net10.0/Xas.Tests.dll --suite IntegrationTests
+Result: Passed IntegrationTests; Passed 1 test suites.
+The fixture disabled native orchestration. It covered concurrent bound IPC commands, an unsolicited peer event, and a terminal-like stdin stream whose ReadAsync blocks synchronously until released. RunShellAsync returned while that read remained blocked; cleanup released and observed the read.
+</pre></details><details><summary>Linux regression suites</summary><pre>Running LinuxInstallerTests...
+Passed LinuxInstallerTests
+Passed 1 test suites.
+Running FileSystemTests...
+Passed FileSystemTests
+Passed 1 test suites.
+Running ShellTests...
+Passed ShellTests
+Passed 1 test suites.
+Running FuseCoreTests...
+Passed FuseCoreTests
+Passed 1 test suites.
+Running WebSessionTests...
+Passed WebSessionTests
+Passed 1 test suites.
+Running RemoteMountManagerTests...
+Passed RemoteMountManagerTests
+Passed 1 test suites.
+Running PeerSessionManagerTests...
+Passed PeerSessionManagerTests
+Passed 1 test suites.
+Running LocalIpcShellForwardingTests...
+Passed LocalIpcShellForwardingTests
+Passed 1 test suites.
+Running ProtocolTests...
+Passed ProtocolTests
+Passed 1 test suites.
+Running HandoffLifecycleTests...
+Passed HandoffLifecycleTests
+Passed 1 test suites.
+Running TerminalTests...
+Passed TerminalTests
+Passed 1 test suites.
+</pre></details><details><summary>Linux PTY input and restoration</summary><pre>Linux interactive terminal investigation
+========================================
+
+Cause
+-----
+The Linux interactive clients previously passed Console.OpenStandardInput() after setting the terminal to raw mode. .NET 10.0.10&#x27;s Unix Console implementation wraps an attached stdin in an interactive line-reading stream, which applies console line/echo handling and therefore conflicts with raw terminal mode. In a PTY reproduction this yielded local echo and withheld input until line completion. The fix duplicates fd 0 and wraps the duplicate directly, bypassing Console&#x27;s line-reading layer. The duplicate is owned and disposed by each interactive client.
+
+The terminal-size loop also used `stty size` subprocesses. It now uses ioctl(TIOCGWINSZ), which reads dimensions without launching a process or touching terminal mode. The raw input pump is started on the thread pool because a synchronous Unix fd can block during ReadAsync before its first await; this keeps the protocol event loop live.
+
+Evidence
+--------
+Built a standalone Linux x64 PTY probe by linking the production TerminalMode.cs into tests/Terminal.PtyProbe. Ran it in the existing KVM-Linux-Build WSL distro; no daemon/service was started.
+
+Command:
+wsl.exe -d KVM-Linux-Build -- python3 /mnt/c/Users/mint/Documents/KVM/tests/Terminal.PtyProbe/pty_input_probe.py /mnt/c/Users/mint/Documents/KVM/artifacts/linux-terminal-probe/publish/TerminalProbe
+
+Result:
+- async input reader remained pending while session setup continued
+- exact byte sequence delivered: 81 / 81 (80 x bytes plus !), with no newline
+- locally echoed input bytes: 0
+- repeated terminal size checks while raw: 16
+- restored original PTY echo/canonical flags: True / True
+
+The standalone probe project and script are in tests/Terminal.PtyProbe. Its executable and generated publish output are ignored under artifacts/linux-terminal-probe.
+\x1b[?1h\x1b=\x1b[?1h\x1b=\x1b[?1h\x1b=READY echo=False canon=False
+asynchronous read stayed pending without blocking setup: True
+received input bytes: 81 / 81
+unframed locally echoed x bytes: 0
+size polls while raw: 16
+restored original echo/canonical flags: (&#x27;True&#x27;, &#x27;True&#x27;)
+transcript: &#x27;\x1b[?1h\x1b=\x1b[?1h\x1b=\x1b[?1h\x1b=READY echo=False canon=False\nREAD_PENDING True\nSIZE 1 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 2 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 3 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 4 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 5 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 6 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 7 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 8 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 9 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 10 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 11 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 12 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 13 echo=False c&#x27;
+</pre></details>
+<p class="foot">The <a href="code-review-2026-09-29.html">original review</a> remains a historical snapshot of the pre-fix source. Current regression suites are in <code>tests/</code>; the standalone terminal probe is in <code>tests/Terminal.PtyProbe/</code>. Build outputs, dependency caches and the nested checkout are ignored. Pending source and diagnostic-tool changes in the nested checkout were preserved in commit <code>91232d6</code> on <code>codex/preserved-displayfix</code>.</p>
+</main></body></html>

@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using Xas.Core;
+using Xas.Input;
 using Xas.Input.Display;
 
 namespace Xas.Tests;
@@ -20,6 +21,7 @@ public static class VirtualDisplayTests
         CheckModeRange();
         CheckNativeAndLogicalModes();
         CheckAttachmentShape();
+        CheckBlankHardwareIdIdentity();
         return Task.CompletedTask;
     }
 
@@ -105,6 +107,23 @@ public static class VirtualDisplayTests
         if (attachment.DeviceName != @"\\.\DISPLAY2" || attachment.MonitorHardwareId != hardwareId ||
             attachment.WidthPixels != 2560 || attachment.RefreshHertz != 60)
             throw new Exception("The attachment must report the GDI device name, monitor ID, and mode.");
+    }
+
+    private static void CheckBlankHardwareIdIdentity()
+    {
+        var first = new WindowsMonitor(@"\\.\DISPLAY5", string.Empty, string.Empty,
+            new WindowsCaptureRegion(-1920, 0, 0, 1080), SudoVdaDriver.AdapterHardwareId);
+        var second = first with { DeviceName = @"\\.\DISPLAY6" };
+        if (SudoVdaDisplayController.MonitorKey(first) == SudoVdaDisplayController.MonitorKey(second))
+            throw new Exception("Virtual monitors with blank hardware IDs must remain distinguishable by GDI device name.");
+        var published = first with { HardwareId = @"MONITOR\SMKD1CE\published" };
+        if (SudoVdaDisplayController.MonitorKey(first) != SudoVdaDisplayController.MonitorKey(published))
+            throw new Exception("A monitor gaining its hardware ID must not change its live SudoVDA identity.");
+        if (!WindowsMonitorTopology.MatchesIdentity(first, first.DeviceName, string.Empty) ||
+            WindowsMonitorTopology.MatchesIdentity(second, first.DeviceName, string.Empty))
+            throw new Exception("Blank monitor hardware IDs must fall back to exact GDI device-name identity.");
+        if (!WindowsMonitorTopology.MatchesIdentity(first, first.DeviceName, published.HardwareId))
+            throw new Exception("The GDI device name must remain authoritative while a saved hardware ID is transiently absent.");
     }
 
     private static void CheckNativeAndLogicalModes()

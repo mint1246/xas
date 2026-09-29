@@ -106,6 +106,8 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
         var exit = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
         async ValueTask OnMessage(ProtocolMessage message)
         {
+            if (message.Method is not (ShellExecWire.Stdout or ShellExecWire.Stderr or ShellExecWire.Exit or ShellExecWire.Error))
+                return;
             await eventGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -134,7 +136,10 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
             finally { eventGate.Release(); }
 
             using var pumpStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var inputTask = PumpStdinAsync(peer, sessionId, pumpStop.Token);
+            var pumpToken = pumpStop.Token;
+            // Reads from an attached Unix terminal can block synchronously even through
+            // ReadAsync. Let exit events complete independently of that stdin read.
+            var inputTask = Task.Run(() => PumpStdinAsync(peer, sessionId, pumpToken), pumpToken);
             var completed = await Task.WhenAny(exit.Task, inputTask, peer.Completion).ConfigureAwait(false);
             if (completed == inputTask)
             {
@@ -241,7 +246,8 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
             throw new XasClientException("Interactive shell requires an attached terminal.");
         using var terminal = TerminalMode.Enter();
         await using var connection = await LocalIpcConnection.ConnectAsync(deviceId, cancellationToken).ConfigureAwait(false);
-        return await InteractiveShellClient.RunOnPeerAsync(connection.Peer, Console.OpenStandardInput(), output,
+        using var terminalInput = TerminalMode.OpenInputStream();
+        return await InteractiveShellClient.RunOnPeerAsync(connection.Peer, terminalInput, output,
             (ushort)terminal.Columns, (ushort)terminal.Rows, cancellationToken, TerminalMode.CurrentSize, elevated).ConfigureAwait(false);
     }
     public async Task<int> CopyAsync(string source, string destination, bool recursive, bool overwrite, CancellationToken cancellationToken)

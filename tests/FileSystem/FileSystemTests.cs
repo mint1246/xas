@@ -5,6 +5,7 @@ using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Daemon.FileSystem;
 using Xas.Daemon.FileSystem.Mount;
+using System.Threading.Channels;
 
 public static class FileSystemTests
 {
@@ -39,6 +40,7 @@ public static class FileSystemTests
         catch (InvalidDataException) { }
         await RemoteClientUsesVolumeScopedRequests();
         await RemoteClientUsesBinaryWritesForVersion2();
+        await RemoteErrorsRetainFilesystemSemantics();
         await FileSystemExportsAreExplicitAndReadOnlyIsEnforced();
     }
 
@@ -66,6 +68,15 @@ public static class FileSystemTests
             var readReply = await service.HandleAsync("peer", new ProtocolMessage(MessageKind.Request, 2, 0, "fs.read",
                 RemoteFileSystemWire.Encode(new RemoteReadRange("export-docs", "hello.txt", 0, 5))), CancellationToken.None);
             Assert(System.Text.Encoding.UTF8.GetString(readReply.Payload) == "hello", "Explicit filesystem export could not be read.");
+            var flushReply = await service.HandleAsync("peer", new ProtocolMessage(MessageKind.Request, 4, 0, "fs.flush",
+                RemoteFileSystemWire.Encode(new RemoteFlushPath("export-docs", "hello.txt", false))), CancellationToken.None);
+            Assert(flushReply.Payload.Length == 0, "Filesystem service returned an invalid durable flush response.");
+            if (OperatingSystem.IsLinux())
+            {
+                var directoryFlush = await service.HandleAsync("peer", new ProtocolMessage(MessageKind.Request, 5, 0, "fs.flush",
+                    RemoteFileSystemWire.Encode(new RemoteFlushPath("export-docs", "", true))), CancellationToken.None);
+                Assert(directoryFlush.Payload.Length == 0, "Filesystem service returned an invalid directory flush response.");
+            }
 
             try
             {
@@ -94,7 +105,7 @@ public static class FileSystemTests
                 "fs.list" => RemoteFileSystemWire.Encode(new RemoteDirectoryPage([], false)),
                 "fs.read" => [1, 2, 3],
                 "fs.write" => RemoteFileSystemWire.Encode(new RemoteWriteResult(3)),
-                "fs.create" or "fs.delete" or "fs.rename" or "fs.truncate" or "fs.setinfo" => [],
+                "fs.create" or "fs.delete" or "fs.rename" or "fs.truncate" or "fs.setinfo" or "fs.flush" => [],
                 _ => throw new Exception("Unexpected filesystem method: " + method)
             };
             return ValueTask.FromResult(new ProtocolMessage(MessageKind.Response, 1, 0, method, response));
@@ -112,6 +123,7 @@ public static class FileSystemTests
         await client.RenameAsync("/folder/file.bin", "/folder/renamed.bin", false, CancellationToken.None);
         await client.SetLengthAsync("/folder/renamed.bin", 123, CancellationToken.None);
         await client.SetInfoAsync("/folder/renamed.bin", 10, 20, 30, true, CancellationToken.None);
+        await client.FlushAsync("/folder/renamed.bin", false, CancellationToken.None);
 
         var statRequest = RemoteFileSystemWire.Decode<RemotePath>(calls.Single(c => c.Method == "fs.stat").Payload);
         Assert(statRequest.VolumeId == "vol-test" && statRequest.Path == "folder/file.bin",
@@ -126,6 +138,82 @@ public static class FileSystemTests
         Assert(setInfo.Path == "folder/renamed.bin" && setInfo.CreationUnixMs == 10 && setInfo.LastAccessUnixMs == 20 &&
                setInfo.LastWriteUnixMs == 30 && setInfo.ReadOnly == true,
             "Filesystem client did not encode basic metadata updates correctly.");
+        var flush = RemoteFileSystemWire.Decode<RemoteFlushPath>(calls.Single(c => c.Method == "fs.flush").Payload);
+        Assert(flush.VolumeId == "vol-test" && flush.Path == "folder/renamed.bin" && !flush.Directory,
+            "Filesystem client did not encode the durable flush request correctly.");
+    }
+
+    private static async Task RemoteErrorsRetainFilesystemSemantics()
+    {
+        var (left, right) = InMemoryFrameConnection.CreatePair();
+        await using var clientPeer = new MultiplexedProtocolPeer(left,
+            (_, _) => ValueTask.FromException<ProtocolMessage>(new Exception("Unexpected request.")));
+        await using var serverPeer = new MultiplexedProtocolPeer(right, (request, _) =>
+            request.Method switch
+            {
+                "fs.stat" => ValueTask.FromException<ProtocolMessage>(new FileNotFoundException("missing")),
+                "fs.list" => ValueTask.FromException<ProtocolMessage>(new UnauthorizedAccessException("access denied")),
+                "fs.read" => ValueTask.FromException<ProtocolMessage>(new IOException("Destination exists")),
+                _ => ValueTask.FromResult(new ProtocolMessage(MessageKind.Error, 0, 0, request.Method,
+                    System.Text.Encoding.UTF8.GetBytes("legacy text")))
+            });
+        var client = new RemoteFileSystemOperationsClient("vol",
+            (method, payload, token) => clientPeer.RequestAsync(method, payload, cancellationToken: token));
+        try
+        {
+            await client.StatAsync("missing", CancellationToken.None);
+            throw new Exception("Remote missing-file response unexpectedly succeeded.");
+        }
+        catch (FileNotFoundException ex)
+        { Assert(ex.Message.Contains("missing", StringComparison.Ordinal), "Remote file error lost its message."); }
+
+        try
+        {
+            await client.ListAsync("folder", 0, CancellationToken.None);
+            throw new Exception("Remote access-denied response unexpectedly succeeded.");
+        }
+        catch (UnauthorizedAccessException ex)
+        { Assert(ex.Message.Contains("access denied", StringComparison.Ordinal), "Remote access-denied error lost its message."); }
+
+        try
+        {
+            await client.ReadAsync("file", 0, 1, CancellationToken.None);
+            throw new Exception("Remote I/O conflict unexpectedly succeeded.");
+        }
+        catch (IOException ex)
+        { Assert(ex.Message.Contains("exists", StringComparison.Ordinal), "Remote I/O conflict lost its message."); }
+
+        var legacy = new RemoteFileSystemOperationsClient("vol",
+            (method, payload, token) => clientPeer.RequestAsync("old." + method, payload, cancellationToken: token));
+        try
+        {
+            await legacy.StatAsync("missing", CancellationToken.None);
+            throw new Exception("Legacy remote error unexpectedly succeeded.");
+        }
+        catch (RemoteProtocolException) { }
+    }
+
+    private sealed class InMemoryFrameConnection : IFrameConnection
+    {
+        private readonly Channel<ProtocolMessage> _incoming;
+        private readonly Channel<ProtocolMessage> _outgoing;
+        private InMemoryFrameConnection(Channel<ProtocolMessage> incoming, Channel<ProtocolMessage> outgoing)
+        { _incoming = incoming; _outgoing = outgoing; }
+        public static (InMemoryFrameConnection Left, InMemoryFrameConnection Right) CreatePair()
+        {
+            var left = Channel.CreateUnbounded<ProtocolMessage>();
+            var right = Channel.CreateUnbounded<ProtocolMessage>();
+            return (new InMemoryFrameConnection(left, right), new InMemoryFrameConnection(right, left));
+        }
+        public ValueTask SendAsync(ProtocolMessage message, CancellationToken cancellationToken) =>
+            _outgoing.Writer.WriteAsync(message, cancellationToken);
+        public async ValueTask<ProtocolMessage?> ReceiveAsync(CancellationToken cancellationToken) =>
+            await _incoming.Reader.ReadAsync(cancellationToken);
+        public ValueTask DisposeAsync()
+        {
+            _outgoing.Writer.TryComplete();
+            return ValueTask.CompletedTask;
+        }
     }
 
     private static async Task RemoteClientUsesBinaryWritesForVersion2()

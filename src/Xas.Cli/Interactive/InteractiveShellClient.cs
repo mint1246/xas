@@ -59,6 +59,7 @@ public static class InteractiveShellClient
         using var sessionGate = new SemaphoreSlim(1, 1);
         peer.MessageReceived += async message =>
         {
+            if (message.Method is not ("shell.output" or "shell.exit")) return;
             await sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
@@ -88,7 +89,10 @@ public static class InteractiveShellClient
         finally { sessionGate.Release(); }
 
         using var inputCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var inputTask = PumpInputAsync(input, peer, sessionId, inputCancellation.Token);
+        var inputToken = inputCancellation.Token;
+        // A synchronous Unix terminal handle can block inside ReadAsync before its
+        // first await. Keep that read off the protocol event loop.
+        var inputTask = Task.Run(() => PumpInputAsync(input, peer, sessionId, inputToken), inputToken);
         var resizeTask = currentSize is null ? Task.Delay(Timeout.Infinite, inputCancellation.Token)
             : PumpResizeAsync(peer, sessionId, columns, rows, currentSize, inputCancellation.Token);
         try

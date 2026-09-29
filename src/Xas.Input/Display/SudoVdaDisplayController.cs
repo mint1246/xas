@@ -44,6 +44,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
     private readonly SemaphoreSlim _gate = new(1, 1);
     private SafeFileHandle? _device;
     private Guid? _ownedMonitorId;
+    private string? _ownedMonitorDeviceName;
     private string? _ownedMonitorHardwareId;
     private CancellationTokenSource? _keepAlive;
     private Task? _keepAliveLoop;
@@ -84,8 +85,11 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
             // driver tears a monitor down asynchronously, so remember which panels we are about to drop and
             // wait for those specific ones to leave the desktop before asking for another. A monitor owned
             // by another application is left alone rather than waited on.
-            var departing = _ownedMonitorHardwareId is { } ownedHardwareId
-                ? new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ownedHardwareId }
+            var departing = _ownedMonitorDeviceName is { } ownedDeviceName
+                ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    MonitorKey(ownedDeviceName, _ownedMonitorHardwareId)
+                }
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             await DetachCoreAsync().ConfigureAwait(false);
             await WaitForRemovalAsync(departing, cancellationToken).ConfigureAwait(false);
@@ -109,6 +113,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
                 ?? throw new TimeoutException(
                     $"Windows did not publish a {modeWidth}x{modeHeight} virtual monitor.");
             monitorId = created.MonitorId;
+            _ownedMonitorDeviceName = created.DeviceName;
             _ownedMonitorHardwareId = created.MonitorHardwareId;
             if (_preferredPosition is { } position)
             {
@@ -139,7 +144,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
         foreach (var record in records)
         {
             var current = VirtualMonitors().FirstOrDefault(m =>
-                m.HardwareId.Equals(record.HardwareId, StringComparison.OrdinalIgnoreCase));
+                WindowsMonitorTopology.MatchesIdentity(m, record.DeviceName, record.HardwareId));
             if (current is not null) _preferredPosition = (current.Region.Left, current.Region.Top);
             else if (record.Left is not null && record.Top is not null)
                 _preferredPosition = (record.Left.Value, record.Top.Value);
@@ -147,7 +152,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
             try
             {
                 SudoVdaDriver.Remove(device, record.MonitorId);
-                removed.Add(record.HardwareId);
+                removed.Add(MonitorKey(record.DeviceName, record.HardwareId));
                 log?.Invoke($"Removed a virtual display abandoned by an earlier run ({record.DeviceName}).");
             }
             catch (Win32Exception)
@@ -164,7 +169,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
         catch
         {
             // Keep identities in durable state until Windows confirms the corresponding monitors are gone.
-            WriteRecords([.. kept, .. records.Where(r => removed.Contains(r.HardwareId))]);
+            WriteRecords([.. kept, .. records.Where(r => removed.Contains(MonitorKey(r.DeviceName, r.HardwareId)))]);
             throw;
         }
     }
@@ -198,7 +203,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
     private void Remember(VirtualDisplayAttachment attachment)
     {
         var monitor = VirtualMonitors().FirstOrDefault(m =>
-            m.HardwareId.Equals(attachment.MonitorHardwareId, StringComparison.OrdinalIgnoreCase));
+            WindowsMonitorTopology.MatchesIdentity(m, attachment.DeviceName, attachment.MonitorHardwareId));
         if (monitor is not null) _preferredPosition = (monitor.Region.Left, monitor.Region.Top);
         WriteRecords([new(attachment.MonitorId, attachment.MonitorHardwareId, attachment.DeviceName,
             _preferredPosition?.Left, _preferredPosition?.Top)]);
@@ -211,7 +216,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
     private async Task<VirtualDisplayAttachment?> CreateAsync(SafeFileHandle device, DisplayMetadata display,
         int refreshHertz, Guid monitorId, CancellationToken cancellationToken)
     {
-        var before = VirtualMonitorIds();
+        var before = VirtualMonitorKeys();
         // Only claim identities after Add succeeds. A failed Add can mean another application owns a
         // monitor on this adapter; adopting it would make DetachAsync remove someone else's display.
             SudoVdaDriver.Add(device, monitorId, ResolveVirtualWidth(display), ResolveVirtualHeight(display),
@@ -258,11 +263,20 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
             try
             {
                 SudoVdaDriver.Remove(device, monitorId);
+                if (_ownedMonitorDeviceName is { } deviceName)
+                {
+                    var departing = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        MonitorKey(deviceName, _ownedMonitorHardwareId)
+                    };
+                    await WaitForRemovalAsync(departing, CancellationToken.None).ConfigureAwait(false);
+                }
                 Forget(monitorId);
             }
             catch (Win32Exception ex) { log?.Invoke($"Virtual display removal failed: {ex.Message}"); }
         }
         _ownedMonitorId = null;
+        _ownedMonitorDeviceName = null;
         _ownedMonitorHardwareId = null;
     }
 
@@ -286,14 +300,20 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
 
     private void RememberCurrentPosition()
     {
-        if (_ownedMonitorId is not { } monitorId || _ownedMonitorHardwareId is not { } hardwareId) return;
+        if (_ownedMonitorId is not { } monitorId || _ownedMonitorDeviceName is not { } deviceName) return;
+        var hardwareId = _ownedMonitorHardwareId ?? string.Empty;
         var monitor = VirtualMonitors().FirstOrDefault(m =>
-            m.HardwareId.Equals(hardwareId, StringComparison.OrdinalIgnoreCase));
+            WindowsMonitorTopology.MatchesIdentity(m, deviceName, hardwareId));
         if (monitor is null) return;
         var position = (monitor.Region.Left, monitor.Region.Top);
-        if (_preferredPosition == position) return;
+        var hardwareChanged = !string.IsNullOrWhiteSpace(monitor.HardwareId) &&
+            !monitor.HardwareId.Equals(hardwareId, StringComparison.OrdinalIgnoreCase);
+        if (!hardwareChanged && _preferredPosition == position) return;
+        if (hardwareChanged) _ownedMonitorHardwareId = monitor.HardwareId;
         _preferredPosition = position;
-        WriteRecords([new(monitorId, hardwareId, monitor.DeviceName, position.Left, position.Top)]);
+        WriteRecords([new(monitorId, _ownedMonitorHardwareId ?? string.Empty, monitor.DeviceName,
+            position.Left, position.Top)]);
+        if (hardwareChanged) log?.Invoke($"Virtual display hardware ID became available ({monitor.HardwareId}).");
         log?.Invoke($"Remembered virtual display position ({position.Left},{position.Top}).");
     }
 
@@ -337,8 +357,18 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
         var deadline = DateTime.UtcNow + AttachTimeout;
         while (true)
         {
-            var present = VirtualMonitorIds();
-            if (!departing.Overlaps(present)) return;
+            HashSet<string>? present = null;
+            try
+            {
+                present = [.. WindowsMonitorTopology.Enumerate()
+                    .Where(VirtualDisplayDrivers.IsVirtualMonitor).Select(MonitorKey)];
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
+            {
+                // A failed enumeration is not proof that the driver finished removing a monitor. Keep
+                // waiting so a replacement cannot race Windows' asynchronous topology update.
+            }
+            if (present is not null && !departing.Overlaps(present)) return;
             if (DateTime.UtcNow >= deadline)
                 throw new TimeoutException("The owned virtual display did not leave the desktop after removal.");
             cancellationToken.ThrowIfCancellationRequested();
@@ -348,7 +378,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
 
     /// <summary>Finds a monitor on the virtual adapter that was not present before the request.</summary>
     private static WindowsMonitor? FindNewMonitor(HashSet<string> before, DisplayMetadata display) =>
-        VirtualMonitors().FirstOrDefault(m => !before.Contains(m.HardwareId) &&
+        VirtualMonitors().FirstOrDefault(m => !before.Contains(MonitorKey(m)) &&
             m.Region.Right - m.Region.Left == ResolveVirtualWidth(display) &&
             m.Region.Bottom - m.Region.Top == ResolveVirtualHeight(display));
 
@@ -356,11 +386,16 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
     private static List<WindowsMonitor> VirtualMonitors()
     {
         try { return [.. WindowsMonitorTopology.Enumerate().Where(VirtualDisplayDrivers.IsVirtualMonitor)]; }
-        catch (InvalidOperationException) { return []; }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception) { return []; }
     }
 
-    private static HashSet<string> VirtualMonitorIds() =>
-        [.. VirtualMonitors().Select(m => m.HardwareId)];
+    private static HashSet<string> VirtualMonitorKeys() =>
+        [.. VirtualMonitors().Select(MonitorKey)];
+
+    internal static string MonitorKey(WindowsMonitor monitor) => MonitorKey(monitor.DeviceName, monitor.HardwareId);
+
+    internal static string MonitorKey(string deviceName, string? hardwareId) =>
+        $"dev:{deviceName}";
 
     /// <summary>Waits for the SudoVDA adapter to appear and returns its GDI device name.</summary>
     private static string ResolveAdapterDeviceName(CancellationToken cancellationToken)

@@ -1,0 +1,12 @@
+  Xas.Core -> C:\Users\mint\Documents\KVM\src\Xas.Core\bin\Debug\net10.0\Xas.Core.dll
+  Xas.Input -> C:\Users\mint\Documents\KVM\src\Xas.Input\bin\Debug\net10.0\Xas.Input.dll
+  Xas.PrivilegedService -> C:\Users\mint\Documents\KVM\src\Xas.PrivilegedService\bin\Debug\net10.0\Xas.PrivilegedService.dll
+  Xas.Cli -> C:\Users\mint\Documents\KVM\src\Xas.Cli\bin\Debug\net10.0\xas.dll
+  Xas.Daemon -> C:\Users\mint\Documents\KVM\src\Xas.Daemon\bin\Debug\net10.0\Xas.Daemon.dll
+  Xas.Tests -> C:\Users\mint\Documents\KVM\tests\Xas.Tests\bin\Debug\net10.0\Xas.Tests.dll
+
+Build succeeded.
+    0 Warning(s)
+    0 Error(s)
+
+Time Elapsed 00:00:02.71

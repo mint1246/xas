@@ -1,4 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType></PropertyGroup>
   <ItemGroup><ProjectReference Include="../Xas.Core/Xas.Core.csproj" /></ItemGroup>
+  <ItemGroup><InternalsVisibleTo Include="Xas.Tests" /></ItemGroup>
 </Project>

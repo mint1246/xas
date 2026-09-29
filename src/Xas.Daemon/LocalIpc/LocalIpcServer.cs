@@ -90,6 +90,7 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
     {
         await using var frames = new BinaryFrameConnection(stream, leaveOpen: true);
         var openShells = new ConcurrentDictionary<uint, ForwardedShell>();
+        var boundShellStreams = new BoundShellStreams(frames.SendAsync);
         PeerSession? boundSession = null;
         Func<PeerSession, PeerLane, ProtocolMessage, ValueTask>? boundHandler = null;
         uint nextShellId = 0;
@@ -102,7 +103,16 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
                     if (boundSession is not null) throw new InvalidOperationException("This local IPC connection is already bound to a device.");
                     var target = Resolve(ReadTarget(request.Payload).DeviceId) ?? throw new InvalidOperationException("No matching paired device.");
                     boundSession = _sessions.GetSession(target.DeviceId) ?? throw new IOException($"Device {target.DeviceId} is offline.");
-                    boundHandler = (_, _, message) => frames.SendAsync(message, CancellationToken.None);
+                    boundHandler = async (_, lane, message) =>
+                    {
+                        if (lane == PeerLane.Interactive && IsShellOutput(message))
+                        {
+                            try { await boundShellStreams.OnMessageAsync(message).ConfigureAwait(false); }
+                            catch (Exception) { /* A local IPC subscriber cannot terminate the shared peer session. */ }
+                            return;
+                        }
+                        await TrySendLocalAsync(frames.SendAsync, message).ConfigureAwait(false);
+                    };
                     boundSession.MessageReceived += boundHandler;
                     return Response(request, []);
                 }
@@ -137,11 +147,40 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
                         forwarded.Session.MessageReceived -= forwarded.OnRemoteMessageAsync;
                         await forwarded.DisposeAsync().ConfigureAwait(false);
                     }
+                    else if (boundSession is not null)
+                    {
+                        var closed = await boundSession.RequestAsync(PeerLane.Interactive, ShellExecWire.Close,
+                            request.Payload, token).ConfigureAwait(false);
+                        await boundShellStreams.RemoveAsync(localId, exec: true).ConfigureAwait(false);
+                        return closed;
+                    }
                     return new ProtocolMessage(MessageKind.Response, request.RequestId, request.StreamId,
                         request.Method, []);
                 }
                 if (boundSession is not null && !request.Method.StartsWith("local.", StringComparison.Ordinal))
-                    return await boundSession.RequestAsync(LaneFor(request.Method), request.Method, request.Payload, token).ConfigureAwait(false);
+                {
+                    var isShellOpen = request.Method is ShellExecWire.Open or "shell.open";
+                    if (isShellOpen) await boundShellStreams.BeginOpenAsync().ConfigureAwait(false);
+                    try
+                    {
+                        var response = await boundSession.RequestAsync(LaneFor(request.Method), request.Method,
+                            request.Payload, token).ConfigureAwait(false);
+                        if (isShellOpen)
+                        {
+                            var remoteId = ShellExecWire.DecodeSessionId(response.Payload);
+                            var exec = request.Method == ShellExecWire.Open;
+                            var closeMethod = exec ? ShellExecWire.Close : "shell.close";
+                            await boundShellStreams.CompleteOpenAsync(remoteId, exec, closeMethod).ConfigureAwait(false);
+                        }
+                        else if (request.Method == "shell.close")
+                            await boundShellStreams.RemoveAsync(ShellExecWire.DecodeSessionId(request.Payload), exec: false).ConfigureAwait(false);
+                        return response;
+                    }
+                    finally
+                    {
+                        if (isShellOpen) await boundShellStreams.EndOpenAsync().ConfigureAwait(false);
+                    }
+                }
                 return await DispatchRequestAsync(request, token).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException or InvalidOperationException or
@@ -164,13 +203,17 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
         finally
         {
             if (boundSession is not null && boundHandler is not null) boundSession.MessageReceived -= boundHandler;
+            if (boundSession is not null)
+                await boundShellStreams.CloseAllAsync(boundSession).ConfigureAwait(false);
             foreach (var item in openShells.Values)
             {
                 item.Session.MessageReceived -= item.OnRemoteMessageAsync;
-                try { await item.CloseAsync(CancellationToken.None).ConfigureAwait(false); } catch { }
+                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+                    try { await item.CloseAsync(timeout.Token).ConfigureAwait(false); } catch { }
                 await item.DisposeAsync().ConfigureAwait(false);
             }
             openShells.Clear();
+            await boundShellStreams.DisposeAsync().ConfigureAwait(false);
         }
     }
 
@@ -383,7 +426,7 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
     private ConfiguredPeer? Resolve(string? deviceId) => _configuration.Resolve(deviceId);
 
     private RemoteMountManager RequireRemoteMounts() => _remoteMounts
-        ?? throw new PlatformNotSupportedException("Native remote filesystem mounts are currently available on Windows only.");
+        ?? throw new PlatformNotSupportedException("Native remote filesystem mounts are unavailable on this platform.");
 
     private static LocalRemoteVolumeInfo ToLocalVolumeInfo(RemoteVolumeStatus item) =>
         new(item.DeviceId, item.DeviceName, item.Volume.Id, item.Volume.Name, item.Volume.Kind,
@@ -411,6 +454,18 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
         : method.StartsWith("shell.", StringComparison.Ordinal) ? PeerLane.Interactive
         : PeerLane.Control;
 
+    private static bool IsShellOutput(ProtocolMessage message) =>
+        message.Method is (ShellExecWire.Stdout or ShellExecWire.Stderr or ShellExecWire.Exit or ShellExecWire.Error or
+            "shell.output" or "shell.exit") &&
+        message.Kind is (MessageKind.StreamData or MessageKind.StreamEnd or MessageKind.Event);
+
+    private static async ValueTask TrySendLocalAsync(
+        Func<ProtocolMessage, CancellationToken, ValueTask> sendLocal, ProtocolMessage message)
+    {
+        try { await sendLocal(message, CancellationToken.None).ConfigureAwait(false); }
+        catch (Exception) { }
+    }
+
     private static LocalTarget ReadTarget(byte[] payload) => payload.Length == 0
         ? new LocalTarget(null)
         : JsonSerializer.Deserialize<LocalTarget>(payload, LocalIpcProtocol.Json) ?? throw new InvalidDataException("Invalid device target.");
@@ -421,6 +476,129 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
 
     private static ProtocolMessage Response(ProtocolMessage request, byte[] payload) =>
         new(MessageKind.Response, request.RequestId, request.StreamId, request.Method, payload);
+
+    internal sealed class BoundShellStreams(
+        Func<ProtocolMessage, CancellationToken, ValueTask> sendLocal) : IAsyncDisposable
+    {
+        private const int MaxEarlyBytes = 1024 * 1024;
+        private readonly SemaphoreSlim _gate = new(1, 1);
+        private readonly Dictionary<BoundShellKey, string> _remoteIds = [];
+        private readonly Queue<ProtocolMessage> _early = new();
+        private readonly HashSet<BoundShellKey> _overflowed = [];
+        private int _opening;
+        private int _earlyBytes;
+
+        public async Task BeginOpenAsync()
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try { _opening++; }
+            finally { _gate.Release(); }
+        }
+
+        public async Task CompleteOpenAsync(uint remoteId, bool exec, string closeMethod)
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var key = new BoundShellKey(exec, remoteId);
+                _remoteIds[key] = closeMethod;
+                var unmatched = new Queue<ProtocolMessage>();
+                while (_early.TryDequeue(out var message))
+                {
+                    if (KeyFor(message) == key) await TrySendLocalAsync(sendLocal, message).ConfigureAwait(false);
+                    else unmatched.Enqueue(message);
+                }
+                while (unmatched.TryDequeue(out var message)) _early.Enqueue(message);
+                _earlyBytes = _early.Sum(message => message.Payload.Length);
+                if (_overflowed.Remove(key))
+                {
+                    var failure = exec
+                        ? new ProtocolMessage(MessageKind.Event, 0, remoteId, ShellExecWire.Error,
+                            Encoding.UTF8.GetBytes("Too much shell output arrived before the open response."))
+                        : new ProtocolMessage(MessageKind.Event, 0, remoteId, "shell.exit",
+                            ShellExecWire.EncodeExitCode(-1));
+                    await TrySendLocalAsync(sendLocal, failure).ConfigureAwait(false);
+                }
+            }
+            finally { _gate.Release(); }
+        }
+
+        public async Task EndOpenAsync()
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                _opening--;
+                if (_opening == 0) { _early.Clear(); _earlyBytes = 0; }
+            }
+            finally { _gate.Release(); }
+        }
+
+        public async ValueTask OnMessageAsync(ProtocolMessage message)
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                var key = KeyFor(message);
+                if (_remoteIds.ContainsKey(key))
+                {
+                    await TrySendLocalAsync(sendLocal, message).ConfigureAwait(false);
+                    return;
+                }
+                if (_opening == 0) return;
+                _earlyBytes = checked(_earlyBytes + message.Payload.Length);
+                if (_earlyBytes > MaxEarlyBytes)
+                {
+                    foreach (var pending in _early) MarkOverflow(KeyFor(pending));
+                    _early.Clear();
+                    _earlyBytes = 0;
+                    MarkOverflow(key);
+                    return;
+                }
+                _early.Enqueue(message);
+            }
+            finally { _gate.Release(); }
+        }
+
+        public async Task RemoveAsync(uint remoteId, bool exec)
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try { _remoteIds.Remove(new BoundShellKey(exec, remoteId)); }
+            finally { _gate.Release(); }
+        }
+
+        public async Task CloseAllAsync(PeerSession session)
+        {
+            KeyValuePair<BoundShellKey, string>[] ids;
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try { ids = _remoteIds.ToArray(); _remoteIds.Clear(); }
+            finally { _gate.Release(); }
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            foreach (var item in ids)
+            {
+                try
+                {
+                    _ = await session.RequestAsync(PeerLane.Interactive, item.Value,
+                        ShellExecWire.EncodeSessionId(item.Key.Id), timeout.Token).ConfigureAwait(false);
+                }
+                catch (Exception) { }
+            }
+        }
+
+        private static BoundShellKey KeyFor(ProtocolMessage message) =>
+            new(message.Method is ShellExecWire.Stdout or ShellExecWire.Stderr or ShellExecWire.Exit or ShellExecWire.Error,
+                message.StreamId);
+
+        private void MarkOverflow(BoundShellKey key)
+        {
+            if (_overflowed.Count < 64) _overflowed.Add(key);
+        }
+
+        internal readonly record struct BoundShellKey(bool Exec, uint Id);
+
+        public ValueTask DisposeAsync() { _gate.Dispose(); return ValueTask.CompletedTask; }
+    }
 
     private sealed class ForwardedShell(PeerSession session, uint localId,
         Func<ProtocolMessage, CancellationToken, ValueTask> sendLocal) : IAsyncDisposable
@@ -435,19 +613,24 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
         public async ValueTask OnRemoteMessageAsync(PeerSession _, PeerLane lane, ProtocolMessage message)
         {
             if (lane != PeerLane.Interactive || message.Method is not (ShellExecWire.Stdout or ShellExecWire.Stderr or ShellExecWire.Exit or ShellExecWire.Error)) return;
-            await _gate.WaitAsync().ConfigureAwait(false);
+            var entered = false;
             try
             {
+                await _gate.WaitAsync().ConfigureAwait(false);
+                entered = true;
                 if (_remoteId == 0)
                 {
+                    if (message.StreamId == 0) return;
                     _earlyBytes = checked(_earlyBytes + message.Payload.Length);
                     if (_earlyBytes > 1024 * 1024) throw new InvalidDataException("Too much shell output arrived before the open response.");
                     _early.Enqueue(message);
                     return;
                 }
+                if (message.StreamId != _remoteId) return;
                 await ForwardAsync(message).ConfigureAwait(false);
             }
-            finally { _gate.Release(); }
+            catch (Exception) { /* A disconnected local subscriber cannot terminate the shared peer session. */ }
+            finally { if (entered) _gate.Release(); }
         }
 
         public async Task SetRemoteId(uint remoteId)
@@ -456,7 +639,8 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
             try
             {
                 _remoteId = remoteId;
-                while (_early.TryDequeue(out var message)) await ForwardAsync(message).ConfigureAwait(false);
+                while (_early.TryDequeue(out var message))
+                    if (message.StreamId == remoteId) await ForwardAsync(message).ConfigureAwait(false);
             }
             finally { _gate.Release(); }
         }
@@ -472,7 +656,8 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
             _ = await Session.RequestAsync(PeerLane.Interactive, ShellExecWire.Close,
                 ShellExecWire.EncodeSessionId(_remoteId), token).ConfigureAwait(false);
 
-        private ValueTask ForwardAsync(ProtocolMessage message) => sendLocal(message with { RequestId = 0, StreamId = localId }, CancellationToken.None);
+        private ValueTask ForwardAsync(ProtocolMessage message) => TrySendLocalAsync(sendLocal,
+            message with { RequestId = 0, StreamId = localId });
 
         public ValueTask DisposeAsync() { _gate.Dispose(); return ValueTask.CompletedTask; }
     }

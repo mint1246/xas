@@ -29,8 +29,7 @@ internal sealed class DaemonWebHost : IAsyncDisposable
     private readonly RemoteMountManager? _remoteMounts;
     private readonly TcpListener _listener;
     private readonly CancellationTokenSource _stop = new();
-    private readonly Dictionary<string, string> _csrfBySession = new(StringComparer.Ordinal);
-    private readonly object _sessionGate = new();
+    private readonly WebSessionStore _webSessions = new();
     private Task? _acceptLoop;
 
     public DaemonWebHost(PeerSessionManager sessions, PeerTrustStore trust, PeerPermissionStore permissions,
@@ -100,13 +99,8 @@ internal sealed class DaemonWebHost : IAsyncDisposable
                 { await RespondAsync(stream, 403, "text/plain", "Forbidden", null, token); return; }
                 if (request.Method == "GET" && request.Path == "/")
                 {
-                    var sid = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-                    var csrf = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
-                    lock (_sessionGate)
-                    {
-                        _csrfBySession.Clear();
-                        _csrfBySession[sid] = csrf;
-                    }
+                    var sid = GetSessionId(request);
+                    var csrf = _webSessions.GetOrCreate(sid);
                     var headers = new Dictionary<string, string> { ["Set-Cookie"] = $"{CookieName}={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800" };
                     await RespondAsync(stream, 200, "text/html; charset=utf-8", RenderPage(csrf), headers, token);
                     return;
@@ -136,7 +130,7 @@ internal sealed class DaemonWebHost : IAsyncDisposable
                         .Select(c => c.ToString()).ToArray();
                     var storage = new
                     {
-                        NativeMountsAvailable = _remoteMounts is not null,
+                        NativeMountsAvailable = _remoteMounts?.NativeMountsAvailable ?? false,
                         AutoExposeRemovable = _configuration.AutoExposeRemovable,
                         AutoMountRemoteRemovable = _configuration.AutoMountRemoteRemovable,
                         Exports = _configuration.FileSystemExports,
@@ -269,16 +263,23 @@ internal sealed class DaemonWebHost : IAsyncDisposable
         var cookie = cookieHeader.Split(';', StringSplitOptions.TrimEntries).FirstOrDefault(v => v.StartsWith(CookieName + "=", StringComparison.Ordinal));
         if (cookie is null) return false;
         var sessionId = cookie[(CookieName.Length + 1)..];
-        lock (_sessionGate)
+        return request.Headers.TryGetValue("x-xas-csrf", out var provided) && _webSessions.IsValid(sessionId, provided);
+    }
+
+    private static string GetSessionId(Request request)
+    {
+        if (request.Headers.TryGetValue("cookie", out var header))
         {
-            if (!_csrfBySession.TryGetValue(sessionId, out var expected)) return false;
-            return request.Headers.TryGetValue("x-xas-csrf", out var provided) &&
-                CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(provided));
+            var cookie = header.Split(';', StringSplitOptions.TrimEntries)
+                .FirstOrDefault(value => value.StartsWith(CookieName + "=", StringComparison.Ordinal));
+            var sid = cookie?[(CookieName.Length + 1)..];
+            if (sid is { Length: 64 } && sid.All(Uri.IsHexDigit)) return sid;
         }
+        return Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
     }
 
     private RemoteMountManager RequireRemoteMounts() => _remoteMounts
-        ?? throw new PlatformNotSupportedException("Native remote filesystem mounts are currently available on Windows only.");
+        ?? throw new PlatformNotSupportedException("Native remote filesystem mounts are unavailable on this platform.");
 
     private static bool IsStorageUserError(Exception ex) => ex is IOException or InvalidDataException or
         InvalidOperationException or ArgumentException or NotSupportedException or UnauthorizedAccessException or RemoteProtocolException;
@@ -355,7 +356,7 @@ internal sealed class DaemonWebHost : IAsyncDisposable
 <section id="devices" class="panel active"><div id="device-list">Loading…</div></section>
 <section id="storage" class="panel">
   <div class="grid">
-    <div class="card"><h2>Storage behavior</h2><label class="row"><input id="auto-expose" type="checkbox"> Expose local removable drives to permitted peers</label><label class="row"><input id="auto-mount" type="checkbox"> Automatically mount remote removable drives on Windows</label><small id="mount-support"></small></div>
+    <div class="card"><h2>Storage behavior</h2><label class="row"><input id="auto-expose" type="checkbox"> Expose local removable drives to permitted peers</label><label class="row"><input id="auto-mount" type="checkbox"> Automatically mount remote removable drives natively</label><small id="mount-support"></small></div>
     <div class="card"><h2>Current remote mounts</h2><div id="mount-list" class="muted">None.</div></div>
   </div>
   <div class="card"><div class="row between"><div><h2>Remote volumes</h2><small>Choose a peer to query its currently exported volumes.</small></div><div class="row"><select id="storage-peer"></select><button id="load-volumes">Refresh volumes</button></div></div><div id="volume-list" class="muted">Choose a peer.</div></div>
@@ -373,7 +374,7 @@ function switchTab(name){activeTab=name;$('#devices').classList.toggle('active',
 $('#tab-devices').onclick=()=>switchTab('devices');$('#tab-storage').onclick=()=>switchTab('storage');
 function renderDevices(){const root=$('#device-list');root.replaceChildren();for(const p of state.peers){const a=document.createElement('article');a.innerHTML='<h2></h2><small></small><div class="caps"></div><button class="revoke danger">Revoke pairing</button>';a.querySelector('h2').textContent=p.Name+' · '+(p.Online?'online':'offline');a.querySelector('small').textContent=p.DeviceId+' · '+(p.Paired?'paired':'not paired')+(p.Endpoint?' · '+p.Endpoint:'');const caps=a.querySelector('.caps');for(const c of state.capabilities){const label=document.createElement('label');label.className='cap';const input=document.createElement('input');input.type='checkbox';input.checked=p.Permissions[c];input.onchange=async()=>{try{await api('/api/permission',{deviceId:p.DeviceId,capability:c,allowed:input.checked});setStatus('Permission updated.')}catch(e){input.checked=!input.checked;setStatus(e.message,true)}};label.append(input,document.createTextNode(c));caps.append(label)}a.querySelector('.revoke').onclick=async()=>{try{await api('/api/revoke',{deviceId:p.DeviceId});await refresh(true);setStatus('Pairing revoked.')}catch(e){setStatus(e.message,true)}};root.append(a)}for(const q of state.pending){const a=document.createElement('article');a.className='pending';a.innerHTML='<h2></h2><p></p><button data-preset="personal">Pair personal device</button> <button data-preset="kvm">KVM only</button> <button data-preset="none">Trust only</button> <button data-reject>Reject</button>';a.querySelector('h2').textContent='Pairing request: '+q.DisplayName;a.querySelector('p').textContent='Compare code on both devices: '+q.Code;a.querySelectorAll('button[data-preset]').forEach(b=>b.onclick=()=>decide(q.PairingId,true,b.dataset.preset));a.querySelector('button[data-reject]').onclick=()=>decide(q.PairingId,false,'none');root.prepend(a)}if(!root.children.length)root.textContent='No paired or discovered devices yet.'}
 async function decide(id,approve,preset){try{await api('/api/pairing/decision',{pairingId:id,approve,preset});await refresh(true);setStatus(approve?'Pairing approved.':'Pairing rejected.')}catch(e){setStatus(e.message,true)}}
-function renderStorage(){const s=state.storage;$('#auto-expose').checked=s.AutoExposeRemovable;$('#auto-mount').checked=s.AutoMountRemoteRemovable;$('#auto-mount').disabled=!s.NativeMountsAvailable;$('#mount-support').textContent=s.NativeMountsAvailable?'Native Windows remote mounts are available.':'Native remote mounts are unavailable on this platform.';const mounts=$('#mount-list');mounts.replaceChildren();if(!s.Mounts.length)mounts.textContent='No remote volumes mounted.';for(const m of s.Mounts){const d=document.createElement('div');d.className='volume';d.innerHTML='<div><strong></strong><div class="muted meta"></div></div><div class="mountpoint"></div>';d.querySelector('strong').textContent=m.VolumeName+' · '+m.DeviceName;d.querySelector('.meta').textContent=`${m.Kind} · ${m.ReadOnly?'read-only':'read/write'} · ${bytes(m.TotalBytes)} · ${m.FileSystem||'unknown fs'}`;d.querySelector('.mountpoint').textContent=m.MountPoint||'?';mounts.append(d)}const peers=state.peers.filter(p=>p.Paired);const select=$('#storage-peer');const previous=selectedPeer;select.replaceChildren();for(const p of peers){const o=document.createElement('option');o.value=p.DeviceId;o.textContent=p.Name+(p.Online?'':' (offline)');select.append(o)}selectedPeer=peers.some(p=>p.DeviceId===previous)?previous:(peers[0]?.DeviceId||null);if(selectedPeer)select.value=selectedPeer;const exports=$('#export-list');exports.replaceChildren();if(!s.Exports.length){const d=document.createElement('div');d.className='muted';d.textContent='No explicit exports configured.';exports.append(d)}for(const x of s.Exports){const d=document.createElement('div');d.className='volume';d.innerHTML='<div><strong></strong><div class="muted meta"></div></div><button class="danger">Remove</button>';d.querySelector('strong').textContent=x.Name;d.querySelector('.meta').textContent=`${x.Id} · ${x.Path} · ${x.ReadOnly?'read-only':'read/write'}`;d.querySelector('button').onclick=async()=>{try{await api('/api/storage/export/remove',{id:x.Id});await refresh(true);setStatus('Export removed.')}catch(e){setStatus(e.message,true)}};exports.append(d)}}
+function renderStorage(){const s=state.storage;$('#auto-expose').checked=s.AutoExposeRemovable;$('#auto-mount').checked=s.AutoMountRemoteRemovable;$('#auto-mount').disabled=!s.NativeMountsAvailable;$('#mount-support').textContent=s.NativeMountsAvailable?'Native remote mounts are available on this system.':'Native remote mounts are unavailable; install/configure the platform mount provider.';const mounts=$('#mount-list');mounts.replaceChildren();if(!s.Mounts.length)mounts.textContent='No remote volumes mounted.';for(const m of s.Mounts){const d=document.createElement('div');d.className='volume';d.innerHTML='<div><strong></strong><div class="muted meta"></div></div><div class="mountpoint"></div>';d.querySelector('strong').textContent=m.VolumeName+' · '+m.DeviceName;d.querySelector('.meta').textContent=`${m.Kind} · ${m.ReadOnly?'read-only':'read/write'} · ${bytes(m.TotalBytes)} · ${m.FileSystem||'unknown fs'}`;d.querySelector('.mountpoint').textContent=m.MountPoint||'?';mounts.append(d)}const peers=state.peers.filter(p=>p.Paired);const select=$('#storage-peer');const previous=selectedPeer;select.replaceChildren();for(const p of peers){const o=document.createElement('option');o.value=p.DeviceId;o.textContent=p.Name+(p.Online?'':' (offline)');select.append(o)}selectedPeer=peers.some(p=>p.DeviceId===previous)?previous:(peers[0]?.DeviceId||null);if(selectedPeer)select.value=selectedPeer;const exports=$('#export-list');exports.replaceChildren();if(!s.Exports.length){const d=document.createElement('div');d.className='muted';d.textContent='No explicit exports configured.';exports.append(d)}for(const x of s.Exports){const d=document.createElement('div');d.className='volume';d.innerHTML='<div><strong></strong><div class="muted meta"></div></div><button class="danger">Remove</button>';d.querySelector('strong').textContent=x.Name;d.querySelector('.meta').textContent=`${x.Id} · ${x.Path} · ${x.ReadOnly?'read-only':'read/write'}`;d.querySelector('button').onclick=async()=>{try{await api('/api/storage/export/remove',{id:x.Id});await refresh(true);setStatus('Export removed.')}catch(e){setStatus(e.message,true)}};exports.append(d)}}
 async function saveStorageSettings(){try{await api('/api/storage/settings',{autoExposeRemovable:$('#auto-expose').checked,autoMountRemoteRemovable:$('#auto-mount').checked});await refresh(true);setStatus('Storage settings updated.')}catch(e){setStatus(e.message,true)}}
 $('#auto-expose').onchange=saveStorageSettings;$('#auto-mount').onchange=saveStorageSettings;$('#storage-peer').onchange=e=>{selectedPeer=e.target.value};
 async function loadVolumes(){if(!selectedPeer){$('#volume-list').textContent='No paired peer selected.';return}const root=$('#volume-list');root.textContent='Loading…';try{const volumes=await api('/api/storage/volumes',{deviceId:selectedPeer});root.replaceChildren();if(!volumes.length){root.textContent='This peer is not exposing any volumes.';return}for(const v of volumes){const d=document.createElement('div');d.className='volume';d.innerHTML='<div><strong></strong><div class="muted meta"></div></div><div class="actions"></div>';d.querySelector('strong').textContent=v.Volume.Name;const stateText=v.MountedAt?`mounted at ${v.MountedAt}`:(v.AutoMountSuppressed?'unmounted · auto-remount suppressed':'available');d.querySelector('.meta').textContent=`${v.Volume.Kind} · ${v.Volume.ReadOnly?'read-only':'read/write'} · ${bytes(v.Volume.TotalBytes)} total · ${bytes(v.Volume.FreeBytes)} free · ${v.Volume.FileSystem||'unknown fs'} · ${stateText}`;const actions=d.querySelector('.actions');const mount=document.createElement('button');mount.textContent=v.MountedAt?'Unmount':'Mount';mount.onclick=()=>storageAction(v.MountedAt?'unmount':'mount',v.Volume.Id);actions.append(mount);if(v.Volume.Kind==='removable'){const eject=document.createElement('button');eject.textContent='Eject';eject.className='danger';eject.onclick=()=>storageAction('eject',v.Volume.Id);actions.append(eject)}root.append(d)}}catch(e){root.textContent='';setStatus(e.message,true)}}
@@ -395,4 +396,52 @@ refresh(true).catch(e=>setStatus(e.message,true));setInterval(()=>refresh(false)
     private sealed record StorageVolumeRequest(string DeviceId, string Volume);
     private sealed record StorageExportRequest(string Id, string Path, string Name, bool ReadOnly);
     private sealed record StorageExportRemoveRequest(string Id);
+}
+
+internal sealed class WebSessionStore
+{
+    private const int MaxSessions = 256;
+    private static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(30);
+    private readonly Dictionary<string, Entry> _sessions = new(StringComparer.Ordinal);
+    private readonly object _gate = new();
+
+    internal string GetOrCreate(string sessionId) => GetOrCreate(sessionId, DateTimeOffset.UtcNow);
+
+    internal string GetOrCreate(string sessionId, DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            Prune(now);
+            if (_sessions.TryGetValue(sessionId, out var existing))
+            {
+                _sessions[sessionId] = existing with { ExpiresAt = now + Lifetime };
+                return existing.Csrf;
+            }
+            if (_sessions.Count >= MaxSessions)
+                _sessions.Remove(_sessions.MinBy(pair => pair.Value.ExpiresAt).Key);
+            var csrf = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+            _sessions[sessionId] = new Entry(csrf, now + Lifetime);
+            return csrf;
+        }
+    }
+
+    internal bool IsValid(string sessionId, string csrf) => IsValid(sessionId, csrf, DateTimeOffset.UtcNow);
+
+    internal bool IsValid(string sessionId, string csrf, DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            Prune(now);
+            return _sessions.TryGetValue(sessionId, out var entry) &&
+                CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(entry.Csrf), Encoding.ASCII.GetBytes(csrf));
+        }
+    }
+
+    private void Prune(DateTimeOffset now)
+    {
+        foreach (var id in _sessions.Where(pair => pair.Value.ExpiresAt <= now).Select(pair => pair.Key).ToArray())
+            _sessions.Remove(id);
+    }
+
+    private sealed record Entry(string Csrf, DateTimeOffset ExpiresAt);
 }

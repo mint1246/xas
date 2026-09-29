@@ -7,3 +7,6 @@ artifacts/
 .nuget-appdata/
 .tools/
 native/linux-pty/xas-linux-pty
+.dotnet-home/
+.worktrees/
+NuGet/

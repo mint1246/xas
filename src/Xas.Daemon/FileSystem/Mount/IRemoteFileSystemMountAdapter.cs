@@ -30,6 +30,8 @@ public interface IRemoteFileSystemOperations
     ValueTask SetLengthAsync(string path, long length, CancellationToken cancellationToken);
     ValueTask SetInfoAsync(string path, long? creationUnixMs, long? lastAccessUnixMs,
         long? lastWriteUnixMs, bool? readOnly, CancellationToken cancellationToken);
+    ValueTask FlushAsync(string path, bool directory, CancellationToken cancellationToken) =>
+        ValueTask.FromException(new NotSupportedException("Remote filesystem flush is not supported by this peer."));
 }
 
 /// <summary>Explicit unavailable boundary used until a WinFsp or FUSE adapter is installed.</summary>

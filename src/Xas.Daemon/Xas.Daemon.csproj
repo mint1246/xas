@@ -3,9 +3,24 @@
     <OutputType>Exe</OutputType>
     <OutputType Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('win-'))">WinExe</OutputType>
   </PropertyGroup>
+  <PropertyGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('win-'))">
+    <DefineConstants>$(DefineConstants);XAS_WINDOWS_TARGET</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-'))">
+    <DefineConstants>$(DefineConstants);XAS_LINUX_TARGET</DefineConstants>
+  </PropertyGroup>
   <ItemGroup><ProjectReference Include="../Xas.Core/Xas.Core.csproj" /><ProjectReference Include="../Xas.Input/Xas.Input.csproj" /></ItemGroup>
   <ItemGroup><InternalsVisibleTo Include="Xas.Tests" /></ItemGroup>
+  <ItemGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('win-'))">
+    <Compile Remove="FileSystem/Mount/LinuxFuseRemoteFileSystemMountAdapter.cs" />
+  </ItemGroup>
+  <ItemGroup Condition="$([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-'))">
+    <Compile Remove="FileSystem/Mount/WinFspRemoteFileSystemMountAdapter.cs" />
+  </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="winfsp.net" Version="2.1.25156" />
+    <PackageReference Include="LTRData.FuseDotNet" Version="1.0.0.14"
+                      Condition="'$(RuntimeIdentifier)' == '' Or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('linux-'))" />
+    <PackageReference Include="winfsp.net" Version="2.1.25156"
+                      Condition="'$(RuntimeIdentifier)' == '' Or $([System.String]::Copy('$(RuntimeIdentifier)').StartsWith('win-'))" />
   </ItemGroup>
 </Project>

@@ -106,7 +106,7 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
                         if (message.RequestId != 0 && _pending.TryRemove(message.RequestId, out var pending))
                         {
                             if (message.Kind == MessageKind.Error)
-                                pending.TrySetException(new RemoteProtocolException(message.Method, message.Payload));
+                                pending.TrySetException(RemoteProtocolException.Decode(message.Method, message.Payload));
                             else pending.TrySetResult(message);
                         }
                         break;
@@ -116,7 +116,7 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
                         if (!_incoming.TryAdd(message.RequestId, cts))
                         {
                             cts.Dispose();
-                            await SendErrorAsync(message, "Duplicate request id.").ConfigureAwait(false);
+                            await SendErrorAsync(message, new InvalidOperationException("Duplicate request id.")).ConfigureAwait(false);
                         }
                         else _ = HandleRequestAsync(message, cts);
                         break;
@@ -157,7 +157,7 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
         catch (OperationCanceledException) when (requestCts.IsCancellationRequested) { }
         catch (Exception ex)
         {
-            try { await SendErrorAsync(request, ex.Message).ConfigureAwait(false); }
+            try { await SendErrorAsync(request, ex).ConfigureAwait(false); }
             catch (Exception) when (_shutdown.IsCancellationRequested) { }
         }
         finally
@@ -167,9 +167,14 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
         }
     }
 
-    private ValueTask SendErrorAsync(ProtocolMessage request, string error) =>
-        _connection.SendAsync(new ProtocolMessage(MessageKind.Error, request.RequestId, request.StreamId,
-            request.Method, System.Text.Encoding.UTF8.GetBytes(error)), _shutdown.Token);
+    private ValueTask SendErrorAsync(ProtocolMessage request, Exception error)
+    {
+        var payload = request.Method.StartsWith("fs.", StringComparison.Ordinal)
+            ? RemoteProtocolException.Encode(error)
+            : System.Text.Encoding.UTF8.GetBytes(error.Message);
+        return _connection.SendAsync(new ProtocolMessage(MessageKind.Error, request.RequestId, request.StreamId,
+            request.Method, payload), _shutdown.Token);
+    }
 
     public async ValueTask DisposeAsync()
     {
@@ -191,6 +196,47 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
 
 public sealed class RemoteProtocolException : Exception
 {
+    private const string EnvelopePrefix = "XAS-ERROR-1\\n";
+
     public RemoteProtocolException(string method, byte[] payload)
-        : base($"Remote protocol error for '{method}': {System.Text.Encoding.UTF8.GetString(payload)}") { }
+        : this(method, System.Text.Encoding.UTF8.GetString(payload), "unknown") { }
+
+    private RemoteProtocolException(string method, string message, string code)
+        : base($"Remote protocol error for '{method}': {message}")
+    { Code = code; RemoteMessage = message; }
+
+    public string Code { get; }
+    public string RemoteMessage { get; }
+
+    internal static byte[] Encode(Exception exception)
+    {
+        var code = exception switch
+        {
+            DirectoryNotFoundException => "directory-not-found",
+            FileNotFoundException => "file-not-found",
+            UnauthorizedAccessException => "access-denied",
+            InvalidDataException or ArgumentException => "invalid-argument",
+            IOException => "io-error",
+            NotSupportedException => "not-supported",
+            _ => "unknown"
+        };
+        var envelope = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new ErrorEnvelope(code, exception.Message));
+        return System.Text.Encoding.UTF8.GetBytes(EnvelopePrefix).Concat(envelope).ToArray();
+    }
+
+    internal static RemoteProtocolException Decode(string method, byte[] payload)
+    {
+        var prefix = System.Text.Encoding.UTF8.GetBytes(EnvelopePrefix);
+        if (!payload.AsSpan().StartsWith(prefix)) return new RemoteProtocolException(method, payload);
+        try
+        {
+            var envelope = System.Text.Json.JsonSerializer.Deserialize<ErrorEnvelope>(payload.AsSpan(prefix.Length));
+            if (envelope is { Code: not null, Message: not null })
+                return new RemoteProtocolException(method, envelope.Message, envelope.Code);
+        }
+        catch (System.Text.Json.JsonException) { }
+        return new RemoteProtocolException(method, payload);
+    }
+
+    private sealed record ErrorEnvelope(string Code, string Message);
 }

@@ -1,5 +1,6 @@
 using Xas.Core;
 using Xas.Core.LocalIpc;
+using Xas.Cli.Terminal;
 
 namespace Xas.Cli;
 
@@ -11,8 +12,9 @@ internal static class Program
         {
             var localResult = await LocalSetupCommands.TryRunAsync(args);
             if (localResult is not null) return localResult.Value;
+            using var standardInput = TerminalMode.OpenInputStream();
             using var client = new LocalDaemonClient(
-                Console.OpenStandardInput(),
+                standardInput,
                 Console.OpenStandardOutput(), Console.OpenStandardError());
             return await new XasCommandLine(client, Console.Out, Console.Error).RunAsync(args);
         }

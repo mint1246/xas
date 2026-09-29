@@ -1,0 +1,4 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TreatWarningsAsErrors>false</TreatWarningsAsErrors></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../../src/Xas.Daemon/Xas.Daemon.csproj" /></ItemGroup>
+</Project>

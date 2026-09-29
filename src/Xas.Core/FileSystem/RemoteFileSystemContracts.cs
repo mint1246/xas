@@ -21,6 +21,7 @@ public sealed record RemoteDeletePath(string VolumeId, string Path, bool Directo
 public sealed record RemoteSetLength(string VolumeId, string Path, long Length);
 public sealed record RemoteSetInfo(string VolumeId, string Path, long? CreationUnixMs,
     long? LastAccessUnixMs, long? LastWriteUnixMs, bool? ReadOnly);
+public sealed record RemoteFlushPath(string VolumeId, string Path, bool Directory);
 public sealed record RemoteFileStat(string Name, bool Directory, long Length, long LastWriteUnixMs, bool ReadOnly);
 public sealed record RemoteWriteResult(long BytesWritten);
 

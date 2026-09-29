@@ -1,0 +1,31 @@
+Linux interactive terminal investigation
+========================================
+
+Cause
+-----
+The Linux interactive clients previously passed Console.OpenStandardInput() after setting the terminal to raw mode. .NET 10.0.10's Unix Console implementation wraps an attached stdin in an interactive line-reading stream, which applies console line/echo handling and therefore conflicts with raw terminal mode. In a PTY reproduction this yielded local echo and withheld input until line completion. The fix duplicates fd 0 and wraps the duplicate directly, bypassing Console's line-reading layer. The duplicate is owned and disposed by each interactive client.
+
+The terminal-size loop also used `stty size` subprocesses. It now uses ioctl(TIOCGWINSZ), which reads dimensions without launching a process or touching terminal mode. The raw input pump is started on the thread pool because a synchronous Unix fd can block during ReadAsync before its first await; this keeps the protocol event loop live.
+
+Evidence
+--------
+Built a standalone Linux x64 PTY probe by linking the production TerminalMode.cs into tests/Terminal.PtyProbe. Ran it in the existing KVM-Linux-Build WSL distro; no daemon/service was started.
+
+Command:
+wsl.exe -d KVM-Linux-Build -- python3 /mnt/c/Users/mint/Documents/KVM/tests/Terminal.PtyProbe/pty_input_probe.py /mnt/c/Users/mint/Documents/KVM/artifacts/linux-terminal-probe/publish/TerminalProbe
+
+Result:
+- async input reader remained pending while session setup continued
+- exact byte sequence delivered: 81 / 81 (80 x bytes plus !), with no newline
+- locally echoed input bytes: 0
+- repeated terminal size checks while raw: 16
+- restored original PTY echo/canonical flags: True / True
+
+The standalone probe project and script are in tests/Terminal.PtyProbe. Its executable and generated publish output are ignored under artifacts/linux-terminal-probe.
+[?1h=[?1h=[?1h=READY echo=False canon=False
+asynchronous read stayed pending without blocking setup: True
+received input bytes: 81 / 81
+unframed locally echoed x bytes: 0
+size polls while raw: 16
+restored original echo/canonical flags: ('True', 'True')
+transcript: '\x1b[?1h\x1b=\x1b[?1h\x1b=\x1b[?1h\x1b=READY echo=False canon=False\nREAD_PENDING True\nSIZE 1 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 2 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 3 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 4 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 5 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 6 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 7 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 8 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 9 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 10 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 11 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 12 echo=False canon=False\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nREMOTE:x\nSIZE 13 echo=False c'

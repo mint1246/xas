@@ -4,6 +4,7 @@ using Xas.Core.Configuration;
 using Xas.Core.FileSystem;
 using Xas.Core.Security;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace Xas.Daemon.FileSystem;
 
@@ -70,6 +71,12 @@ public sealed class FileSystemService(PeerPermissionStore permissions, LocalConf
                 case "fs.setinfo":
                     _backend.SetInfo(Decode<RemoteSetInfo>(request.Payload));
                     return Reply(request, []);
+                case "fs.flush":
+                {
+                    var arg = Decode<RemoteFlushPath>(request.Payload);
+                    _backend.Flush(arg);
+                    return Reply(request, []);
+                }
                 case "fs.eject":
                     await _backend.EjectAsync(Decode<RemoteVolumeRequest>(request.Payload), cancellationToken).ConfigureAwait(false);
                     return Reply(request, []);
@@ -264,6 +271,50 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
         RejectLinks(path);
         using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
         stream.SetLength(request.Length);
+    }
+
+    public void Flush(RemoteFlushPath request)
+    {
+        var (path, _) = Resolve(request.VolumeId, request.Path, allowRoot: request.Directory);
+        RejectLinks(path);
+        if (request.Directory)
+        {
+            if (!Directory.Exists(path)) throw new DirectoryNotFoundException(path);
+            FlushDirectoryToDisk(path);
+        }
+        else
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Write,
+                FileShare.ReadWrite | FileShare.Delete);
+            stream.Flush(flushToDisk: true);
+        }
+    }
+
+    private static void FlushDirectoryToDisk(string path)
+    {
+        if (OperatingSystem.IsLinux())
+        {
+            const int O_RDONLY = 0;
+            const int O_DIRECTORY = 0x10000;
+            const int O_CLOEXEC = 0x80000;
+            var fd = NativeDirectoryFlush.open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+            if (fd < 0) throw new IOException("Could not open directory for durable flush.", Marshal.GetLastPInvokeError());
+            try
+            {
+                if (NativeDirectoryFlush.fsync(fd) != 0)
+                    throw new IOException("Could not durably flush directory metadata.", Marshal.GetLastPInvokeError());
+            }
+            finally { _ = NativeDirectoryFlush.close(fd); }
+            return;
+        }
+        throw new PlatformNotSupportedException("Directory durable flush is not supported on this platform.");
+    }
+
+    private static class NativeDirectoryFlush
+    {
+        [DllImport("libc", SetLastError = true, ExactSpelling = true)] internal static extern int open(string path, int flags);
+        [DllImport("libc", SetLastError = true, ExactSpelling = true)] internal static extern int fsync(int fd);
+        [DllImport("libc", SetLastError = true, ExactSpelling = true)] internal static extern int close(int fd);
     }
 
     public void SetInfo(RemoteSetInfo request)

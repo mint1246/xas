@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>XAS workspace code review · 29 September 2026</title>
+<style>
+:root{color-scheme:light;--ink:#182c3c;--muted:#526575;--line:#dce4ea;--paper:#fff;--bg:#f3f6f8;--red:#9f2933;--amber:#805516}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.65 system-ui,-apple-system,Segoe UI,sans-serif}header{background:#132c40;color:white;padding:45px max(24px,calc((100vw - 1120px)/2)) 38px}.kicker{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:#aed3e7}h1{font-size:clamp(30px,4vw,46px);line-height:1.18;margin:12px 0 16px;letter-spacing:-.03em}header p{max-width:850px;color:#d5e3ec;margin:10px 0}.meta{font:13px/1.7 ui-monospace,Consolas,monospace;color:#bcd0dc;overflow-wrap:anywhere}main{max-width:1170px;margin:auto;padding:26px 25px 64px}.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:24px}.metric{background:white;border:1px solid var(--line);border-radius:12px;padding:17px 20px}.metric strong{display:block;font-size:29px;line-height:1.3}.metric small{color:var(--muted)}section.overview,.notice{background:white;border:1px solid var(--line);padding:24px;border-radius:12px;margin-bottom:22px}.notice{border-left:4px solid #ca9146;background:#fffaf1}.notice h2{margin-top:0}.section-title{font-size:22px;margin:0 0 14px}h2{font-size:23px;line-height:1.35;letter-spacing:-.015em;margin:12px 0 15px}p{margin:12px 0}a{color:#175576;text-underline-offset:3px}code{font-family:ui-monospace,Consolas,monospace;font-size:.9em;overflow-wrap:anywhere}.badge{display:inline-block;border-radius:6px;padding:2px 9px;font-size:12px;font-weight:750;line-height:1.8}.p1{background:#ffe6e7;color:var(--red)}.p2{background:#fff0d8;color:var(--amber)}.table-wrap{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:14px}th{text-align:left;color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.06em}td,th{padding:11px 9px;border-bottom:1px solid var(--line)}td:first-child{width:65px}td:nth-child(2){width:140px}tr:last-child td{border:0}.toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;background:var(--bg);padding:12px 0 18px;position:sticky;top:0;z-index:2}.toolbar input,.toolbar select,.toolbar button{font:inherit;border:1px solid #bfccd6;border-radius:8px;padding:9px 12px;background:white;color:var(--ink)}.toolbar input{flex:1;min-width:190px}.toolbar button{cursor:pointer}#visible-count{font-size:13px;color:var(--muted)}article{background:var(--paper);border:1px solid var(--line);border-radius:12px;padding:26px;margin-bottom:18px;scroll-margin-top:90px}.eyebrow{display:flex;align-items:center;gap:9px;flex-wrap:wrap;font-size:13px;color:var(--muted)}.verification{margin-left:auto;font-size:12px}.fix{background:#eef6f9;border-left:3px solid #458da9;padding:13px 16px;margin-top:18px;border-radius:0 6px 6px 0}.regression{font-size:14px;color:var(--muted)}details{border-top:1px solid var(--line);margin-top:18px;padding-top:12px}summary{cursor:pointer;font-size:14px;font-weight:650;color:#265a73}.source{margin-top:16px;font-size:12px}.source a{overflow-wrap:anywhere}pre{overflow-x:auto;background:#11293a;color:#e6f0f6;border-radius:8px;padding:16px;font-size:12px;line-height:1.65;tab-size:4}.validation{display:grid;grid-template-columns:1fr 1fr;gap:24px}.small{font-size:14px;color:var(--muted)}ul,ol{padding-left:22px}footer{font-size:13px;color:var(--muted);margin-top:24px}.hidden{display:none!important}@media(max-width:700px){header{padding:30px 22px}.metrics{grid-template-columns:1fr 1fr}main{padding:20px 16px}article{padding:20px}.verification{margin-left:0;width:100%}.validation{grid-template-columns:1fr}.toolbar{position:static}td:nth-child(2){width:auto}}@media print{body{background:white;font-size:11px}header{background:white;color:#182c3c;padding:0 0 20px}header p,.meta,.kicker{color:#526575}main{padding:0;max-width:none}.toolbar{display:none}article{break-inside:avoid;border:1px solid #bbb;padding:16px}details:not([open]) .source{display:none}a{color:inherit}.metrics{gap:8px}.metric{padding:10px}h1{font-size:28px}h2{font-size:18px}.fix{background:#f6f6f6}pre{white-space:pre-wrap;color:black;background:#f5f5f5}}
+</style></head><body>
+<div style="padding:16px 24px;background:#e8f4ee;border-bottom:1px solid #bed8c9;color:#173c2b"><strong>Historical review:</strong> these findings describe the source before repair. See the <a href="fix-verification-2026-09-30.html">30 September repair and verification report</a> for the current status.</div>
+<header><div class="kicker">Engineering review · current workspace</div><h1>XAS code review</h1>
+<p>Ten actionable findings across command routing, connection shutdown, filesystem mounts, privileged execution, installation, the web UI, and automatic monitor handoff.</p>
+<div class="meta">29 September 2026 · Asia/Jerusalem<br>Branch: rework/daemon-peer-sessions · HEAD: c44ce806bc407413942ef35e808f771c71e7396d<br>Scope: current source, including existing uncommitted changes and the new Linux FUSE adapter.</div></header>
+<main><div class="metrics"><div class="metric"><strong>10</strong><small>Actionable findings</small></div><div class="metric"><strong>6 P1 / 4 P2</strong><small>Urgent / normal priority</small></div><div class="metric"><strong>17 / 17</strong><small>Selected suites passed</small></div><div class="metric"><strong>0</strong><small>Build warnings and errors</small></div></div>
+<section class="overview"><h2 class="section-title">Findings at a glance</h2><p class="small">P1: address before relying on the affected workflow. P2: correctness or reliability issue to schedule next. Severity is separate from whether a live reproduction was performed.</p><div class="table-wrap"><table><thead><tr><th>Priority</th><th>Area</th><th>Finding</th></tr></thead><tbody><tr data-priority="P1"><td><span class="badge p1">P1</span></td><td>Commands</td><td><a href="#R1">R1 · Isolate shell events by the command that owns them</a></td></tr><tr data-priority="P1"><td><span class="badge p1">P1</span></td><td>Connections</td><td><a href="#R2">R2 · Close outbound lanes before waiting for dialers during shutdown</a></td></tr><tr data-priority="P1"><td><span class="badge p1">P1</span></td><td>Filesystem</td><td><a href="#R3">R3 · Preserve filesystem error codes across the RPC boundary</a></td></tr><tr data-priority="P1"><td><span class="badge p1">P1</span></td><td>Monitor</td><td><a href="#R4">R4 · Keep persistent input failures from recreating the monitor forever</a></td></tr><tr data-priority="P1"><td><span class="badge p1">P1</span></td><td>Privileged service</td><td><a href="#R5">R5 · Observe cancellation after elevated commands finish receiving stdin</a></td></tr><tr data-priority="P1"><td><span class="badge p1">P1</span></td><td>Commands</td><td><a href="#R10">R10 · Forward bound CLI command-close requests to the remote session</a></td></tr><tr data-priority="P2"><td><span class="badge p2">P2</span></td><td>Filesystem</td><td><a href="#R6">R6 · Preserve manually mounted exports during automatic reconciliation</a></td></tr><tr data-priority="P2"><td><span class="badge p2">P2</span></td><td>Filesystem</td><td><a href="#R7">R7 · Perform remote durable flushes before reporting sync success</a></td></tr><tr data-priority="P2"><td><span class="badge p2">P2</span></td><td>Installation</td><td><a href="#R8">R8 · Restart the Linux user daemon when installing an upgrade</a></td></tr><tr data-priority="P2"><td><span class="badge p2">P2</span></td><td>Web UI</td><td><a href="#R9">R9 · Avoid invalidating every browser tab when the control page reloads</a></td></tr></tbody></table></div></section>
+<div class="notice"><h2>Reported virtual-monitor loop</h2><p>The working tree contains partial mitigations: monitor identity now uses GDI device names when hardware IDs are blank, and asynchronous handoff failures now wait two seconds before retrying. Layout-only changes already rebind the existing monitor. <b>The current code still permits endless monitor recreation after a persistent input-open failure (R4).</b></p>
+<p>The PATH executable is <code>C:\Program Files\xas\Xas.Daemon.exe</code>. Its ProductVersion advertises <code>1.0.0+c44ce806bc407413942ef35e808f771c71e7396d</code>, matching HEAD. That version label does not prove a clean-source build or inclusion of today’s uncommitted fixes. Its local modification date is 27 September 2026.</p>
+<p class="small">The deployed root cause remains unverified. No display driver operations, live input capture, daemon startup, service startup, installation, or native mounts were performed. The service was observed stopped.</p></div>
+<div class="toolbar"><input id="search" aria-label="Search findings" placeholder="Search findings or source paths"><select id="priority" aria-label="Filter priority"><option value="">All priorities</option><option>P1</option><option>P2</option></select><select id="area" aria-label="Filter area"><option value="">All areas</option><option>Commands</option><option>Connections</option><option>Filesystem</option><option>Installation</option><option>Monitor</option><option>Privileged service</option><option>Web UI</option></select><button id="expand">Expand evidence</button><button onclick="window.print()">Print / save PDF</button><span id="visible-count">10 findings</span></div>
+<div id="findings"><article id="R1" data-priority="P1" data-area="Commands">
+      <div class="eyebrow"><span class="badge p1">P1</span><span>R1 · Commands</span><span class="verification">Reproduced forwarding defect; primary CLI path traced</span></div>
+      <h2>Isolate shell events by the command that owns them</h2><p><b>Trigger.</b> Run two CLI commands against the same peer at the same time, or run a command while another shell is producing output.</p>
+      <p>Every bound IPC client subscribes to all PeerSession.MessageReceived events, without filtering the lane or command stream. LocalDaemonClient throws on a different stream ID. The alternative local.shell.open forwarder also accepts every shell stream and rewrites it to its own local ID, including another command’s exit event.</p><p><b>Impact.</b> Ordinary concurrent commands can disconnect a CLI, mix output, or finish with another command’s exit code. A forwarding failure propagates into the shared peer receive loop and can affect other users of that lane.</p>
+      <div class="fix"><b>Suggested fix.</b> Track which remote stream IDs each IPC client owns. Filter lane, method, and stream before forwarding; filter buffered early events after the open response resolves the ID. Keep local-client send failures from terminating a shared remote lane.</div>
+      <p class="regression"><b>Regression check.</b> Open two commands on one peer, interleave stdout and different exit codes, and verify that each client receives only its own events. Disconnect one client while the other continues.</p>
+      <details><summary>Evidence and source excerpts</summary><p>The isolated harness fed exit event 102 to a forwarder owning stream 101. It forwarded that exit as local stream 1. The main CLI uses the unfiltered bound handler shown above.</p><div class="source"><a href="../src/Xas.Daemon/LocalIpc/LocalIpcServer.cs">src/Xas.Daemon/LocalIpc/LocalIpcServer.cs:100–106</a><pre><code> 100                  if (request.Method == LocalIpcProtocol.Bind)
+ 101                  {
+ 102                      if (boundSession is not null) throw new InvalidOperationException(&quot;This local IPC connection is already bound to a device.&quot;);
+ 103                      var target = Resolve(ReadTarget(request.Payload).DeviceId) ?? throw new InvalidOperationException(&quot;No matching paired device.&quot;);
+ 104                      boundSession = _sessions.GetSession(target.DeviceId) ?? throw new IOException($&quot;Device {target.DeviceId} is offline.&quot;);
+ 105                      boundHandler = (_, _, message) =&gt; frames.SendAsync(message, CancellationToken.None);
+ 106                      boundSession.MessageReceived += boundHandler;</code></pre></div><div class="source"><a href="../src/Xas.Daemon/LocalIpc/LocalIpcServer.cs">src/Xas.Daemon/LocalIpc/LocalIpcServer.cs:434–448</a><pre><code> 434
+ 435          public async ValueTask OnRemoteMessageAsync(PeerSession _, PeerLane lane, ProtocolMessage message)
+ 436          {
+ 437              if (lane != PeerLane.Interactive || message.Method is not (ShellExecWire.Stdout or ShellExecWire.Stderr or ShellExecWire.Exit or ShellExecWire.Error)) return;
+ 438              await _gate.WaitAsync().ConfigureAwait(false);
+ 439              try
+ 440              {
+ 441                  if (_remoteId == 0)
+ 442                  {
+ 443                      _earlyBytes = checked(_earlyBytes + message.Payload.Length);
+ 444                      if (_earlyBytes &gt; 1024 * 1024) throw new InvalidDataException(&quot;Too much shell output arrived before the open response.&quot;);
+ 445                      _early.Enqueue(message);
+ 446                      return;
+ 447                  }
+ 448                  await ForwardAsync(message).ConfigureAwait(false);</code></pre></div><div class="source"><a href="../src/Xas.Cli/LocalDaemonClient.cs">src/Xas.Cli/LocalDaemonClient.cs:179–186</a><pre><code> 179      private async ValueTask HandleShellMessageAsync(ProtocolMessage message, uint sessionId,
+ 180          TaskCompletionSource&lt;int&gt; exit, CancellationToken token)
+ 181      {
+ 182          if (message.StreamId != sessionId) throw new InvalidDataException(&quot;Unexpected local shell session ID.&quot;);
+ 183          if (message.Kind == MessageKind.StreamData &amp;&amp; message.Method is LocalIpcProtocol.ShellStdout or LocalIpcProtocol.ShellStderr)
+ 184          {
+ 185              var destination = message.Method == LocalIpcProtocol.ShellStdout ? output : error;
+ 186              await destination.WriteAsync(message.Payload, token).ConfigureAwait(false);</code></pre></div></details></article><article id="R2" data-priority="P1" data-area="Connections">
+      <div class="eyebrow"><span class="badge p1">P1</span><span>R2 · Connections</span><span class="verification">Reproduced with an in-memory connection</span></div>
+      <h2>Close outbound lanes before waiting for dialers during shutdown</h2><p><b>Trigger.</b> Stop or dispose a session manager while an outbound managed lane remains connected to an idle peer.</p>
+      <p>DisposeAsync cancels _shutdown and then awaits all _dialers before disposing _connections. RunConnectionAsync waits on protocol.Completion without linking that receive loop to the supplied token. Cancellation alone therefore does not close an established outbound lane.</p><p><b>Impact.</b> Graceful daemon shutdown can wait indefinitely for the other machine to disconnect. Cleanup and restart depend on forceful process termination.</p>
+      <div class="fix"><b>Suggested fix.</b> Dispose the tracked connections before joining dialers, or register connection disposal against the lane lifetime token. Ensure handshakes and established reads both observe shutdown.</div>
+      <p class="regression"><b>Regression check.</b> Establish a managed outbound lane whose peer remains idle, cancel shutdown, and assert bounded disposal without requiring remote EOF.</p>
+      <details><summary>Evidence and source excerpts</summary><p>The harness invoked the actual RunConnectionAsync with a synthetic realtime handshake, tracked the resulting task as a dialer, and called DisposeAsync. Both tasks remained pending after cancellation; synthetic EOF released disposal.</p><div class="source"><a href="../src/Xas.Daemon/Sessions/PeerSessionManager.cs">src/Xas.Daemon/Sessions/PeerSessionManager.cs:500–510</a><pre><code> 500                      cancellationToken: token).ConfigureAwait(false);
+ 501                  if (hello.Kind != MessageKind.Response) throw new InvalidDataException(&quot;Invalid lane handshake response.&quot;);
+ 502              }
+ 503              if (outbound &amp;&amp; expectedLane == PeerLane.Control)
+ 504                  await LoadPeerMetadataAsync(deviceId, session, protocol, token).ConfigureAwait(false);
+ 505              await protocol.Completion.ConfigureAwait(false);
+ 506          }
+ 507          finally
+ 508          {
+ 509              clipboardStop.Cancel();
+ 510              try { await clipboardPublisher.ConfigureAwait(false); }</code></pre></div><div class="source"><a href="../src/Xas.Daemon/Sessions/PeerSessionManager.cs">src/Xas.Daemon/Sessions/PeerSessionManager.cs:616–633</a><pre><code> 616      {
+ 617          if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+ 618          NetworkChange.NetworkAddressChanged -= _networkChangedHandler;
+ 619          _configuration.Changed -= OnConfigurationChanged;
+ 620          _shutdown.Cancel();
+ 621          if (_maintenance is not null) { try { await _maintenance.ConfigureAwait(false); } catch (OperationCanceledException) { } }
+ 622          if (_displayPublisher is not null) { try { await _displayPublisher.ConfigureAwait(false); } catch (OperationCanceledException) { } }
+ 623          if (_volumePublisher is not null) { try { await _volumePublisher.ConfigureAwait(false); } catch (OperationCanceledException) { } }
+ 624          if (_discovery is not null)
+ 625          {
+ 626              _discovery.PeerUpdated -= OnPeerUpdated;
+ 627              _discovery.PeerExpired -= OnPeerExpired;
+ 628              await _discovery.DisposeAsync().ConfigureAwait(false);
+ 629          }
+ 630          try { await Task.WhenAll(_dialers.Values).ConfigureAwait(false); } catch (OperationCanceledException) { }
+ 631          foreach (var connection in _connections.Keys) await connection.DisposeAsync().ConfigureAwait(false);
+ 632          foreach (var session in _sessions.Values)
+ 633          {</code></pre></div></details></article><article id="R3" data-priority="P1" data-area="Filesystem">
+      <div class="eyebrow"><span class="badge p1">P1</span><span>R3 · Filesystem</span><span class="verification">Windows mapping reproduced; Linux mapping traced</span></div>
+      <h2>Preserve filesystem error codes across the RPC boundary</h2><p><b>Trigger.</b> A native mounted-volume operation asks the peer for a missing file, a forbidden path, or an already existing destination.</p>
+      <p>The server encodes only exception text. The client receives RemoteProtocolException, so the native adapters cannot match FileNotFoundException, UnauthorizedAccessException, or IOException. They fall through to a generic I/O error. The friendly-message branches do not apply because RemoteProtocolException is not an IOException.</p><p><b>Impact.</b> Missing-path lookups report disk I/O failure instead of “not found.” This breaks normal create/replace workflows on native mounts and loses useful access-denied and conflict semantics.</p>
+      <div class="fix"><b>Suggested fix.</b> Add structured filesystem error codes to error responses and translate them at the filesystem client boundary. Map those codes to NTSTATUS and errno instead of parsing localized exception text.</div>
+      <p class="regression"><b>Regression check.</b> Exercise missing paths, denied writes, and destination collisions through a real protocol peer and both native callback mappings; direct fake-backend exceptions do not cover the wire behavior.</p>
+      <details><summary>Evidence and source excerpts</summary><p>The same missing-file condition mapped to 0xC0000034 locally and 0xC00000E9 after the RPC error wrapper. FUSE’s equivalent fallback is visible in source; invoking its native type on Windows was skipped because initialization needs libc.</p><div class="source"><a href="../src/Xas.Core/Protocol/MultiplexedProtocolPeer.cs">src/Xas.Core/Protocol/MultiplexedProtocolPeer.cs:156–172</a><pre><code> 156          }
+ 157          catch (OperationCanceledException) when (requestCts.IsCancellationRequested) { }
+ 158          catch (Exception ex)
+ 159          {
+ 160              try { await SendErrorAsync(request, ex.Message).ConfigureAwait(false); }
+ 161              catch (Exception) when (_shutdown.IsCancellationRequested) { }
+ 162          }
+ 163          finally
+ 164          {
+ 165              _incoming.TryRemove(request.RequestId, out _);
+ 166              requestCts.Dispose();
+ 167          }
+ 168      }
+ 169
+ 170      private ValueTask SendErrorAsync(ProtocolMessage request, string error) =&gt;
+ 171          _connection.SendAsync(new ProtocolMessage(MessageKind.Error, request.RequestId, request.StreamId,
+ 172              request.Method, System.Text.Encoding.UTF8.GetBytes(error)), _shutdown.Token);</code></pre></div><div class="source"><a href="../src/Xas.Core/Protocol/MultiplexedProtocolPeer.cs">src/Xas.Core/Protocol/MultiplexedProtocolPeer.cs:192–196</a><pre><code> 192  public sealed class RemoteProtocolException : Exception
+ 193  {
+ 194      public RemoteProtocolException(string method, byte[] payload)
+ 195          : base($&quot;Remote protocol error for &#x27;{method}&#x27;: {System.Text.Encoding.UTF8.GetString(payload)}&quot;) { }
+ 196  }</code></pre></div><div class="source"><a href="../src/Xas.Daemon/FileSystem/Mount/WinFspRemoteFileSystemMountAdapter.cs">src/Xas.Daemon/FileSystem/Mount/WinFspRemoteFileSystemMountAdapter.cs:562–579</a><pre><code> 562      private int MapException(Exception exception)
+ 563      {
+ 564          if (exception is AggregateException aggregate &amp;&amp; aggregate.InnerExceptions.Count == 1)
+ 565              exception = aggregate.InnerException!;
+ 566          return exception switch
+ 567          {
+ 568              FileNotFoundException or DirectoryNotFoundException =&gt; STATUS_OBJECT_NAME_NOT_FOUND,
+ 569              UnauthorizedAccessException =&gt; _volume.ReadOnly ? STATUS_MEDIA_WRITE_PROTECTED : STATUS_ACCESS_DENIED,
+ 570              TimeoutException =&gt; STATUS_IO_TIMEOUT,
+ 571              OperationCanceledException =&gt; STATUS_IO_TIMEOUT,
+ 572              ArgumentException or InvalidDataException =&gt; STATUS_INVALID_PARAMETER,
+ 573              NotSupportedException or PlatformNotSupportedException =&gt; STATUS_NOT_SUPPORTED,
+ 574              IOException io when io.Message.Contains(&quot;not empty&quot;, StringComparison.OrdinalIgnoreCase) =&gt; STATUS_DIRECTORY_NOT_EMPTY,
+ 575              IOException io when io.Message.Contains(&quot;exists&quot;, StringComparison.OrdinalIgnoreCase) =&gt; STATUS_OBJECT_NAME_COLLISION,
+ 576              IOException =&gt; STATUS_UNEXPECTED_IO_ERROR,
+ 577              _ =&gt; STATUS_UNEXPECTED_IO_ERROR
+ 578          };
+ 579      }</code></pre></div><div class="source"><a href="../src/Xas.Daemon/FileSystem/Mount/LinuxFuseRemoteFileSystemMountAdapter.cs">src/Xas.Daemon/FileSystem/Mount/LinuxFuseRemoteFileSystemMountAdapter.cs:600–617</a><pre><code> 600      private static PosixResult Map(Exception exception)
+ 601      {
+ 602          if (exception is AggregateException aggregate &amp;&amp; aggregate.InnerExceptions.Count == 1)
+ 603              exception = aggregate.InnerException!;
+ 604          return exception switch
+ 605          {
+ 606              FileNotFoundException or DirectoryNotFoundException =&gt; PosixResult.ENOENT,
+ 607              UnauthorizedAccessException =&gt; PosixResult.EROFS,
+ 608              TimeoutException or OperationCanceledException =&gt; TimedOut,
+ 609              ArgumentException or InvalidDataException =&gt; PosixResult.EINVAL,
+ 610              NotSupportedException or PlatformNotSupportedException =&gt; PosixResult.ENOTSUP,
+ 611              IOException io when io.Message.Contains(&quot;not empty&quot;, StringComparison.OrdinalIgnoreCase) =&gt; DirectoryNotEmpty,
+ 612              IOException io when io.Message.Contains(&quot;exists&quot;, StringComparison.OrdinalIgnoreCase) =&gt; PosixResult.EEXIST,
+ 613              IOException io when io.Message.Contains(&quot;directory&quot;, StringComparison.OrdinalIgnoreCase) =&gt; PosixResult.EISDIR,
+ 614              IOException =&gt; PosixResult.EIO,
+ 615              _ =&gt; PosixResult.EIO
+ 616          };
+ 617      }</code></pre></div></details></article><article id="R4" data-priority="P1" data-area="Monitor">
+      <div class="eyebrow"><span class="badge p1">P1</span><span>R4 · Monitor</span><span class="verification">Static control-flow finding; no live display reproduction</span></div>
+      <h2>Keep persistent input failures from recreating the monitor forever</h2><p><b>Trigger.</b> The peer supplies display metadata but repeatedly rejects input.open—for example, its input backend is unavailable, activation fails, or another peer holds the lease.</p>
+      <p>The monitor is attached before the router requests the input lease. A RemoteProtocolException escapes the router and handoff; disposing the handoff controller removes its monitor. The coordinator then creates a fresh handoff. The current uncommitted change adds a two-second pause but keeps retrying indefinitely.</p><p><b>Impact.</b> A stable peer-side input error can still cause repeated desktop monitor addition/removal. This is a concrete path compatible with the reported deployed symptom, but the deployed root cause was not established.</p>
+      <div class="fix"><b>Suggested fix.</b> Handle input acquisition failures inside the router/handoff while retaining the attached display. Gate handoff on compatible input capabilities, classify persistent failures, and suspend retries until a relevant state change rather than rebuilding the monitor.</div>
+      <p class="regression"><b>Regression check.</b> Use injected display and input services: return valid display metadata and reject input.open repeatedly. Assert one monitor attachment, no repeated detach/add, a visible error, and recovery when the rejection clears.</p>
+      <details><summary>Evidence and source excerpts</summary><p>InputControlService.Acquire can reject an unavailable backend or occupied lease independently of display.info. The coordinator restarts completed handoffs regardless of the failure category. No daemon, service, hooks, or monitor IOCTLs were started during review.</p><div class="source"><a href="../src/Xas.Input/HotInputRouter.cs">src/Xas.Input/HotInputRouter.cs:69–76</a><pre><code>  69          ChannelReader&lt;byte&gt; wake, Action signalWake, Func&lt;bool&gt; isDisconnected, Func&lt;bool&gt; isEmergency,
+  70          IInputPipelineMetrics? metrics, CancellationToken cancellationToken)
+  71      {
+  72          var opened = await peer.RequestRealtimeAsync(&quot;input.open&quot;, [], cancellationToken).ConfigureAwait(false);
+  73          if (opened.Payload.Length != 4) throw new InvalidDataException(&quot;Invalid input.open response.&quot;);
+  74          var sessionId = BinaryPrimitives.ReadUInt32BigEndian(opened.Payload);
+  75          if (sessionId == 0) throw new InvalidDataException(&quot;The remote input session ID was zero.&quot;);
+  76  </code></pre></div><div class="source"><a href="../src/Xas.Input/WindowsMonitorHandoff.cs">src/Xas.Input/WindowsMonitorHandoff.cs:71–79</a><pre><code>  71                  while (!token.IsCancellationRequested &amp;&amp; !refresh)
+  72                  {
+  73                      var changed = changes.Reader.WaitToReadAsync(token).AsTask();
+  74                      var completed = await Task.WhenAny(router, changed).ConfigureAwait(false);
+  75                      if (completed == router)
+  76                      {
+  77                          await router.ConfigureAwait(false);
+  78                          // The hot router only completes normally for the emergency return or peer disconnect.
+  79                          if (!token.IsCancellationRequested)</code></pre></div><div class="source"><a href="../src/Xas.Daemon/WindowsKvmCoordinator.cs">src/Xas.Daemon/WindowsKvmCoordinator.cs:41–67</a><pre><code>  41                  // A task that failed after an asynchronous attach attempt also arrives here through its
+  42                  // completion signal. Remember that case before clearing the old task so retries are actually
+  43                  // throttled; the old code only delayed failures that completed synchronously in RunAsync().
+  44                  var retryingFailedHandoff = string.Equals(nextId, activeDeviceId, StringComparison.Ordinal) &amp;&amp;
+  45                      activeTask.IsCompleted;
+  46
+  47                  if (activeStop is not null)
+  48                  {
+  49                      activeStop.Cancel();
+  50                      try { await activeTask.ConfigureAwait(false); }
+  51                      catch (OperationCanceledException) when (activeStop.IsCancellationRequested) { }
+  52                      catch (Exception ex) { log?.Invoke($&quot;KVM handoff stopped: {ex.Message}&quot;); }
+  53                      activeStop.Dispose();
+  54                      activeStop = null;
+  55                      activeTask = Task.CompletedTask;
+  56                      activeDeviceId = null;
+  57                  }
+  58
+  59                  if (session is null) continue;
+  60                  if (retryingFailedHandoff)
+  61                      await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+  62                  activeDeviceId = session.DeviceId;
+  63                  activeStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+  64                  log?.Invoke($&quot;KVM handoff targeting {configured!.Name} ({session.DeviceId}).&quot;);
+  65                  activeTask = WindowsMonitorHandoff.RunAsync(session, activeStop.Token, log);
+  66                  _ = activeTask.ContinueWith(_ =&gt; Signal(), CancellationToken.None,
+  67                      TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);</code></pre></div></details></article><article id="R5" data-priority="P1" data-area="Privileged service">
+      <div class="eyebrow"><span class="badge p1">P1</span><span>R5 · Privileged service</span><span class="verification">Static control-flow finding</span></div>
+      <h2>Observe cancellation after elevated commands finish receiving stdin</h2><p><b>Trigger.</b> Start a long-running elevated command with empty or finite stdin, then cancel the CLI or stop the background service.</p>
+      <p>ReceiveInputAsync stops reading the pipe on EndStdin. After that, disconnects cannot reach its IOException branch that kills the child. HandleAsync awaits process.WaitForExitAsync without a stop token and the broker accepts one connection at a time. The service stop event is checked only outside the active handler.</p><p><b>Impact.</b> The elevated child can keep running after cancellation, block all later administrator commands, and hold service shutdown in StopPending. Killing the daemon does not reliably release a broker request whose stdin reader has already exited.</p>
+      <div class="fix"><b>Suggested fix.</b> Give each broker request a lifetime linked to service stop and pipe disconnect, independent of stdin EOF. Terminate the owned process tree on cancellation and bound cleanup. Continue observing the connection after closing child stdin.</div>
+      <p class="regression"><b>Regression check.</b> Run a synthetic long-lived child with stdin already closed, cancel the client and service separately, and verify child termination, bounded shutdown, and acceptance of the next request.</p>
+      <details><summary>Evidence and source excerpts</summary><p>The source explicitly breaks the input loop at EndStdin and waits for the child with no cancellation. This was not exercised against the stopped installed service.</p><div class="source"><a href="../src/Xas.PrivilegedService/BrokerServer.cs">src/Xas.PrivilegedService/BrokerServer.cs:78–89</a><pre><code>  78              using var output = new FileStream(child.Output, FileAccess.Read, 32 * 1024, true);
+  79              using var error = new FileStream(child.Error, FileAccess.Read, 32 * 1024, true);
+  80              var stdoutTask = SendOutputAsync(output, pipe, AdminFrameKind.Stdout);
+  81              var stderrTask = SendOutputAsync(error, pipe, AdminFrameKind.Stderr);
+  82              using var inputCts = new CancellationTokenSource();
+  83              var inputTask = ReceiveInputAsync(pipe, input, process, inputCts.Token);
+  84              await process.WaitForExitAsync().ConfigureAwait(false);
+  85              inputCts.Cancel();
+  86              try { await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false); } catch (IOException) { }
+  87              try { await inputTask.ConfigureAwait(false); } catch (IOException) { } catch (OperationCanceledException) { }
+  88              var exit = new byte[4];
+  89              BinaryPrimitives.WriteInt32LittleEndian(exit, process.ExitCode);</code></pre></div><div class="source"><a href="../src/Xas.PrivilegedService/BrokerServer.cs">src/Xas.PrivilegedService/BrokerServer.cs:348–362</a><pre><code> 348      private static async Task ReceiveInputAsync(Stream pipe, Stream input, Process process, CancellationToken cancellationToken)
+ 349      {
+ 350          try
+ 351          {
+ 352              while (true)
+ 353              {
+ 354                  var (kind, data) = await AdminBrokerWire.ReadFrameAsync(pipe, cancellationToken).ConfigureAwait(false);
+ 355                  if (kind == AdminFrameKind.EndStdin) break;
+ 356                  if (kind != AdminFrameKind.Stdin) throw new InvalidDataException(&quot;Unexpected input frame.&quot;);
+ 357                  await input.WriteAsync(data).ConfigureAwait(false);
+ 358              }
+ 359          }
+ 360          catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+ 361          catch (IOException) { if (!process.HasExited) process.Kill(true); }
+ 362          finally { await input.DisposeAsync().ConfigureAwait(false); }</code></pre></div><div class="source"><a href="../src/Xas.PrivilegedService/Program.cs">src/Xas.PrivilegedService/Program.cs:32–37</a><pre><code>  32          try
+  33          {
+  34              SetStatus(ServiceState.Running, ServiceAcceptedControls.Stop | ServiceAcceptedControls.Shutdown, 0);
+  35              Task.WhenAll(BrokerServer.RunAsync(StopEvent), UserDaemonSupervisor.RunAsync(StopEvent))
+  36                  .GetAwaiter().GetResult();
+  37              SetStatus(ServiceState.Stopped, 0, 0);</code></pre></div></details></article><article id="R10" data-priority="P1" data-area="Commands">
+      <div class="eyebrow"><span class="badge p1">P1</span><span>R10 · Commands</span><span class="verification">Static end-to-end request trace</span></div>
+      <h2>Forward bound CLI command-close requests to the remote session</h2><p><b>Trigger.</b> Finish or cancel a one-shot command run by LocalDaemonClient, which opens shell.exec.open after local.bind.</p>
+      <p>The CLI sends shell.exec.close during cleanup. LocalIpcProtocol.ShellClose is the same method string, so the server intercepts it before the bound-session forwarding path. That branch only checks openShells, which is populated by local.shell.open. The current CLI uses the other open path, leaving that dictionary empty. The server therefore returns success without asking the peer to close the command.</p><p><b>Impact.</b> Cancellation can leave a remote command running. Completed command sessions and their input buffers remain in StreamingCommandManager until the shared peer lane disconnects, causing accumulation across routine CLI use.</p>
+      <div class="fix"><b>Suggested fix.</b> Track bound commands and forward their close requests with the correct remote ID. Distinguish local remapped closes from raw bound closes, and close owned commands when a local IPC connection disappears.</div>
+      <p class="regression"><b>Regression check.</b> Open a command through local.bind plus shell.exec.open, send shell.exec.close, and assert the remote close handler is invoked. Verify cancellation terminates a live fake command and repeated completed commands do not retain sessions.</p>
+      <details><summary>Evidence and source excerpts</summary><p>The same close method is used by the CLI and the remapped IPC branch. The forwarding fallback is below that unconditional successful response; the remote manager removes and cancels sessions only when it receives close or is itself disposed.</p><div class="source"><a href="../src/Xas.Cli/LocalDaemonClient.cs">src/Xas.Cli/LocalDaemonClient.cs:107–131</a><pre><code> 107          async ValueTask OnMessage(ProtocolMessage message)
+ 108          {
+ 109              await eventGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+ 110              try
+ 111              {
+ 112                  if (sessionId == 0)
+ 113                  {
+ 114                      earlyBytes = checked(earlyBytes + message.Payload.Length);
+ 115                      if (earlyBytes &gt; 1024 * 1024) throw new InvalidDataException(&quot;Too much command output arrived before the open response.&quot;);
+ 116                      early.Enqueue(message);
+ 117                  }
+ 118                  else await HandleShellMessageAsync(message, sessionId, exit, cancellationToken).ConfigureAwait(false);
+ 119              }
+ 120              finally { eventGate.Release(); }
+ 121          }
+ 122          peer.MessageReceived += OnMessage;
+ 123          try
+ 124          {
+ 125              var reply = await peer.RequestAsync(ShellExecWire.Open, ShellWire.EncodeRequest(request),
+ 126                  cancellationToken: cancellationToken).ConfigureAwait(false);
+ 127              await eventGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+ 128              try
+ 129              {
+ 130                  sessionId = ShellExecWire.DecodeSessionId(reply.Payload);
+ 131                  while (early.TryDequeue(out var message))</code></pre></div><div class="source"><a href="../src/Xas.Cli/LocalDaemonClient.cs">src/Xas.Cli/LocalDaemonClient.cs:153–164</a><pre><code> 153          {
+ 154              peer.MessageReceived -= OnMessage;
+ 155              if (sessionId != 0)
+ 156              {
+ 157                  try { await peer.RequestAsync(ShellExecWire.Close, ShellExecWire.EncodeSessionId(sessionId),
+ 158                      cancellationToken: CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
+ 159                  catch { /* Daemon also reaps sessions on local disconnect. */ }
+ 160              }
+ 161              eventGate.Dispose();
+ 162          }
+ 163      }
+ 164  </code></pre></div><div class="source"><a href="../src/Xas.Core/LocalIpc/LocalIpcProtocol.cs">src/Xas.Core/LocalIpc/LocalIpcProtocol.cs:44–46</a><pre><code>  44      public const string ShellClose = ShellExecWire.Close;
+  45      public static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+  46  </code></pre></div><div class="source"><a href="../src/Xas.Daemon/LocalIpc/LocalIpcServer.cs">src/Xas.Daemon/LocalIpc/LocalIpcServer.cs:131–143</a><pre><code> 131                  if (request.Method == LocalIpcProtocol.ShellClose)
+ 132                  {
+ 133                      var localId = ShellExecWire.DecodeSessionId(request.Payload);
+ 134                      if (openShells.TryRemove(localId, out var forwarded))
+ 135                      {
+ 136                          await forwarded.CloseAsync(token).ConfigureAwait(false);
+ 137                          forwarded.Session.MessageReceived -= forwarded.OnRemoteMessageAsync;
+ 138                          await forwarded.DisposeAsync().ConfigureAwait(false);
+ 139                      }
+ 140                      return new ProtocolMessage(MessageKind.Response, request.RequestId, request.StreamId,
+ 141                          request.Method, []);
+ 142                  }
+ 143                  if (boundSession is not null &amp;&amp; !request.Method.StartsWith(&quot;local.&quot;, StringComparison.Ordinal))</code></pre></div><div class="source"><a href="../src/Xas.Daemon/Shell/StreamingCommandManager.cs">src/Xas.Daemon/Shell/StreamingCommandManager.cs:36–48</a><pre><code>  36              return await OpenAsync(request, cancellationToken).ConfigureAwait(false);
+  37          if (request.Method == ShellExecWire.Close)
+  38          {
+  39              var id = ShellExecWire.DecodeSessionId(request.Payload);
+  40              if (_sessions.TryRemove(id, out var session))
+  41              {
+  42                  session.Input.Complete();
+  43                  session.Cancellation.Cancel();
+  44                  await session.Completion.ConfigureAwait(false);
+  45                  session.Dispose();
+  46              }
+  47              return Reply(request, []);
+  48          }</code></pre></div></details></article><article id="R6" data-priority="P2" data-area="Filesystem">
+      <div class="eyebrow"><span class="badge p2">P2</span><span>R6 · Filesystem</span><span class="verification">Reproduced with fake native adapters</span></div>
+      <h2>Preserve manually mounted exports during automatic reconciliation</h2><p><b>Trigger.</b> Manually mount an explicitly exported directory, then receive a session-change or remote-volume-change event.</p>
+      <p>MountVolumeAsync accepts any reported volume, including exports. ReconcileAsync builds its desired set from removable volumes only, then removes every mounted volume absent from that set. It does not record whether a mount was manual or automatic.</p><p><b>Impact.</b> A successfully mounted export disappears on the next reconciliation even though the peer and export are still available. Disabling automatic mounts also enters an unconditional unmount path for manually mounted volumes.</p>
+      <div class="fix"><b>Suggested fix.</b> Track mount intent separately. Preserve manual mounts while their volume remains available and permitted; apply the removable-only desired set and automatic-mount toggle only to automatic mounts.</div>
+      <p class="regression"><b>Regression check.</b> Manually mount an export, reconcile an unchanged online peer, and assert that it remains mounted. Repeat with automatic removable mounting disabled.</p>
+      <details><summary>Evidence and source excerpts</summary><p>The harness mounted export-documents using a fake adapter, observed one mount, and directly invoked the actual reconciler with that same available export. The mount count became zero and the adapter was unmounted.</p><div class="source"><a href="../src/Xas.Daemon/FileSystem/Mount/RemoteMountManager.cs">src/Xas.Daemon/FileSystem/Mount/RemoteMountManager.cs:87–101</a><pre><code>  87      public async ValueTask&lt;RemoteMountSnapshot&gt; MountVolumeAsync(string? deviceId, string volumeQuery,
+  88          CancellationToken cancellationToken)
+  89      {
+  90          var peer = ResolvePeer(deviceId);
+  91          var session = RequireReadySession(peer);
+  92          var volumes = await _volumeProvider(session, cancellationToken).ConfigureAwait(false);
+  93          var volume = ResolveVolume(volumes, volumeQuery);
+  94          var key = new MountKey(peer.DeviceId, volume.Id);
+  95          _suppressed.TryRemove(key, out _);
+  96          if (!_mounted.ContainsKey(key))
+  97              await MountAsync(key, session.Snapshot.Name, session, volume, cancellationToken).ConfigureAwait(false);
+  98          if (!_mounted.TryGetValue(key, out var mounted))
+  99              throw new PlatformNotSupportedException(&quot;The native remote filesystem mount provider is unavailable.&quot;);
+ 100          return ToSnapshot(mounted);
+ 101      }</code></pre></div><div class="source"><a href="../src/Xas.Daemon/FileSystem/Mount/RemoteMountManager.cs">src/Xas.Daemon/FileSystem/Mount/RemoteMountManager.cs:248–257</a><pre><code> 248          var desired = volumes.Where(v =&gt; string.Equals(v.Kind, &quot;removable&quot;, StringComparison.OrdinalIgnoreCase))
+ 249              .ToDictionary(v =&gt; v.Id, StringComparer.Ordinal);
+ 250
+ 251          foreach (var suppressed in _suppressed.Keys.Where(k =&gt; k.DeviceId == deviceId).ToArray())
+ 252              if (!desired.ContainsKey(suppressed.VolumeId)) _suppressed.TryRemove(suppressed, out _);
+ 253
+ 254          foreach (var existing in _mounted.Keys.Where(k =&gt; k.DeviceId == deviceId).ToArray())
+ 255          {
+ 256              if (!desired.ContainsKey(existing.VolumeId)) await UnmountAsync(existing).ConfigureAwait(false);
+ 257          }</code></pre></div></details></article><article id="R7" data-priority="P2" data-area="Filesystem">
+      <div class="eyebrow"><span class="badge p2">P2</span><span>R7 · Filesystem</span><span class="verification">Static data-flow finding</span></div>
+      <h2>Perform remote durable flushes before reporting sync success</h2><p><b>Trigger.</b> An application calls fsync or flush on a native remote mount before treating a save or transaction as durable.</p>
+      <p>FUSE FSync and FSyncDir return success without contacting the peer. WinFsp Flush only fetches metadata. The filesystem RPC has no durable-flush operation; the server writes and disposes a FileStream without Flush(true).</p><p><b>Impact.</b> Applications are told their data is synchronized while it can still be in the remote OS cache. A remote crash or power loss can lose data after a successful sync response.</p>
+      <div class="fix"><b>Suggested fix.</b> Define file and directory sync RPC semantics, perform the corresponding remote durable flush, and propagate failures. Until supported, do not promise a successful durability operation.</div>
+      <p class="regression"><b>Regression check.</b> Use a backend that records or fails durable flushes. Verify that native sync reaches it and that failure is returned to the application.</p>
+      <details><summary>Evidence and source excerpts</summary><p>This finding concerns the native fs.* mount API. The separate explicit file-upload commit path does call Flush(true), so it is not included in this defect.</p><div class="source"><a href="../src/Xas.Daemon/FileSystem/Mount/LinuxFuseRemoteFileSystemMountAdapter.cs">src/Xas.Daemon/FileSystem/Mount/LinuxFuseRemoteFileSystemMountAdapter.cs:552–555</a><pre><code> 552      public PosixResult Flush(ReadOnlyNativeMemory&lt;byte&gt; fileNamePtr, ref FuseFileInfo fileInfo) =&gt; PosixResult.Success;
+ 553      public PosixResult FSync(ReadOnlyNativeMemory&lt;byte&gt; fileNamePtr, bool datasync, ref FuseFileInfo fileInfo) =&gt; PosixResult.Success;
+ 554      public PosixResult FSyncDir(ReadOnlyNativeMemory&lt;byte&gt; fileNamePtr, bool datasync, ref FuseFileInfo fileInfo) =&gt; PosixResult.Success;
+ 555      public PosixResult Release(ReadOnlyNativeMemory&lt;byte&gt; fileNamePtr, ref FuseFileInfo fileInfo) =&gt; PosixResult.Success;</code></pre></div><div class="source"><a href="../src/Xas.Daemon/FileSystem/Mount/WinFspRemoteFileSystemMountAdapter.cs">src/Xas.Daemon/FileSystem/Mount/WinFspRemoteFileSystemMountAdapter.cs:319–329</a><pre><code> 319      public override int Flush(object fileNode, object fileDesc, out WinFspFileInfo fileInfo)
+ 320      {
+ 321          fileInfo = default;
+ 322          try
+ 323          {
+ 324              if (fileDesc is not RemoteHandle handle) return STATUS_SUCCESS;
+ 325              fileInfo = ToFileInfo(Await(ct =&gt; _remote.StatAsync(handle.Path, ct)));
+ 326              return STATUS_SUCCESS;
+ 327          }
+ 328          catch (Exception ex) { return MapException(ex); }
+ 329      }</code></pre></div><div class="source"><a href="../src/Xas.Daemon/FileSystem/FileSystemService.cs">src/Xas.Daemon/FileSystem/FileSystemService.cs:200–210</a><pre><code> 200      private async ValueTask&lt;long&gt; WriteAsync(string volumeId, string remotePath, long offset,
+ 201          ReadOnlyMemory&lt;byte&gt; data, CancellationToken cancellationToken)
+ 202      {
+ 203          if (offset &lt; 0) throw new InvalidDataException(&quot;File offset cannot be negative.&quot;);
+ 204          var (path, volume) = Resolve(volumeId, remotePath, allowRoot: false);
+ 205          EnsureWritable(volume);
+ 206          RejectLinks(path);
+ 207          using var stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read, 4096, FileOptions.Asynchronous);
+ 208          stream.Position = offset;
+ 209          await stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+ 210          return data.Length;</code></pre></div></details></article><article id="R8" data-priority="P2" data-area="Installation">
+      <div class="eyebrow"><span class="badge p2">P2</span><span>R8 · Installation</span><span class="verification">Static installer finding</span></div>
+      <h2>Restart the Linux user daemon when installing an upgrade</h2><p><b>Trigger.</b> Run install-linux.sh while an existing xas-daemon.service is already active.</p>
+      <p>The installer replaces the binaries and reloads the unit, then calls enable --now. Starting an already active unit does not replace its running process; there is no stop, restart, or try-restart step.</p><p><b>Impact.</b> Installation reports success while the old daemon continues running and the new CLI talks to it. Bug fixes and protocol changes do not take effect until a later restart.</p>
+      <div class="fix"><b>Suggested fix.</b> Coordinate replacement with the existing user service and explicitly restart it after installation. Verify the resulting running process and handle systems without an available user service manager.</div>
+      <p class="regression"><b>Regression check.</b> Install over an active disposable service instance and verify that its PID/build changes and that startup failures fail the installer.</p>
+      <details><summary>Evidence and source excerpts</summary><p>Installer inspection only. No Linux installation or service mutation was performed.</p><div class="source"><a href="../scripts/install-linux.sh">scripts/install-linux.sh:10–17</a><pre><code>  10  chmod 700 &quot;$MOUNT_ROOT&quot; 2&gt;/dev/null || true
+  11  for name in xas Xas.Daemon; do
+  12      if [ ! -f &quot;$PACKAGE_DIR/$name&quot; ]; then
+  13          echo &quot;Package is missing $name in $PACKAGE_DIR&quot; &gt;&amp;2
+  14          exit 1
+  15      fi
+  16      install -m 0755 &quot;$PACKAGE_DIR/$name&quot; &quot;$BIN_DIR/$name&quot;
+  17  done</code></pre></div><div class="source"><a href="../scripts/install-linux.sh">scripts/install-linux.sh:51–72</a><pre><code>  51  # Run xas inside the user&#x27;s desktop session. This is deliberately a user service rather than a
+  52  # system/root service so Wayland, portals, clipboard, PTY, and the normal user&#x27;s home remain usable.
+  53  if command -v systemctl &gt;/dev/null 2&gt;&amp;1; then
+  54      UNIT_DIR=&quot;$HOME/.config/systemd/user&quot;
+  55      mkdir -p &quot;$UNIT_DIR&quot;
+  56      cat &gt; &quot;$UNIT_DIR/xas-daemon.service&quot; &lt;&lt;EOF
+  57  [Unit]
+  58  Description=xas user-session daemon
+  59  After=graphical-session.target network-online.target
+  60
+  61  [Service]
+  62  Type=simple
+  63  ExecStart=&quot;$BIN_DIR/Xas.Daemon&quot; serve
+  64  Restart=always
+  65  RestartSec=2
+  66  Environment=&quot;PATH=$BIN_DIR:/usr/local/bin:/usr/bin:/bin&quot;
+  67
+  68  [Install]
+  69  WantedBy=default.target
+  70  EOF
+  71      systemctl --user daemon-reload
+  72      systemctl --user enable --now xas-daemon.service</code></pre></div></details></article><article id="R9" data-priority="P2" data-area="Web UI">
+      <div class="eyebrow"><span class="badge p2">P2</span><span>R9 · Web UI</span><span class="verification">Static session-management finding</span></div>
+      <h2>Avoid invalidating every browser tab when the control page reloads</h2><p><b>Trigger.</b> Open the control panel in a second tab, or reload one tab while another remains open.</p>
+      <p>Every GET / clears the entire CSRF session dictionary and issues a new cookie/token pair. Existing pages retain their old embedded CSRF token, while the shared browser cookie changes. Their next state request or mutation fails authorization.</p><p><b>Impact.</b> Opening or reloading the management UI causes otherwise valid tabs to return 403 until reloaded. An unrelated page load also invalidates a different browser session.</p>
+      <div class="fix"><b>Suggested fix.</b> Reuse a valid session on page load, or retain bounded independently expiring sessions. Account for cookies shared across tabs so each page can obtain the current CSRF token.</div>
+      <p class="regression"><b>Regression check.</b> Open two tabs, reload either, then fetch state and update a harmless setting from the other; both sessions should remain usable.</p>
+      <details><summary>Evidence and source excerpts</summary><p>The dictionary-wide Clear occurs before authorization on GET /. The authorization path requires the page token to match the cookie’s current session.</p><div class="source"><a href="../src/Xas.Daemon/Web/DaemonWebHost.cs">src/Xas.Daemon/Web/DaemonWebHost.cs:100–111</a><pre><code> 100                  { await RespondAsync(stream, 403, &quot;text/plain&quot;, &quot;Forbidden&quot;, null, token); return; }
+ 101                  if (request.Method == &quot;GET&quot; &amp;&amp; request.Path == &quot;/&quot;)
+ 102                  {
+ 103                      var sid = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+ 104                      var csrf = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+ 105                      lock (_sessionGate)
+ 106                      {
+ 107                          _csrfBySession.Clear();
+ 108                          _csrfBySession[sid] = csrf;
+ 109                      }
+ 110                      var headers = new Dictionary&lt;string, string&gt; { [&quot;Set-Cookie&quot;] = $&quot;{CookieName}={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800&quot; };
+ 111                      await RespondAsync(stream, 200, &quot;text/html; charset=utf-8&quot;, RenderPage(csrf), headers, token);</code></pre></div><div class="source"><a href="../src/Xas.Daemon/Web/DaemonWebHost.cs">src/Xas.Daemon/Web/DaemonWebHost.cs:267–276</a><pre><code> 267          if (request.Method != &quot;GET&quot; &amp;&amp; !string.Equals(request.Origin, origin, StringComparison.Ordinal)) return false;
+ 268          if (!request.Headers.TryGetValue(&quot;cookie&quot;, out var cookieHeader)) return false;
+ 269          var cookie = cookieHeader.Split(&#x27;;&#x27;, StringSplitOptions.TrimEntries).FirstOrDefault(v =&gt; v.StartsWith(CookieName + &quot;=&quot;, StringComparison.Ordinal));
+ 270          if (cookie is null) return false;
+ 271          var sessionId = cookie[(CookieName.Length + 1)..];
+ 272          lock (_sessionGate)
+ 273          {
+ 274              if (!_csrfBySession.TryGetValue(sessionId, out var expected)) return false;
+ 275              return request.Headers.TryGetValue(&quot;x-xas-csrf&quot;, out var provided) &amp;&amp;
+ 276                  CryptographicOperations.FixedTimeEquals(Encoding.ASCII.GetBytes(expected), Encoding.ASCII.GetBytes(provided));</code></pre></div></details></article></div>
+<section class="overview"><h2 class="section-title">Validation and review boundaries</h2><div class="validation"><div><b>Verified</b><ul><li><code>dotnet build Xas.sln --no-restore -v minimal</code>: succeeded after restoring declared dependencies; zero warnings and errors.</li><li>17 selected suites passed: VirtualDisplay, WindowsTopology, InputControl, WindowsInputBackend, DisplayMetadata, InputWire, Protocol, Cli, FileSystem, WinFspAdapter, FuseCore, RemoteMountManager, Security, Transport, Pairing, Shell, and ClipboardSync.</li><li>Isolated current-source reproductions confirmed shell forwarding, outbound shutdown ordering, native filesystem error mapping, and manual export unmounting.</li></ul></div><div><b>Limits</b><ul><li>This is a general engineering review, not an exhaustive security audit. Source was reviewed across Core, CLI, Daemon, Input, the privileged service, and installation scripts; not every file or native helper was exhaustively inspected.</li><li>The full integration suite was not run because it starts a DaemonHost. Physical monitor/input handoff, Linux FUSE mounting, and elevated service execution remain untested.</li><li>Initial build used stale restore assets. Dependency restore and certificate-backed tests needed elevated sandbox access. The subsequent build and selected test results supersede those environment failures.</li><li>Product source was not edited. Suggested fixes and regression checks are proposals. Build/restore refreshed generated artifacts; the report and isolated harness are added review artifacts.</li></ul></div></div>
+<p class="small">Evidence: <a href="review-evidence/Program.cs">isolated reproduction source</a> · <a href="review-evidence/results.txt">reproduction output</a> · <a href="review-evidence/ReviewEvidence.csproj">reproduction project</a>. Run from the workspace with <code>dotnet run --project reports/review-evidence/ReviewEvidence.csproj</code>. The harness uses reflection into current assemblies and synthetic peers/adapters; it starts no daemon/service or hardware operations. Native FUSE mapping cannot initialize on Windows, so that portion is explicitly reported as not run.</p></section>
+<footer>Review snapshot: 29 September 2026. Findings refer to this working tree, not just the commit diff. Existing user changes were preserved. Source excerpts are embedded so this HTML remains useful when shared without the repository.</footer>
+</main><script>
+const cards=[...document.querySelectorAll('#findings article')], search=document.querySelector('#search'), priority=document.querySelector('#priority'), area=document.querySelector('#area');
+function filter(){const q=search.value.toLowerCase();let n=0;cards.forEach(c=>{const show=(!priority.value||c.dataset.priority===priority.value)&&(!area.value||c.dataset.area===area.value)&&c.textContent.toLowerCase().includes(q);c.classList.toggle('hidden',!show);if(show)n++});document.querySelector('#visible-count').textContent=n+' finding'+(n===1?'':'s')}
+[search,priority,area].forEach(e=>e.addEventListener('input',filter));document.querySelector('#expand').addEventListener('click',e=>{const open=e.target.textContent==='Expand evidence';cards.forEach(c=>c.querySelector('details').open=open);e.target.textContent=open?'Collapse evidence':'Expand evidence'});document.querySelectorAll('a[href^="#R"]').forEach(a=>a.addEventListener('click',()=>{search.value='';priority.value='';area.value='';filter()}));
+</script></body></html>

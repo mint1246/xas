@@ -123,8 +123,34 @@ public sealed class RemoteFileSystemOperationsClient : IRemoteFileSystemOperatio
         RequireEmpty(reply, "fs.setinfo");
     }
 
-    private ValueTask<ProtocolMessage> RequestAsync(string method, byte[] payload, CancellationToken cancellationToken) =>
-        _request(method, payload, cancellationToken);
+    public async ValueTask FlushAsync(string path, bool directory, CancellationToken cancellationToken)
+    {
+        var reply = await RequestAsync("fs.flush",
+            RemoteFileSystemWire.Encode(new RemoteFlushPath(_volumeId, Normalize(path), directory)), cancellationToken).ConfigureAwait(false);
+        RequireEmpty(reply, "fs.flush");
+    }
+
+    private async ValueTask<ProtocolMessage> RequestAsync(string method, byte[] payload, CancellationToken cancellationToken)
+    {
+        try { return await _request(method, payload, cancellationToken).ConfigureAwait(false); }
+        catch (RemoteProtocolException ex)
+        {
+            var message = ex.RemoteMessage;
+            if (method == "fs.flush" && ex.Code == "unknown" &&
+                message.Contains("Unknown filesystem method", StringComparison.OrdinalIgnoreCase))
+                throw new NotSupportedException("The remote peer does not support durable filesystem flushes.", ex);
+            throw ex.Code switch
+            {
+                "file-not-found" => new FileNotFoundException(message),
+                "directory-not-found" => new DirectoryNotFoundException(message),
+                "access-denied" => new UnauthorizedAccessException(message),
+                "io-error" => new IOException(message),
+                "not-supported" => new NotSupportedException(message),
+                "invalid-argument" => new InvalidDataException(message),
+                _ => ex
+            };
+        }
+    }
 
     private static string Normalize(string path)
     {

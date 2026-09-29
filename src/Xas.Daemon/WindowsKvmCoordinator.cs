@@ -38,6 +38,12 @@ internal static class WindowsKvmCoordinator
                 if (string.Equals(nextId, activeDeviceId, StringComparison.Ordinal) && !activeTask.IsCompleted)
                     continue;
 
+                // A task that failed after an asynchronous attach attempt also arrives here through its
+                // completion signal. Remember that case before clearing the old task so retries are actually
+                // throttled; the old code only delayed failures that completed synchronously in RunAsync().
+                var retryingFailedHandoff = string.Equals(nextId, activeDeviceId, StringComparison.Ordinal) &&
+                    activeTask.IsCompleted;
+
                 if (activeStop is not null)
                 {
                     activeStop.Cancel();
@@ -51,18 +57,14 @@ internal static class WindowsKvmCoordinator
                 }
 
                 if (session is null) continue;
+                if (retryingFailedHandoff)
+                    await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
                 activeDeviceId = session.DeviceId;
                 activeStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 log?.Invoke($"KVM handoff targeting {configured!.Name} ({session.DeviceId}).");
                 activeTask = WindowsMonitorHandoff.RunAsync(session, activeStop.Token, log);
                 _ = activeTask.ContinueWith(_ => Signal(), CancellationToken.None,
                     TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-
-                // A failed attach must not strand the daemon forever waiting for an unrelated peer/config
-                // event. The completion continuation wakes this loop; throttle retries so a persistent
-                // driver failure cannot become a tight attach loop.
-                if (activeTask.IsCompleted)
-                    await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }

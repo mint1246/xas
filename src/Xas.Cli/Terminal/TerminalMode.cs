@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.Diagnostics;
+using Microsoft.Win32.SafeHandles;
 
 namespace Xas.Cli.Terminal;
 
@@ -14,6 +15,7 @@ public sealed class TerminalMode : IDisposable
     private const uint EnableVirtualTerminalInput = 0x0200;
     private const uint EnableVirtualTerminalProcessing = 0x0004;
     private const uint Utf8CodePage = 65001;
+    private const nuint TioCGWinSize = 0x5413;
 
     private readonly IntPtr _inputHandle;
     private readonly IntPtr _outputHandle;
@@ -128,6 +130,18 @@ public sealed class TerminalMode : IDisposable
         throw new PlatformNotSupportedException("Terminal size is supported on Windows and Linux.");
     }
 
+    /// <summary>Opens stdin as a byte stream that does not apply .NET's interactive line handling.</summary>
+    public static Stream OpenInputStream()
+    {
+        if (!OperatingSystem.IsLinux()) return Console.OpenStandardInput();
+
+        var fileDescriptor = dup(0);
+        if (fileDescriptor < 0)
+            throw new IOException($"Could not duplicate terminal input (errno {Marshal.GetLastPInvokeError()}).");
+        return new FileStream(new SafeFileHandle((IntPtr)fileDescriptor, ownsHandle: true), FileAccess.Read,
+            bufferSize: 4096, isAsync: false);
+    }
+
     /// <summary>Use UTF-8 for raw command output written to an attached Windows console.</summary>
     public static IDisposable EnterUtf8Output()
     {
@@ -180,12 +194,27 @@ public sealed class TerminalMode : IDisposable
 
     private static (int Columns, int Rows) ReadLinuxSize()
     {
-        var dimensions = RunStty("size").Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
-        if (dimensions.Length != 2 || !int.TryParse(dimensions[0], out var rows) ||
-            !int.TryParse(dimensions[1], out var columns) || rows < 1 || columns < 1)
-            throw new InvalidOperationException("Could not read terminal dimensions from stty.");
-        return (columns, rows);
+        if (ioctl(0, TioCGWinSize, out var size) != 0)
+            throw new InvalidOperationException($"Could not read terminal dimensions (errno {Marshal.GetLastPInvokeError()}).");
+        if (size.Columns < 1 || size.Rows < 1)
+            throw new InvalidOperationException("The terminal reported invalid dimensions.");
+        return (size.Columns, size.Rows);
     }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct LinuxWindowSize
+    {
+        public ushort Rows;
+        public ushort Columns;
+        public ushort PixelWidth;
+        public ushort PixelHeight;
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int ioctl(int fileDescriptor, nuint request, out LinuxWindowSize windowSize);
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int dup(int oldFileDescriptor);
 
     // stdin stays inherited so stty addresses the caller's controlling terminal. Arguments
     // are passed directly to the process, never through a shell.

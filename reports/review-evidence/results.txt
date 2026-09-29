@@ -1,0 +1,8 @@
+C:\Users\mint\Documents\KVM\reports\review-evidence\Program.cs(38,13): warning CA1416: This call site is reachable on all platforms. 'RemoteWinFspFileSystem' is only supported on: 'windows'. (https://learn.microsoft.com/dotnet/fundamentals/code-analysis/quality-rules/ca1416) [C:\Users\mint\Documents\KVM\reports\review-evidence\ReviewEvidence.csproj]
+CONFIRMED: Shell forwarder accepts another command's exit and rewrites it to its local ID
+CONFIRMED: Missing-file wire error loses native status: local=0xC0000034, remote=0xC00000E9
+NOT RUN: FUSE native type initialization: TypeInitializationException
+CONFIRMED: PeerSessionManager disposal remains blocked on its live outbound lane after shutdown cancellation
+CONFIRMED: Manual export mount initially succeeds with a fake native adapter
+CONFIRMED: Automatic reconciliation removes a manually mounted export that is still available
+Review reproductions completed; no live daemon, service, monitor, or mount was started.

@@ -49,6 +49,10 @@ public static class WinFspAdapterTests
         Equal<ulong>(5, truncated.FileSize, "SetFileSize returned stale metadata.");
         Equal("hello", Encoding.UTF8.GetString(remote.GetFile("hello.txt")), "Truncate did not reach the remote backend.");
 
+        status = fs.Flush(null!, helloHandle, out _);
+        Equal(0, status, "Flush failed.");
+        Assert(remote.Flushes.Contains(("hello.txt", false)), "WinFsp Flush did not request a durable file flush.");
+
         status = fs.Rename(null!, helloHandle, "\\hello.txt", "\\renamed.txt", false);
         Equal(0, status, "Rename failed.");
         Assert(!remote.Exists("hello.txt") && remote.Exists("renamed.txt"), "Rename did not update the remote backend.");
@@ -101,6 +105,7 @@ public static class WinFspAdapterTests
     private sealed class MemoryRemoteFileSystem : IRemoteFileSystemOperations
     {
         public int MaxTransferBytes => RemoteFileSystemWire.MaxChunkBytes;
+        public List<(string Path, bool Directory)> Flushes { get; } = [];
         private readonly object _gate = new();
         private readonly Dictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -266,6 +271,13 @@ public static class WinFspAdapterTests
                 _entries[key] = entry;
                 return ValueTask.CompletedTask;
             }
+        }
+
+        public ValueTask FlushAsync(string path, bool directory, CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Flushes.Add((Normalize(path), directory));
+            return ValueTask.CompletedTask;
         }
 
         private Entry File(string path)

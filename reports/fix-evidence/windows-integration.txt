@@ -1,0 +1,6 @@
+Command: dotnet build tests/Xas.Tests/Xas.Tests.csproj --no-restore
+Result: Build succeeded with 0 warnings and 0 errors.
+
+Command: dotnet tests/Xas.Tests/bin/Debug/net10.0/Xas.Tests.dll --suite IntegrationTests
+Result: Passed IntegrationTests; Passed 1 test suites.
+The fixture disabled native orchestration. It covered concurrent bound IPC commands, an unsolicited peer event, and a terminal-like stdin stream whose ReadAsync blocks synchronously until released. RunShellAsync returned while that read remained blocked; cleanup released and observed the read.

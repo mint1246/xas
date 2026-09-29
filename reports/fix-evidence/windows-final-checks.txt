@@ -1,0 +1,14 @@
+Running CliTests...
+Passed CliTests
+Passed 1 test suites.
+Running TerminalTests...
+Passed TerminalTests
+Passed 1 test suites.
+Running LocalIpcShellForwardingTests...
+Passed LocalIpcShellForwardingTests
+Passed 1 test suites.
+Running IntegrationTests...
+xas local UI: http://127.0.0.1:64018/
+xas daemon listening on TCP 64016; device xas-eb308e4ea9a60b85b979996cedeed294
+Passed IntegrationTests
+Passed 1 test suites.

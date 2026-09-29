@@ -66,12 +66,18 @@ public sealed class ProcessShellBackend : IShellBackend
             catch (System.ComponentModel.Win32Exception) { }
         }, process);
 
-        var inputTask = CopyInputAndCloseAsync(stdin, process.StandardInput.BaseStream, cancellationToken);
+        using var inputCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var inputTask = CopyInputAndCloseAsync(stdin, process.StandardInput.BaseStream, inputCancellation.Token);
         var stdoutTask = process.StandardOutput.BaseStream.CopyToAsync(stdout);
         var stderrTask = process.StandardError.BaseStream.CopyToAsync(stderr);
 
         await process.WaitForExitAsync().ConfigureAwait(false);
-        await Task.WhenAll(inputTask, stdoutTask, stderrTask).ConfigureAwait(false);
+        // The caller's input stream may remain open after a one-shot child exits (for
+        // example, the streaming RPC channel). Stop only input forwarding here; stdout
+        // and stderr still need to drain to preserve all output produced by the child.
+        inputCancellation.Cancel();
+        await inputTask.ConfigureAwait(false);
+        await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         return process.ExitCode;
     }

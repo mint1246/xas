@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using System.Text;
 using Xas.Core;
 using Xas.Core.Protocol;
+using Xas.Core.Privileged;
 using Xas.Core.Security;
 using Xas.Core.Services;
 
@@ -18,6 +19,8 @@ public sealed class StreamingCommandManager : IAsyncDisposable
     private readonly ConcurrentDictionary<uint, CommandSession> _sessions = new();
     private int _nextId;
     private int _disposed;
+
+    internal int ActiveSessionCount => _sessions.Count;
 
     public StreamingCommandManager(string peerId, PeerPermissionStore permissions,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, IShellBackend? backend = null)
@@ -63,7 +66,7 @@ public sealed class StreamingCommandManager : IAsyncDisposable
             throw new InvalidDataException("Shell stdin chunk exceeds the supported size.");
         if (message.Payload.Length == 0)
             throw new InvalidDataException("Shell stdin data chunks cannot be empty.");
-        await session.Input.WriteAsync(message.Payload, session.Cancellation.Token).ConfigureAwait(false);
+        await session.Input.WriteAsync(message.Payload, session.Token).ConfigureAwait(false);
     }
 
     private async ValueTask<ProtocolMessage> OpenAsync(ProtocolMessage request, CancellationToken cancellationToken)
@@ -88,16 +91,32 @@ public sealed class StreamingCommandManager : IAsyncDisposable
         }
 
         session.Completion = RunAsync(session, shellRequest);
+        _ = RemoveCompletedSessionAsync(session);
         return Reply(request, ShellExecWire.EncodeSessionId(session.Id));
+    }
+
+    private async Task RemoveCompletedSessionAsync(CommandSession session)
+    {
+        await session.Completion.ConfigureAwait(false);
+        // Remove only this exact session: a concurrent close may already own cleanup,
+        // and the numeric ID can eventually be reused after wraparound.
+        if (((ICollection<KeyValuePair<uint, CommandSession>>)_sessions)
+            .Remove(new KeyValuePair<uint, CommandSession>(session.Id, session)))
+        {
+            session.Input.Complete();
+            session.Dispose();
+        }
     }
 
     private async Task RunAsync(CommandSession session, ShellRequest request)
     {
         try
         {
-            var exitCode = await _backend.RunAsync(request, session.Input, new OutputStream(_send, session.Id, ShellExecWire.Stdout),
-                new OutputStream(_send, session.Id, ShellExecWire.Stderr), session.Cancellation.Token).ConfigureAwait(false);
-            await SendAsync(MessageKind.Event, session.Id, ShellExecWire.Exit, ShellExecWire.EncodeExitCode(exitCode), session.Cancellation.Token)
+            IShellBackend backend = request.Elevated && OperatingSystem.IsWindows()
+                ? new WindowsAdminBrokerClient() : _backend;
+            var exitCode = await backend.RunAsync(request, session.Input, new OutputStream(_send, session.Id, ShellExecWire.Stdout),
+                new OutputStream(_send, session.Id, ShellExecWire.Stderr), session.Token).ConfigureAwait(false);
+            await SendAsync(MessageKind.Event, session.Id, ShellExecWire.Exit, ShellExecWire.EncodeExitCode(exitCode), session.Token)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (session.Cancellation.IsCancellationRequested) { }
@@ -132,11 +151,19 @@ public sealed class StreamingCommandManager : IAsyncDisposable
         }
     }
 
-    private sealed class CommandSession(uint id) : IDisposable
+    private sealed class CommandSession : IDisposable
     {
-        public uint Id { get; } = id;
+        public CommandSession(uint id)
+        {
+            Id = id;
+            Cancellation = new CancellationTokenSource();
+            Token = Cancellation.Token;
+        }
+
+        public uint Id { get; }
+        public CancellationToken Token { get; }
         public ChannelInputStream Input { get; } = new();
-        public CancellationTokenSource Cancellation { get; } = new();
+        public CancellationTokenSource Cancellation { get; }
         public Task Completion { get; set; } = Task.CompletedTask;
         public void Dispose() { Input.Dispose(); Cancellation.Dispose(); }
     }

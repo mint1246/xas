@@ -22,10 +22,14 @@ public sealed class RemoteMountManager : IAsyncDisposable
     private readonly LocalConfiguration _configuration;
     private readonly PeerSessionManager _sessions;
     private readonly Func<IRemoteFileSystemMountAdapter> _adapterFactory;
+    private readonly Func<string, string, RemoteVolume, string> _mountPointFactory;
+    private readonly Func<bool> _availabilityProbe;
     private readonly Func<PeerSession, CancellationToken, ValueTask<RemoteVolume[]>> _volumeProvider;
     private readonly Func<PeerSession, string, CancellationToken, ValueTask> _ejectVolume;
     private readonly Action<string>? _log;
     private readonly ConcurrentDictionary<MountKey, MountedVolume> _mounted = new();
+    // Explicit mounts are user intent and must survive automatic removable-volume policy changes.
+    private readonly ConcurrentDictionary<MountKey, byte> _manualMounts = new();
     private readonly ConcurrentDictionary<MountKey, byte> _suppressed = new();
     private readonly ConcurrentDictionary<string, byte> _pending = new(StringComparer.Ordinal);
     private readonly Channel<string> _queue = Channel.CreateUnbounded<string>(new UnboundedChannelOptions
@@ -43,17 +47,21 @@ public sealed class RemoteMountManager : IAsyncDisposable
         Func<IRemoteFileSystemMountAdapter>? adapterFactory = null,
         Func<PeerSession, CancellationToken, ValueTask<RemoteVolume[]>>? volumeProvider = null,
         Func<PeerSession, string, CancellationToken, ValueTask>? ejectVolume = null,
+        Func<string, string, RemoteVolume, string>? mountPointFactory = null,
+        Func<bool>? availabilityProbe = null,
         Action<string>? log = null)
     {
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
         _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
-        _adapterFactory = adapterFactory ?? (() => OperatingSystem.IsWindows()
-            ? new WinFspRemoteFileSystemMountAdapter()
-            : new UnavailableRemoteFileSystemMountAdapter("native"));
+        _adapterFactory = adapterFactory ?? CreatePlatformAdapter;
         _volumeProvider = volumeProvider ?? RemoteFileSystemOperationsClient.GetVolumesAsync;
         _ejectVolume = ejectVolume ?? RemoteFileSystemOperationsClient.EjectVolumeAsync;
+        _mountPointFactory = mountPointFactory ?? DefaultMountPoint;
+        _availabilityProbe = availabilityProbe ?? DefaultAvailabilityProbe;
         _log = log;
     }
+
+    public bool NativeMountsAvailable => _availabilityProbe();
 
     public IReadOnlyList<RemoteMountSnapshot> GetSnapshots() => _mounted.Values
         .Select(item => new RemoteMountSnapshot(item.Key.DeviceId, item.DeviceName, item.Key.VolumeId,
@@ -86,12 +94,23 @@ public sealed class RemoteMountManager : IAsyncDisposable
         var volumes = await _volumeProvider(session, cancellationToken).ConfigureAwait(false);
         var volume = ResolveVolume(volumes, volumeQuery);
         var key = new MountKey(peer.DeviceId, volume.Id);
+        // Publish intent before awaiting the native mount so a concurrent reconciliation cannot
+        // mistake this explicitly requested volume for an automatic mount and tear it down.
+        _manualMounts[key] = 0;
         _suppressed.TryRemove(key, out _);
-        if (!_mounted.ContainsKey(key))
-            await MountAsync(key, session.Snapshot.Name, session, volume, cancellationToken).ConfigureAwait(false);
-        if (!_mounted.TryGetValue(key, out var mounted))
-            throw new PlatformNotSupportedException("The native remote filesystem mount provider is unavailable.");
-        return ToSnapshot(mounted);
+        try
+        {
+            if (!_mounted.ContainsKey(key))
+                await MountAsync(key, session.Snapshot.Name, session, volume, cancellationToken).ConfigureAwait(false);
+            if (!_mounted.TryGetValue(key, out var mounted))
+                throw new PlatformNotSupportedException("The native remote filesystem mount provider is unavailable.");
+            return ToSnapshot(mounted);
+        }
+        catch
+        {
+            if (!_mounted.ContainsKey(key)) _manualMounts.TryRemove(key, out _);
+            throw;
+        }
     }
 
     public async ValueTask<bool> UnmountVolumeAsync(string? deviceId, string volumeQuery,
@@ -113,6 +132,7 @@ public sealed class RemoteMountManager : IAsyncDisposable
         }
         var key = mounted[0].Key;
         _suppressed[key] = 0;
+        _manualMounts.TryRemove(key, out _);
         await UnmountAsync(key).ConfigureAwait(false);
         return true;
     }
@@ -128,6 +148,7 @@ public sealed class RemoteMountManager : IAsyncDisposable
             throw new InvalidOperationException("Only removable remote volumes can be ejected.");
         var key = new MountKey(peer.DeviceId, volume.Id);
         _suppressed[key] = 0;
+        _manualMounts.TryRemove(key, out _);
         if (_mounted.ContainsKey(key)) await UnmountAsync(key).ConfigureAwait(false);
         try
         {
@@ -209,7 +230,7 @@ public sealed class RemoteMountManager : IAsyncDisposable
     private async Task ReconcileAsync(string deviceId, CancellationToken token)
     {
         var session = _sessions.GetSession(deviceId);
-        if (!_configuration.AutoMountRemoteRemovable || session is null || !session.Online || !session.BulkReady)
+        if (session is null || !session.Online || !session.BulkReady)
         {
             await UnmountDeviceAsync(deviceId).ConfigureAwait(false);
             return;
@@ -228,6 +249,8 @@ public sealed class RemoteMountManager : IAsyncDisposable
                                                   ex.Message.Contains("unauthorized", StringComparison.OrdinalIgnoreCase))
         {
             _log?.Invoke($"Remote filesystem access to {snapshot.Name} is not granted; removing its mounted drives.");
+            foreach (var key in _manualMounts.Keys.Where(k => k.DeviceId == deviceId).ToArray())
+                _manualMounts.TryRemove(key, out _);
             await UnmountDeviceAsync(deviceId).ConfigureAwait(false);
             return;
         }
@@ -239,18 +262,39 @@ public sealed class RemoteMountManager : IAsyncDisposable
             return;
         }
 
-        var desired = volumes.Where(v => string.Equals(v.Kind, "removable", StringComparison.OrdinalIgnoreCase))
-            .ToDictionary(v => v.Id, StringComparer.Ordinal);
+        var available = volumes.ToDictionary(v => v.Id, StringComparer.Ordinal);
+        var autoMountEnabled = _configuration.AutoMountRemoteRemovable;
 
         foreach (var suppressed in _suppressed.Keys.Where(k => k.DeviceId == deviceId).ToArray())
-            if (!desired.ContainsKey(suppressed.VolumeId)) _suppressed.TryRemove(suppressed, out _);
+            if (!available.ContainsKey(suppressed.VolumeId)) _suppressed.TryRemove(suppressed, out _);
 
         foreach (var existing in _mounted.Keys.Where(k => k.DeviceId == deviceId).ToArray())
         {
-            if (!desired.ContainsKey(existing.VolumeId)) await UnmountAsync(existing).ConfigureAwait(false);
+            if (!available.ContainsKey(existing.VolumeId) ||
+                (!autoMountEnabled && !_manualMounts.ContainsKey(existing)) ||
+                (!_manualMounts.ContainsKey(existing) &&
+                 !string.Equals(available[existing.VolumeId].Kind, "removable", StringComparison.OrdinalIgnoreCase)))
+            {
+                await UnmountAsync(existing).ConfigureAwait(false);
+                if (!available.ContainsKey(existing.VolumeId)) _manualMounts.TryRemove(existing, out _);
+            }
         }
 
-        foreach (var volume in desired.Values)
+        // Explicit mounts survive temporary lane loss. Restore them even when automatic
+        // removable mounting is disabled, provided the remote volume is still available.
+        foreach (var key in _manualMounts.Keys.Where(k => k.DeviceId == deviceId).ToArray())
+        {
+            if (!available.TryGetValue(key.VolumeId, out var volume))
+            {
+                _manualMounts.TryRemove(key, out _);
+                continue;
+            }
+            if (!_mounted.ContainsKey(key))
+                await MountAsync(key, snapshot.Name, session, volume, token).ConfigureAwait(false);
+        }
+
+        if (!autoMountEnabled) return;
+        foreach (var volume in available.Values.Where(v => string.Equals(v.Kind, "removable", StringComparison.OrdinalIgnoreCase)))
         {
             var key = new MountKey(deviceId, volume.Id);
             if (_mounted.ContainsKey(key) || _suppressed.ContainsKey(key)) continue;
@@ -272,7 +316,8 @@ public sealed class RemoteMountManager : IAsyncDisposable
         var label = volume with { Name = $"{volume.Name} ({deviceName})" };
         try
         {
-            await adapter.MountAsync(string.Empty, label,
+            var mountPoint = _mountPointFactory(key.DeviceId, deviceName, volume);
+            await adapter.MountAsync(mountPoint, label,
                 RemoteFileSystemOperationsClient.ForPeer(session, volume.Id), token).ConfigureAwait(false);
             var mounted = new MountedVolume(key, deviceName, volume, adapter);
             if (!_mounted.TryAdd(key, mounted))
@@ -351,6 +396,56 @@ public sealed class RemoteMountManager : IAsyncDisposable
         new(item.Key.DeviceId, item.DeviceName, item.Key.VolumeId, item.Volume.Name, item.Volume.Kind,
             item.Adapter.MountedAt, item.Volume.ReadOnly, item.Volume.TotalBytes, item.Volume.FreeBytes,
             item.Volume.FileSystem);
+
+    private static IRemoteFileSystemMountAdapter CreatePlatformAdapter()
+    {
+#if XAS_WINDOWS_TARGET
+        return OperatingSystem.IsWindows()
+            ? new WinFspRemoteFileSystemMountAdapter()
+            : new UnavailableRemoteFileSystemMountAdapter("WinFsp");
+#elif XAS_LINUX_TARGET
+        return OperatingSystem.IsLinux()
+            ? new LinuxFuseRemoteFileSystemMountAdapter()
+            : new UnavailableRemoteFileSystemMountAdapter("FUSE");
+#else
+        return OperatingSystem.IsWindows()
+            ? new WinFspRemoteFileSystemMountAdapter()
+            : OperatingSystem.IsLinux()
+                ? new LinuxFuseRemoteFileSystemMountAdapter()
+                : new UnavailableRemoteFileSystemMountAdapter("native");
+#endif
+    }
+
+    private static bool DefaultAvailabilityProbe()
+    {
+        var adapter = CreatePlatformAdapter();
+        try { return adapter.IsAvailable; }
+        finally { adapter.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+    }
+
+    private static string DefaultMountPoint(string deviceId, string deviceName, RemoteVolume volume)
+    {
+        if (OperatingSystem.IsWindows()) return string.Empty;
+        if (!OperatingSystem.IsLinux()) return string.Empty;
+        var dataHome = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
+        if (string.IsNullOrWhiteSpace(dataHome))
+            dataHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
+        var device = SafePathComponent(deviceName, deviceId);
+        var remoteVolume = SafePathComponent(volume.Name, volume.Id);
+        return Path.Combine(dataHome, "xas", "mounts", device, remoteVolume);
+    }
+
+    private static string SafePathComponent(string displayName, string stableId)
+    {
+        var invalid = Path.GetInvalidFileNameChars().ToHashSet();
+        var chars = displayName.Trim().Select(ch => char.IsControl(ch) || invalid.Contains(ch) || ch is '/' or '\\' ? '_' : ch).ToArray();
+        var readable = new string(chars).Trim(' ', '.');
+        if (string.IsNullOrWhiteSpace(readable)) readable = "remote";
+        if (readable.Length > 48) readable = readable[..48];
+        var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
+            System.Text.Encoding.UTF8.GetBytes(stableId))).ToLowerInvariant()[..8];
+        return $"{readable}-{digest}";
+    }
 
     public async ValueTask DisposeAsync()
     {

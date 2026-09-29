@@ -79,7 +79,7 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
             $candidate = Join-Path $root "artifacts\native-linux\$helper"
             if (Test-Path -LiteralPath $candidate -PathType Leaf) { Copy-Item -LiteralPath $candidate -Destination $package }
         }
-        @('xas Linux x64 package', '', 'Run: chmod +x install-linux.sh && ./install-linux.sh', 'Installs both programs to ~/.local/bin, registers/enables the per-user xas daemon with systemd when available, and adds the folder to your shell PATH if needed.', 'Linux native helpers are included only if separately built and placed in artifacts/native-linux before packaging.') | Set-Content -LiteralPath $readme
+        @('xas Linux x64 package', '', 'Run: chmod +x install-linux.sh && ./install-linux.sh', 'Installs both programs to ~/.local/bin, registers/enables the per-user xas daemon with systemd when available, and adds the folder to your shell PATH if needed.', 'Native remote filesystem mounts require FUSE3: fusermount3, libfuse3.so.3, and access to /dev/fuse. The installer checks these and prints a distro-specific package hint without requiring root itself.', 'Automatic Linux remote mounts are created under $XDG_DATA_HOME/xas/mounts (normally ~/.local/share/xas/mounts).', 'Linux native helpers are included only if separately built and placed in artifacts/native-linux before packaging.') | Set-Content -LiteralPath $readme
     }
     $archive = Join-Path $releaseRoot "xas-$rid.zip"
     if (Test-Path $archive) { Remove-Item -LiteralPath $archive -Force }

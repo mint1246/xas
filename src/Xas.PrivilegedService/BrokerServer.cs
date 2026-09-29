@@ -19,20 +19,32 @@ internal static class BrokerServer
 
     public static async Task RunAsync(WaitHandle stop)
     {
-        var stopped = Task.Run(() => stop.WaitOne());
-        while (!stop.WaitOne(0))
-        {
-            using var pipe = CreatePipe();
-            var connected = pipe.WaitForConnectionAsync();
-            if (await Task.WhenAny(connected, stopped).ConfigureAwait(false) != connected) return;
-            await connected.ConfigureAwait(false);
-            try { await HandleAsync(pipe).ConfigureAwait(false); }
-            catch (Exception ex)
+        using var stopSource = new CancellationTokenSource();
+        var stopRegistration = ThreadPool.RegisterWaitForSingleObject(stop,
+            static (state, _) =>
             {
-                try { await AdminBrokerWire.WriteHeaderAsync(pipe, new AdminBrokerStatus(false, ex.Message), CancellationToken.None); }
-                catch (IOException) { }
+                try { ((CancellationTokenSource)state!).Cancel(); }
+                catch (ObjectDisposedException) { }
+            }, stopSource, Timeout.Infinite, true);
+        var stopped = Task.Delay(Timeout.Infinite, stopSource.Token);
+        try
+        {
+            while (!stop.WaitOne(0))
+            {
+                using var pipe = CreatePipe();
+                var connected = pipe.WaitForConnectionAsync();
+                if (await Task.WhenAny(connected, stopped).ConfigureAwait(false) != connected) return;
+                await connected.ConfigureAwait(false);
+                try { await HandleAsync(pipe, stopSource.Token).ConfigureAwait(false); }
+                catch (Exception ex)
+                {
+                    try { await AdminBrokerWire.WriteHeaderAsync(pipe, new AdminBrokerStatus(false, ex.Message), stopSource.Token); }
+                    catch (IOException) { }
+                    catch (OperationCanceledException) { }
+                }
             }
         }
+        finally { stopRegistration.Unregister(null); }
     }
 
     private static NamedPipeServerStream CreatePipe()
@@ -54,22 +66,23 @@ internal static class BrokerServer
         finally { LocalFree(descriptor); }
     }
 
-    private static async Task HandleAsync(NamedPipeServerStream pipe)
+    private static async Task HandleAsync(NamedPipeServerStream pipe, CancellationToken serviceToken)
     {
         var accepted = false;
         try
         {
             VerifyXasDaemonClient(pipe);
-            using var headerTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            using var headerTimeout = CancellationTokenSource.CreateLinkedTokenSource(serviceToken);
+            headerTimeout.CancelAfter(TimeSpan.FromSeconds(15));
             var request = await AdminBrokerWire.ReadHeaderAsync<AdminBrokerRequest>(pipe, headerTimeout.Token).ConfigureAwait(false);
             using var caller = GetPipeClientIdentity(pipe);
             if (!GetNamedPipeClientSessionId(pipe.SafePipeHandle, out var session)) throw new Win32Exception(Marshal.GetLastWin32Error());
             using var token = GetElevatedUserToken(caller, session);
-            await AdminBrokerWire.WriteHeaderAsync(pipe, new AdminBrokerStatus(true), CancellationToken.None).ConfigureAwait(false);
+            await AdminBrokerWire.WriteHeaderAsync(pipe, new AdminBrokerStatus(true), serviceToken).ConfigureAwait(false);
             accepted = true;
             if (request.Mode == ShellMode.Interactive)
             {
-                await RunInteractiveAsync(pipe, token, request).ConfigureAwait(false);
+                await RunInteractiveAsync(pipe, token, request, serviceToken).ConfigureAwait(false);
                 return;
             }
             var child = StartAsUser(request, token);
@@ -77,26 +90,29 @@ internal static class BrokerServer
             using var input = new FileStream(child.Input, FileAccess.Write, 32 * 1024, true);
             using var output = new FileStream(child.Output, FileAccess.Read, 32 * 1024, true);
             using var error = new FileStream(child.Error, FileAccess.Read, 32 * 1024, true);
-            var stdoutTask = SendOutputAsync(output, pipe, AdminFrameKind.Stdout);
-            var stderrTask = SendOutputAsync(error, pipe, AdminFrameKind.Stderr);
-            using var inputCts = new CancellationTokenSource();
-            var inputTask = ReceiveInputAsync(pipe, input, process, inputCts.Token);
-            await process.WaitForExitAsync().ConfigureAwait(false);
+            using var inputCts = CancellationTokenSource.CreateLinkedTokenSource(serviceToken);
+            var stdoutTask = SendOutputAsync(output, pipe, AdminFrameKind.Stdout, inputCts.Token);
+            var stderrTask = SendOutputAsync(error, pipe, AdminFrameKind.Stderr, inputCts.Token);
+            var inputTask = ReceiveInputAsync(pipe, input, inputCts.Token);
+            await SuperviseChildAsync(process, inputTask, stdoutTask, stderrTask, inputCts).ConfigureAwait(false);
             inputCts.Cancel();
-            try { await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false); } catch (IOException) { }
-            try { await inputTask.ConfigureAwait(false); } catch (IOException) { } catch (OperationCanceledException) { }
+            await IgnoreCleanupFailure(inputTask).ConfigureAwait(false);
             var exit = new byte[4];
             BinaryPrimitives.WriteInt32LittleEndian(exit, process.ExitCode);
-            await AdminBrokerWire.WriteFrameAsync(pipe, AdminFrameKind.Exit, exit, CancellationToken.None).ConfigureAwait(false);
+            await AdminBrokerWire.WriteFrameAsync(pipe, AdminFrameKind.Exit, exit, serviceToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             if (accepted)
             {
-                try { await AdminBrokerWire.WriteFrameAsync(pipe, AdminFrameKind.Error, Encoding.UTF8.GetBytes(ex.Message), CancellationToken.None); } catch (IOException) { }
+                try { await AdminBrokerWire.WriteFrameAsync(pipe, AdminFrameKind.Error, Encoding.UTF8.GetBytes(ex.Message), serviceToken); }
+                catch (IOException) { }
+                catch (OperationCanceledException) { }
                 return;
             }
-            await AdminBrokerWire.WriteHeaderAsync(pipe, new AdminBrokerStatus(false, ex.Message), CancellationToken.None).ConfigureAwait(false);
+            try { await AdminBrokerWire.WriteHeaderAsync(pipe, new AdminBrokerStatus(false, ex.Message), serviceToken).ConfigureAwait(false); }
+            catch (IOException) { }
+            catch (OperationCanceledException) { }
         }
     }
 
@@ -122,17 +138,17 @@ internal static class BrokerServer
     }
 
     private static async Task RunInteractiveAsync(NamedPipeServerStream pipe,
-        Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token, AdminBrokerRequest request)
+        Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token, AdminBrokerRequest request, CancellationToken serviceToken)
     {
         if (request.Columns is < 1 or > short.MaxValue || request.Rows is < 1 or > short.MaxValue)
             throw new InvalidDataException("Initial ConPTY dimensions are invalid.");
         await using var session = ElevatedConPtySession.Start(token, request.Columns, request.Rows);
-        using var inputStop = new CancellationTokenSource();
+        using var inputStop = CancellationTokenSource.CreateLinkedTokenSource(serviceToken);
         var inputTask = ReceiveConPtyInputAsync(pipe, session, inputStop.Token);
-        var outputTask = SendConPtyOutputAsync(session.Output, pipe);
+        var outputTask = SendConPtyOutputAsync(session.Output, pipe, inputStop.Token);
         var exitTask = session.WaitForExitAsync();
-        var completed = await Task.WhenAny(exitTask, inputTask).ConfigureAwait(false);
-        if (completed == inputTask && !exitTask.IsCompleted)
+        var completed = await Task.WhenAny(exitTask, inputTask, outputTask).ConfigureAwait(false);
+        if (completed != exitTask && !exitTask.IsCompleted)
         {
             session.Terminate();
         }
@@ -141,20 +157,21 @@ internal static class BrokerServer
         try { await inputTask.ConfigureAwait(false); }
         catch (OperationCanceledException) when (inputStop.IsCancellationRequested) { }
         catch (IOException) { }
-        await outputTask.ConfigureAwait(false);
+        try { await outputTask.ConfigureAwait(false); }
+        catch (OperationCanceledException) when (inputStop.IsCancellationRequested) { }
         var exit = new byte[4];
         BinaryPrimitives.WriteInt32LittleEndian(exit, exitCode);
-        await AdminBrokerWire.WriteFrameAsync(pipe, AdminFrameKind.Exit, exit, CancellationToken.None).ConfigureAwait(false);
+        await AdminBrokerWire.WriteFrameAsync(pipe, AdminFrameKind.Exit, exit, serviceToken).ConfigureAwait(false);
     }
 
-    private static async Task SendConPtyOutputAsync(Stream output, Stream pipe)
+    private static async Task SendConPtyOutputAsync(Stream output, Stream pipe, CancellationToken cancellationToken)
     {
         var buffer = new byte[32 * 1024];
         while (true)
         {
-            var count = await output.ReadAsync(buffer).ConfigureAwait(false);
+            var count = await output.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
             if (count == 0) return;
-            await AdminBrokerWire.WriteFrameAsync(pipe, AdminFrameKind.Stdout, buffer.AsMemory(0, count), CancellationToken.None).ConfigureAwait(false);
+            await AdminBrokerWire.WriteFrameAsync(pipe, AdminFrameKind.Stdout, buffer.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -178,6 +195,7 @@ internal static class BrokerServer
                     await session.ResizeAsync(columns, rows, cancellationToken).ConfigureAwait(false);
                     break;
                 case AdminFrameKind.EndStdin when data.Length == 0:
+                    // Keep watching the pipe after input closes so disconnect is observed.
                     break;
                 default:
                     throw new InvalidDataException("Unexpected elevated ConPTY input frame.");
@@ -242,10 +260,24 @@ internal static class BrokerServer
         var adminSid = CreateAdminSid();
         try
         {
-            if (!CheckTokenMembership(token, adminSid, out var isAdmin))
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not verify administrator token membership.");
-            if (!isAdmin)
-                throw new UnauthorizedAccessException("Administrator privileges are required for brokered commands.");
+            // CheckTokenMembership requires an impersonation token when an explicit token handle is supplied.
+            // WTSQueryUserToken and TOKEN_LINKED_TOKEN both give us primary tokens, so passing either directly
+            // fails with ERROR_BAD_TOKEN_TYPE instead of answering the membership question.
+            const uint TokenQuery = 0x0008;
+            const int SecurityImpersonation = 2;
+            const int TokenImpersonation = 2;
+            if (!DuplicateTokenEx(token, TokenQuery, IntPtr.Zero, SecurityImpersonation, TokenImpersonation,
+                    out var membershipToken))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Could not create an administrator membership token.");
+            using (membershipToken)
+            {
+                if (!CheckTokenMembership(membershipToken, adminSid, out var isAdmin))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(),
+                        "Could not verify administrator token membership.");
+                if (!isAdmin)
+                    throw new UnauthorizedAccessException("Administrator privileges are required for brokered commands.");
+            }
         }
         finally { LocalFree(adminSid); }
 
@@ -320,32 +352,85 @@ internal static class BrokerServer
         return (Process.GetProcessById((int)info.ProcessId), parentStdin, parentStdout, parentStderr);
     }
 
-    private static async Task SendOutputAsync(Stream source, Stream pipe, AdminFrameKind kind)
+    internal static async Task SuperviseChildAsync(Process process, Task inputTask, Task stdoutTask,
+        Task stderrTask, CancellationTokenSource workCancellation)
+    {
+        var exitTask = process.WaitForExitAsync(workCancellation.Token);
+        var pending = new List<Task> { exitTask, inputTask, stdoutTask, stderrTask };
+        try
+        {
+            while (true)
+            {
+                var completed = await Task.WhenAny(pending).ConfigureAwait(false);
+                if (completed == exitTask)
+                {
+                    await exitTask.ConfigureAwait(false);
+                    await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+                    return;
+                }
+                pending.Remove(completed);
+                if (completed.IsFaulted || completed.IsCanceled)
+                {
+                    await completed.ConfigureAwait(false);
+                }
+            }
+        }
+        catch
+        {
+            workCancellation.Cancel();
+            if (!process.HasExited)
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch (InvalidOperationException) { }
+            }
+            try { await process.WaitForExitAsync().ConfigureAwait(false); } catch (InvalidOperationException) { }
+            await IgnoreCleanupFailure(inputTask).ConfigureAwait(false);
+            await IgnoreCleanupFailure(stdoutTask).ConfigureAwait(false);
+            await IgnoreCleanupFailure(stderrTask).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static async Task IgnoreCleanupFailure(Task task)
+    {
+        try { await task.ConfigureAwait(false); }
+        catch (IOException) { }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+    }
+
+    private static async Task SendOutputAsync(Stream source, Stream pipe, AdminFrameKind kind, CancellationToken cancellationToken)
     {
         var buffer = new byte[32 * 1024];
         while (true)
         {
-            var read = await source.ReadAsync(buffer).ConfigureAwait(false);
+            var read = await source.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
             if (read == 0) return;
-            await AdminBrokerWire.WriteFrameAsync(pipe, kind, buffer.AsMemory(0, read), CancellationToken.None).ConfigureAwait(false);
+            await AdminBrokerWire.WriteFrameAsync(pipe, kind, buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private static async Task ReceiveInputAsync(Stream pipe, Stream input, Process process, CancellationToken cancellationToken)
+    internal static async Task ReceiveInputAsync(Stream pipe, Stream input, CancellationToken cancellationToken)
     {
+        var stdinClosed = false;
         try
         {
             while (true)
             {
                 var (kind, data) = await AdminBrokerWire.ReadFrameAsync(pipe, cancellationToken).ConfigureAwait(false);
-                if (kind == AdminFrameKind.EndStdin) break;
+                if (kind == AdminFrameKind.EndStdin && data.Length == 0 && !stdinClosed)
+                {
+                    stdinClosed = true;
+                    await input.DisposeAsync().ConfigureAwait(false);
+                    continue;
+                }
+                if (stdinClosed) throw new InvalidDataException("Input data followed the end-of-stdin frame.");
                 if (kind != AdminFrameKind.Stdin) throw new InvalidDataException("Unexpected input frame.");
-                await input.WriteAsync(data).ConfigureAwait(false);
+                await input.WriteAsync(data, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-        catch (IOException) { if (!process.HasExited) process.Kill(true); }
-        finally { await input.DisposeAsync().ConfigureAwait(false); }
+        finally { if (!stdinClosed) await input.DisposeAsync().ConfigureAwait(false); }
     }
 
     private static string Quote(string value)

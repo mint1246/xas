@@ -1,4 +1,5 @@
 using Xas.Input;
+using System.ComponentModel;
 
 namespace Xas.Tests;
 
@@ -55,6 +56,19 @@ public static class WindowsTopologyTests
             throw new Exception("Explicit monitor selection failed.");
         if (WindowsMonitorTopology.FindRemote([virtualMonitor]) is not null)
             throw new Exception("A remote monitor without a local return target is unsafe.");
+
+        // Windows may briefly reject monitor enumeration during a topology transition. That must retain
+        // the current attachment, and the next successful pass must still observe a real removal.
+        var passes = 0;
+        bool EnumerateWithTransientFailure() => WindowsMonitorTopology.IsPresent(() =>
+        {
+            if (passes++ == 0) throw new Win32Exception("transient topology failure");
+            return [physical];
+        }, virtualMonitor.DeviceName, virtualMonitor.HardwareId);
+        if (!EnumerateWithTransientFailure())
+            throw new Exception("A transient Windows topology failure must not be treated as monitor removal.");
+        if (EnumerateWithTransientFailure())
+            throw new Exception("A subsequent successful topology pass must detect that the monitor was removed.");
         return Task.CompletedTask;
     }
 }

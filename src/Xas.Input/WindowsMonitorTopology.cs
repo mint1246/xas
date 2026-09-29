@@ -96,18 +96,32 @@ public static class WindowsMonitorTopology
     private static DisplayDevice CreateAdapter() => new() { Size = (uint)Marshal.SizeOf<DisplayDevice>() };
 
     /// <summary>
-    /// Reports whether a monitor with this hardware ID is still published. Used to notice that Windows or the
-    /// driver dropped the monitor the daemon created, so it can be recreated instead of waited on forever.
+    /// Reports whether an attached monitor is still published. Some indirect display drivers (including the
+    /// SudoVDA build currently used by XAS) publish an empty monitor hardware ID, so the GDI device name is the
+    /// live identity in that case instead of treating the empty string as a globally unique monitor ID.
     /// </summary>
-    public static bool Exists(string hardwareId)
+    public static bool Exists(string deviceName, string hardwareId)
     {
         if (!OperatingSystem.IsWindows()) return false;
-        try
-        {
-            return Enumerate().Any(m => m.HardwareId.Equals(hardwareId, StringComparison.OrdinalIgnoreCase));
-        }
-        catch (InvalidOperationException) { return true; } // A transient enumeration failure is not a removal.
+        return IsPresent(() => Enumerate(), deviceName, hardwareId);
     }
+
+    internal static bool IsPresent(Func<IReadOnlyList<WindowsMonitor>> enumerate, string deviceName,
+        string hardwareId)
+    {
+        try { return enumerate().Any(m => MatchesIdentity(m, deviceName, hardwareId)); }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
+        {
+            // Enumeration can fail while Windows is changing display topology. Preserve the existing
+            // attachment and let a later pass retry; treating this as removal causes monitor churn.
+            return true;
+        }
+    }
+
+    internal static bool MatchesIdentity(WindowsMonitor monitor, string deviceName, string hardwareId) =>
+        monitor.DeviceName.Equals(deviceName, StringComparison.OrdinalIgnoreCase) ||
+        (!string.IsNullOrWhiteSpace(hardwareId) &&
+         monitor.HardwareId.Equals(hardwareId, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
     /// Finds the monitor that owns input. A hint selects one by device name, friendly name, or hardware ID and

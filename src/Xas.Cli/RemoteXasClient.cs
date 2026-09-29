@@ -154,10 +154,11 @@ public sealed class RemoteXasClient : IXasClient, IDisposable
         if (Console.IsInputRedirected || Console.IsOutputRedirected)
             throw new XasClientException("Interactive shell requires an attached terminal.");
         using var terminal = TerminalMode.Enter();
+        using var terminalInput = TerminalMode.OpenInputStream();
         try
         {
             return await InteractiveShellClient.RunAsync(configured, _identity, _trust,
-                Console.OpenStandardInput(), _output, (ushort)terminal.Columns, (ushort)terminal.Rows,
+                terminalInput, _output, (ushort)terminal.Columns, (ushort)terminal.Rows,
                 cancellationToken, TerminalMode.CurrentSize, elevated).ConfigureAwait(false);
         }
         catch (RemoteProtocolException ex) { throw new XasClientException(ex.Message); }
