@@ -224,7 +224,8 @@ static int handle_event(const unsigned char *event) {
         else emit(keyboard_fd, EV_KEY, key, down != 0);
         if (down || repeat) held_keys[key] = 1; else held_keys[key] = 0;
     } else if (kind == 3) {
-        emit(relative_fd, EV_REL, REL_WHEEL, -y);
+        /* Both Windows/XAS and evdev use positive vertical wheel values for up. */
+        emit(relative_fd, EV_REL, REL_WHEEL, y);
         if (x) emit(relative_fd, EV_REL, REL_HWHEEL, x);
     } else return -1;
 
