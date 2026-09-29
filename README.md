@@ -1,64 +1,127 @@
 # xas
 
-`xas` is an in-progress Windows/Linux workstation bridge. It has mutually authenticated connections, remote shells, explicit file copy, text clipboard sync, and input control. Automatic monitor-boundary handoff is implemented on top of the SudoVDA indirect display driver, so the Windows daemon creates and removes its virtual monitor by itself; it has not yet been validated on a physical Windows/Linux pair. Progress is tracked in [docs/checklist.md](docs/checklist.md).
+A Windows/Linux workstation bridge for remote shells, shared files and clipboards, and keyboard/mouse handoff across machines.
 
-## Build and test
+XAS runs a daemon in each user's desktop session. Devices pair through a code comparison, then communicate over pinned mutual TLS. The `xas` CLI and local web UI control persistent peer connections and per-device permissions.
 
-Install the .NET 10 SDK, then run:
+**Status: experimental.** Windows and Linux regression tests cover the managed services and terminal input. Physical Windows/Linux monitor-boundary handoff, Wayland consent, and native filesystem mounts still need end-to-end validation. See the [review and repair report](reports/fix-verification-2026-09-30.html) for verified behavior and remaining limits.
 
-```text
-dotnet build Xas.sln
-dotnet run --project tests/Xas.Tests/Xas.Tests.csproj
+## Features
+
+- Interactive remote shells using Windows ConPTY or a Linux PTY, streamed commands, remote exit codes, and piped stdin.
+- File and recursive directory copy with overwrite protection and modification-time preservation.
+- Remote filesystem mounts through WinFsp on Windows and FUSE3 on Linux, explicit directory exports, removable-volume discovery, and remote eject.
+- Plain-text clipboard push, pull, and continuous synchronization.
+- Windows virtual-monitor handoff to a Linux desktop through SudoVDA, with **Ctrl+Alt+Esc** for emergency return.
+- LAN discovery, per-peer capability grants, a local configuration UI, and background startup services.
+
+## Build
+
+Install the .NET 10 SDK (10.0.300 or a later 10.0.3xx patch). From the repository root:
+
+```sh
+dotnet restore Xas.sln --source https://api.nuget.org/v3/index.json
+dotnet build Xas.sln --no-restore
 ```
 
-On Windows, the TLS tests need normal access to the current user's certificate key store. The source uses only the .NET runtime and has no NuGet package dependencies.
+The repository's `NuGet.Config` clears implicit package sources; the explicit source above restores the WinFsp and FuseDotNet dependencies. Linux interactive shells also need the native PTY helper:
 
-## Publish and install
+```sh
+make -C native/linux-pty
+export XAS_LINUX_PTY_HELPER="$PWD/native/linux-pty/xas-linux-pty"
+```
 
-On Windows with the .NET 10 SDK and network access to nuget.org, create self-contained x64 packages for Windows and Linux with:
+This helper needs a C compiler, `make`, and `libutil`. See the [PTY helper documentation](native/linux-pty/README.md) and [Wayland helper documentation](native/linux-wayland-input/README.md) for native components.
+
+## Package and install
+
+On Windows, build self-contained Windows/Linux x64 archives with PowerShell:
 
 ```powershell
 .\scripts\package.ps1
 ```
 
-The archives are `artifacts/release/xas-win-x64.zip` and `artifacts/release/xas-linux-x64.zip`. Extract the matching archive, then run `install-windows.ps1` in PowerShell or `sh install-linux.sh` on Linux. These scripts install `xas` and `Xas.Daemon` under the user's program/bin directory and add it to that user's PATH; open a new terminal afterward. The current Linux archive also includes the native PTY and Wayland helpers, built on Ubuntu 24.04 x64 in an isolated WSL distro. The Wayland helper needs the `libei1` and `liboeffis1` runtime packages and a compatible desktop portal; X11 input needs `libX11` and `libXtst`. The packages do not install or sign the Windows display driver.
+Packages appear under `artifacts/release/`. Linux helpers are included only when separately built and placed in `artifacts/native-linux/` before packaging; inspect the archive before relying on PTY or Wayland support.
 
-## Pair two devices
+Extract the appropriate archive, then install:
 
-Run `dotnet run --project src/Xas.Cli -- <arguments>` during development, or publish the CLI as `xas`. On **both** machines, run `xas identity` and exchange the displayed device IDs and full fingerprints over a trusted channel.
+| Platform | Command | Startup |
+| --- | --- | --- |
+| Windows | Run `.\install-windows.ps1` in an elevated PowerShell window | Installs into `%ProgramFiles%\xas`; the `XasAdminBroker` service supervises the daemon in the active user session. Installs the pinned WinFsp runtime when needed. |
+| Linux | `sh install-linux.sh` | Installs into `~/.local/bin`; enables or restarts the `xas-daemon.service` systemd user unit when systemd is available. |
 
-On machine A, run `xas pair <B-id> <B-fingerprint> <B-host>`. On machine B, run `xas pair <A-id> <A-fingerprint> <A-host>`. Both commands display the same six-digit code if the fingerprints match. Compare the code on both screens, then type `YES` at each prompt. Pairing grants trust only; it does not grant shell access.
+Open a new terminal after installation to pick up PATH changes. SudoVDA is installed separately. Linux remote mounts need `fusermount3`, `libfuse3.so.3`, and access to `/dev/fuse`; the installer checks these prerequisites.
 
-On the machine that will receive shell requests, run `xas allow <caller-id> shell`. Start its daemon with `dotnet run --project src/Xas.Daemon -- serve`. On the caller, run:
+For development, start one daemon per machine with `dotnet run --project src/Xas.Daemon -- serve`, and run the CLI with `dotnet run --project src/Xas.Cli -- <arguments>`. Both daemons need access to their users' desktop sessions for clipboard and input features.
+
+## Pair devices
+
+With both daemons running, use `xas ui` for the local configuration panel, or pair from the CLI:
+
+```text
+xas devices
+xas pair <device-name-or-short-id> --trust-only
+```
+
+Run `xas pair` on the other device to approve the incoming request. Compare the displayed code on both machines and approve only when it matches. `--trust-only` grants no capabilities; grant the desired access on the receiving machine:
+
+```text
+xas allow <caller-id> shell
+xas allow <caller-id> filesystem
+xas allow <caller-id> clipboard
+xas allow <caller-id> input
+```
+
+The default `xas pair` preset grants Shell, FileSystem, Clipboard, and Input. `--kvm` grants Input only. Windows administrator execution always requires a separate `privilegedshell` grant. `xas deny <id> <capability>` removes a grant; `xas revoke <id>` removes trust and disconnects the peer.
+
+For manual pairing, exchange the IDs and full fingerprints from `xas identity`, then use `xas pair-manual <id> <fingerprint> <host> [control-port]`. `xas endpoint <id> <host> [port]` updates an address. Default ports are TCP 47821 for peer traffic, TCP 47822 for pairing, and UDP 47821 for LAN discovery.
+
+## Use
+
+Select a default peer, or prefix a command with `-d <device-id>`:
 
 ```text
 xas default <remote-id>
 xas ping
 xas info
+xas
 xas -c "uname -a"
 xas exec git status
-xas
-xas cp file.zip laptop:~/Downloads/
-xas cp laptop:~/log.txt .
-xas cp -r ./project laptop:~/projects/
+xas cp file.zip :~/Downloads/
+xas cp -r ./project :~/projects/
 xas clipboard push
 xas clipboard pull
 xas clipboard sync
-xas input
+xas volumes
+xas mounts
+xas mount <volume-name-or-id>
+xas unmount <volume-name-or-id>
+xas eject <volume-name-or-id>
 ```
 
-Use `xas -d <id>` for an interactive shell on a specific peer, or add `-c "..."` or `exec ...` for one-shot work. `xas endpoint <id> <host> [port]` updates a changed address. `xas revoke <id>` removes local trust, grants, and endpoint. The daemon listens on TCP port 47821 by default; LAN multicast discovery also uses UDP port 47821. Network and host firewall rules must allow the needed ports. Interactive mode requires an attached terminal. The CLI restores its terminal mode when the session ends.
+Interactive mode requires an attached terminal and restores terminal settings on exit. Commands stream stdout/stderr and return the remote process's exit code. `xas cp` refuses to overwrite existing files unless `-f` is supplied and does not follow symbolic links or reparse points. Configure explicit filesystem exports and automatic removable-volume behavior through `xas ui`.
 
-Command output is streamed as binary frames. Redirected stdin is forwarded for shell version 2, currently up to 900,000 bytes per command. The CLI returns the remote process exit code. Every remote shell request is checked against the receiver's local permission store.
+Use `xas --sudo -c "..."` or `xas exec --sudo <executable> ...` for elevated execution. Linux uses the normal system sudo policy and a PTY for authentication. Windows uses the installed administrator broker and requires `xas allow <caller-id> privilegedshell` on the receiver. `--admin` is an alias for `--sudo`.
 
-For `xas cp`, grant the caller separately with `xas allow <caller-id> filesystem` on the remote machine, whether the copy uploads or downloads. The transfer streams file bytes, preserves file modification times, copies directories with `-r`, and refuses to overwrite existing files unless `-f` is supplied. It does not follow symbolic links or reparse points. File copy is explicit; Explorer/FUSE mounts remain pending.
+Clipboard support transfers plain text up to 256 KiB. Linux needs `wl-copy`/`wl-paste` on Wayland or `xclip`/`xsel` on X11. Images and rich text are not implemented.
 
-For clipboard commands, grant the caller with `xas allow <caller-id> clipboard` on the receiving machine. `push` and `pull` transfer plain text once; `sync` keeps both text clipboards in step until Ctrl+C. It observes both initial values without replacing either, then transfers subsequent changes. Both sides may run sync; when simultaneous edits conflict, the lexically higher device ID wins. Sync retries dropped connections. Text is limited to 256 KiB. On Linux it needs `wl-copy`/`wl-paste` in a Wayland session or `xclip`/`xsel` in X11. Images and rich text remain pending.
+## Monitor handoff
 
-Handoff is automatic. Install [SudoVDA](https://github.com/SudoMaker/SudoVDA) on Windows, set a default paired Linux device, grant the Windows device Input access on Linux with `xas allow <windows-id> input`, and run the daemons in both logged-in user sessions. The Windows daemon reads the Linux display's mode over `display.info`, creates a monitor on that adapter at the matching resolution and refresh rate, and extends the desktop beside your physical monitors. No display configuration, environment variable, or per-run setup is required; `xas display` reports the driver, the adapter, and which monitor handoff currently owns. The daemon watches the native cursor position: crossing into the virtual monitor opens an authorized input session, sends absolute cursor positions to Linux, and crossing back ends the session. The monitor identity is derived from the Linux display and its mode, so Windows restores the same arrangement across restarts while a resolution change still takes effect; the monitor is removed when the daemon exits. **Ctrl+Alt+Esc** is the emergency return chord. The Linux daemon needs the X11 XTest backend (`XAS_ENABLE_X11_INPUT=1`) or the Wayland portal/libei helper (build instructions in [native/linux-wayland-input/README.md](native/linux-wayland-input/README.md)); Wayland prompts for desktop consent. It reads the remote display mode with xrandr on X11, or wlr-randr, kscreen-doctor, or Mutter's D-Bus API on Wayland depending on the compositor; GNOME is read over `gdbus`, which ships with GLib and needs no extra package. On a scaled display the virtual monitor matches the logical desktop size rather than the raw panel mode. The receiver releases held keys/buttons on disconnect and expires idle sessions after four seconds. Handoff needs a desktop extended to at least two monitors whose rectangles do not overlap, and it stays inactive while another application, such as Apollo, also owns a virtual monitor on the same adapter. `xas input [device-id]` remains a manual development fallback. See [docs/input-protocol.md](docs/input-protocol.md).
+Install [SudoVDA](https://github.com/SudoMaker/SudoVDA) on Windows, select a paired Linux device as the default, and grant the Windows device Input access on Linux. The Windows daemon reads the Linux display geometry, creates a matching virtual monitor, and routes keyboard/mouse input when the cursor enters that monitor. Crossing back returns control locally; **Ctrl+Alt+Esc** releases control immediately. `xas display` reports driver and handoff state; `xas input [device-id]` provides manual capture.
 
-## Current limits
+The virtual monitor must sit beside a physical monitor without overlapping it. Input-acquisition failures now retry while retaining the monitor, and transient topology failures no longer cause repeated teardown. These lifecycle repairs were tested with fake hardware; the repaired daemon has not been validated against a live SudoVDA driver. A monitor left by a hard-killed daemon may require disabling/re-enabling the display adapter or rebooting.
 
-Windows interactive shells pass a networked ConPTY integration test. The Linux PTY helper builds on Ubuntu 24.04 and passes a local framed-protocol smoke test; a networked Windows/Linux shell session still needs physical validation. The Wayland helper builds but has not been tested with a desktop portal. `--sudo` and `--admin` remain unsupported. Discovery can update a stale endpoint after pinned TLS authentication; reconnect for shell and input sessions is pending. The virtual display creates, reconfigures, and removes monitors against SudoVDA, verified locally on a machine with the driver installed. It takes its mode from the Linux display, but the arrangement still has to place the new monitor beside a physical one without overlapping it, and the boundary handoff itself has not been validated on a physical Windows/Linux pair. SudoVDA has no request that lists existing monitors, so a monitor left behind by a hard-killed daemon cannot be identified afterwards; disable and re-enable the SudoVDA display adapter, or reboot, to clear it. Automatic daemon startup, physical monitor-boundary validation, filesystem mounts, removable media, clipboard images and rich text, and web UI remain pending. The PATH installer scripts do not configure daemon startup.
+Linux input depends on the available backend: the uinput helper, the [Wayland portal/libei helper](native/linux-wayland-input/README.md), or the opt-in X11 XTest backend (`XAS_ENABLE_X11_INPUT=1`). Wayland support depends on compositor/portal capabilities and user consent. See [input protocol notes](docs/input-protocol.md) and [platform prerequisites](docs/prerequisites.md).
 
-See [docs/prerequisites.md](docs/prerequisites.md) for platform components and current upstream references.
+## Tests and validation
+
+Run individual suites with the custom test runner:
+
+```sh
+dotnet run --project tests/Xas.Tests --no-build -- --suite ProtocolTests
+dotnet run --project tests/Xas.Tests --no-build -- --suite ShellTests
+```
+
+The full runner includes platform-specific tests that access the desktop, clipboard, or native backends. TLS tests need the current user's certificate key store. The [repair report](reports/fix-verification-2026-09-30.html) records 26 selected Windows suites, 11 Linux suites, isolated network integration, and a Linux attached-terminal probe. Native mount adapters and monitor lifecycle were checked with fakes; those checks do not establish physical desktop interoperability.
+
+See [tests/Terminal.PtyProbe](tests/Terminal.PtyProbe/README.md) for the Linux raw-input reproduction and [reports/README.md](reports/README.md) for historical review evidence. Long-lived shell/input reconnection after sleep, transfer resume, clipboard images, and broader physical-platform validation remain outstanding.
