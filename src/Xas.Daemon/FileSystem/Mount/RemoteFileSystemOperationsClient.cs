@@ -41,7 +41,12 @@ public sealed class RemoteFileSystemOperationsClient : IRemoteFileSystemOperatio
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(session);
-        var reply = await session.RequestAsync(PeerLane.Bulk, "fs.volumes", [], cancellationToken).ConfigureAwait(false);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(5));
+        ProtocolMessage reply;
+        try { reply = await session.RequestAsync(PeerLane.Bulk, "fs.volumes", [], timeout.Token).ConfigureAwait(false); }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        { throw new TimeoutException("The peer did not respond to volume discovery within five seconds."); }
         return RemoteFileSystemWire.Decode<RemoteVolume[]>(reply.Payload);
     }
 

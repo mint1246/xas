@@ -18,8 +18,14 @@ $existingDaemonTask = Get-ScheduledTask -TaskName $daemonTaskName -ErrorAction S
 if ($existingDaemonTask) { Stop-ScheduledTask -TaskName $daemonTaskName -ErrorAction SilentlyContinue }
 $existing = Get-Service -Name 'XasAdminBroker' -ErrorAction SilentlyContinue
 if ($existing -and $existing.Status -ne 'Stopped') {
-    Stop-Service -Name 'XasAdminBroker' -Force
-    $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(15))
+    if ($existing.Status -ne 'StopPending') {
+        try { Stop-Service -Name 'XasAdminBroker' -Force }
+        catch {
+            $existing.Refresh()
+            if ($existing.Status -notin @('Stopped', 'StopPending')) { throw }
+        }
+    }
+    $existing.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
 }
 
 # The service normally owns the interactive daemon and should reap it on shutdown. During an in-place
@@ -49,6 +55,10 @@ if ((Get-InstalledXasDaemonProcesses).Count -gt 0) {
 foreach ($name in @('xas.exe', 'Xas.Daemon.exe', 'Xas.PrivilegedService.exe', $winFspFile)) {
     $file = Join-Path $source $name
     if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "Package is missing ${name}: $file" }
+}
+$daemonRuntime = Join-Path $source 'daemon-runtime'
+if (-not (Test-Path -LiteralPath (Join-Path $daemonRuntime 'Xas.Daemon.runtimeconfig.json') -PathType Leaf)) {
+    throw "Package is missing the loose Xas.Daemon runtime dependencies: $daemonRuntime"
 }
 
 function Get-InstalledWinFspVersion {
@@ -88,6 +98,7 @@ New-Item -ItemType Directory -Force -Path $target | Out-Null
 Copy-Item -LiteralPath (Join-Path $source 'xas.exe') -Destination $target -Force
 Copy-Item -LiteralPath (Join-Path $source 'Xas.Daemon.exe') -Destination $target -Force
 Copy-Item -LiteralPath (Join-Path $source 'Xas.PrivilegedService.exe') -Destination $target -Force
+Copy-Item -Path (Join-Path $daemonRuntime '*') -Destination $target -Recurse -Force
 
 # Older packages launched the user daemon from Task Scheduler. The Windows service now supervises the
 # daemon in the active interactive session instead, so remove the legacy task to guarantee one owner.

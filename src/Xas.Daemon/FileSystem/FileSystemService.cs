@@ -15,7 +15,13 @@ public sealed class FileSystemService(PeerPermissionStore permissions, LocalConf
 
     internal RemoteVolume[] GetVolumesSnapshot() => _backend.GetVolumes();
 
-    public async ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
+    public ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
+        CancellationToken cancellationToken) => new(Task.Run(
+            async () => await HandleCoreAsync(peerId, request, cancellationToken).ConfigureAwait(false), cancellationToken));
+
+    // Native filesystem calls may block. Do not hold up the protocol reader that
+    // delivers other requests, responses, or cancellation messages on the bulk lane.
+    private async ValueTask<ProtocolMessage> HandleCoreAsync(string peerId, ProtocolMessage request,
         CancellationToken cancellationToken)
     {
         if (!permissions.IsAllowed(peerId, Capability.FileSystem))
@@ -187,15 +193,22 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
         RejectLinks(path);
         if (!Directory.Exists(path)) throw new DirectoryNotFoundException(path);
         var entries = Directory.EnumerateFileSystemEntries(path).OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
-            .Skip(request.Offset).Take(PageSize + 1).Select(entry =>
+            .Select(entry =>
             {
-                RejectLinks(entry);
-                var attributes = File.GetAttributes(entry);
-                var dir = attributes.HasFlag(FileAttributes.Directory);
-                var info = dir ? (FileSystemInfo)new DirectoryInfo(entry) : new FileInfo(entry);
-                return new RemoteFileEntry(info.Name, dir, dir ? 0 : ((FileInfo)info).Length,
-                    new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeMilliseconds());
-            }).ToArray();
+                try
+                {
+                    var attributes = File.GetAttributes(entry);
+                    // The protocol does not expose links. One link or inaccessible entry
+                    // must not make the entire containing directory unreadable.
+                    if (attributes.HasFlag(FileAttributes.ReparsePoint)) return null;
+                    var dir = attributes.HasFlag(FileAttributes.Directory);
+                    var info = dir ? (FileSystemInfo)new DirectoryInfo(entry) : new FileInfo(entry);
+                    return new RemoteFileEntry(info.Name, dir, dir ? 0 : ((FileInfo)info).Length,
+                        new DateTimeOffset(info.LastWriteTimeUtc).ToUnixTimeMilliseconds());
+                }
+                catch (IOException) { return null; }
+                catch (UnauthorizedAccessException) { return null; }
+            }).OfType<RemoteFileEntry>().Skip(request.Offset).Take(PageSize + 1).ToArray();
         return new RemoteDirectoryPage(entries.Take(PageSize).ToArray(), entries.Length > PageSize);
     }
 
@@ -437,7 +450,7 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
         {
             foreach (var drive in DriveInfo.GetDrives())
             {
-                if (!drive.IsReady || drive.DriveType != DriveType.Removable) continue;
+                if (drive.DriveType != DriveType.Removable || !drive.IsReady) continue;
                 var root = drive.RootDirectory.FullName;
                 var name = string.IsNullOrWhiteSpace(drive.VolumeLabel) ? root : drive.VolumeLabel;
                 yield return new MountedVolume(root, name, false, null);
@@ -531,15 +544,24 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
             var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
             var full = Path.GetFullPath(root);
             var drive = DriveInfo.GetDrives()
-                .Where(item => item.IsReady && full.StartsWith(Path.GetFullPath(item.RootDirectory.FullName), comparison))
+                .Where(item => ContainsPath(item.RootDirectory.FullName, full, comparison))
                 .OrderByDescending(item => item.RootDirectory.FullName.Length)
                 .FirstOrDefault();
-            if (drive is null) return default;
+            // Never query readiness or capacity of unrelated mounts. In particular an XAS
+            // mount would issue an RPC back to the peer currently asking for our volumes.
+            if (drive is null || !drive.IsReady) return default;
             return new StorageInfo(drive.TotalSize, drive.AvailableFreeSpace,
                 string.IsNullOrWhiteSpace(drive.DriveFormat) ? null : drive.DriveFormat);
         }
         catch (IOException) { return default; }
         catch (UnauthorizedAccessException) { return default; }
+    }
+
+    private static bool ContainsPath(string root, string path, StringComparison comparison)
+    {
+        root = Path.GetFullPath(root);
+        return path.Equals(root, comparison) || path.StartsWith(
+            Path.EndsInDirectorySeparator(root) ? root : root + Path.DirectorySeparatorChar, comparison);
     }
 
     private static string? FindOnPath(string executable)

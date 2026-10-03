@@ -80,6 +80,7 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
             case "fs.rename":
             case "fs.truncate":
             case "fs.setinfo":
+            case "fs.flush":
             case "fs.eject":
                 return await _fileSystem.HandleAsync(peerId, request, cancellationToken).ConfigureAwait(false);
             case "shell.run":

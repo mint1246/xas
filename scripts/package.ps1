@@ -54,8 +54,11 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
     $projects = if ($rid -eq 'win-x64') { @('Xas.Cli', 'Xas.Daemon', 'Xas.PrivilegedService') } else { @('Xas.Cli', 'Xas.Daemon') }
     foreach ($project in $projects) {
         $out = Join-Path $stage $project
+        # WinFsp's managed API inspects its own Assembly.Location during initialization.
+        # Bundled assemblies report an empty Location, so keep Windows daemon dependencies loose.
+        $singleFile = -not ($rid -eq 'win-x64' -and $project -eq 'Xas.Daemon')
         $publishArgs = @('publish', (Join-Path $root "src\$project\$project.csproj"), '-c', $Configuration,
-            '-r', $rid, '--self-contained', 'true', '-p:PublishSingleFile=true',
+            '-r', $rid, '--self-contained', 'true', "-p:PublishSingleFile=$($singleFile.ToString().ToLowerInvariant())",
             '-p:IncludeNativeLibrariesForSelfExtract=true', "-p:RestoreSources=$nuget", '-o', $out)
         & dotnet @publishArgs
         if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed for $project ($rid)" }
@@ -70,6 +73,11 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
     if ($rid -eq 'win-x64') {
         $winFspMsi = Get-VerifiedDependency $winFspFile $winFspUrl $winFspSha256
         Copy-Item (Join-Path $stage 'Xas.PrivilegedService\Xas.PrivilegedService.exe') $package
+        $daemonRuntime = Join-Path $package 'daemon-runtime'
+        New-Item -ItemType Directory -Force -Path $daemonRuntime | Out-Null
+        Get-ChildItem -LiteralPath (Join-Path $stage 'Xas.Daemon') -File |
+            Where-Object { $_.Name -ne 'Xas.Daemon.exe' } |
+            Copy-Item -Destination $daemonRuntime
         Copy-Item (Join-Path $PSScriptRoot 'install-windows.ps1') $package
         Copy-Item -LiteralPath $winFspMsi -Destination $package
         @('xas Windows x64 package', '', 'Run install-windows.ps1 from an elevated PowerShell window. It installs the client under %ProgramFiles%\xas, installs the pinned WinFsp runtime when needed, and installs the automatic XAS Background Service. The service keeps Xas.Daemon running inside the active user desktop session; no Scheduled Task or manual daemon start is required.', 'Open a new terminal after installation if PATH was changed.', '', 'Only the installed Xas.Daemon process may connect to the privileged broker. Remote administrator execution still requires the peer PrivilegedShell grant.') | Set-Content -LiteralPath $readme
@@ -79,7 +87,7 @@ foreach ($rid in @('win-x64', 'linux-x64')) {
             $candidate = Join-Path $root "artifacts\native-linux\$helper"
             if (Test-Path -LiteralPath $candidate -PathType Leaf) { Copy-Item -LiteralPath $candidate -Destination $package }
         }
-        @('xas Linux x64 package', '', 'Run: chmod +x install-linux.sh && ./install-linux.sh', 'Installs both programs to ~/.local/bin, registers/enables the per-user xas daemon with systemd when available, and adds the folder to your shell PATH if needed.', 'Native remote filesystem mounts require FUSE3: fusermount3, libfuse3.so.3, and access to /dev/fuse. The installer checks these and prints a distro-specific package hint without requiring root itself.', 'Automatic Linux remote mounts are created under $XDG_DATA_HOME/xas/mounts (normally ~/.local/share/xas/mounts).', 'Linux native helpers are included only if separately built and placed in artifacts/native-linux before packaging.') | Set-Content -LiteralPath $readme
+        @('xas Linux x64 package', '', 'Run: chmod +x install-linux.sh && ./install-linux.sh', 'Installs both programs to ~/.local/bin, registers/enables the per-user xas daemon with systemd when available, and adds the folder to your shell PATH if needed.', 'Native remote filesystem mounts require FUSE3: fusermount3, libfuse3, and access to /dev/fuse. The installer checks these and prints a distro-specific package hint without requiring root itself.', 'Automatic Linux remote mounts are created under ~/xas.', 'Linux native helpers are included only if separately built and placed in artifacts/native-linux before packaging.') | Set-Content -LiteralPath $readme
     }
     $archive = Join-Path $releaseRoot "xas-$rid.zip"
     if (Test-Path $archive) { Remove-Item -LiteralPath $archive -Force }

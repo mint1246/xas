@@ -3,8 +3,7 @@ set -eu
 
 PACKAGE_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 BIN_DIR=${XAS_INSTALL_DIR:-"$HOME/.local/bin"}
-DATA_HOME=${XDG_DATA_HOME:-"$HOME/.local/share"}
-MOUNT_ROOT="$DATA_HOME/xas/mounts"
+MOUNT_ROOT="$HOME/xas"
 mkdir -p "$BIN_DIR"
 mkdir -p "$MOUNT_ROOT"
 chmod 700 "$MOUNT_ROOT" 2>/dev/null || true
@@ -31,13 +30,13 @@ fuse_missing=""
 if ! command -v fusermount3 >/dev/null 2>&1; then fuse_missing="$fuse_missing fusermount3"; fi
 if [ ! -e /dev/fuse ]; then fuse_missing="$fuse_missing /dev/fuse"; fi
 if command -v ldconfig >/dev/null 2>&1; then
-    if ! ldconfig -p 2>/dev/null | grep -q 'libfuse3\.so\.3'; then fuse_missing="$fuse_missing libfuse3.so.3"; fi
+    if ! ldconfig -p 2>/dev/null | grep -Eq 'libfuse3\.so(\.3|[[:space:]])'; then fuse_missing="$fuse_missing libfuse3"; fi
 else
     found_fuse_lib=false
-    for candidate in /lib*/libfuse3.so.3 /usr/lib*/libfuse3.so.3 /lib/*/libfuse3.so.3 /usr/lib/*/libfuse3.so.3; do
+    for candidate in /lib*/libfuse3.so* /usr/lib*/libfuse3.so* /lib/*/libfuse3.so* /usr/lib/*/libfuse3.so*; do
         if [ -e "$candidate" ]; then found_fuse_lib=true; break; fi
     done
-    if [ "$found_fuse_lib" = false ]; then fuse_missing="$fuse_missing libfuse3.so.3"; fi
+    if [ "$found_fuse_lib" = false ]; then fuse_missing="$fuse_missing libfuse3"; fi
 fi
 if [ -n "$fuse_missing" ]; then
     echo "Warning: native Linux remote mounts are unavailable; missing:$fuse_missing" >&2
@@ -48,7 +47,7 @@ if [ -n "$fuse_missing" ]; then
     case "$distro_id" in
         ubuntu|debian|linuxmint|pop) echo 'Install FUSE3 with: sudo apt install fuse3 libfuse3-3' >&2 ;;
         fedora|rhel|centos|rocky|almalinux) echo 'Install FUSE3 with: sudo dnf install fuse3 fuse3-libs' >&2 ;;
-        arch|manjaro|endeavouros) echo 'Install FUSE3 with: sudo pacman -S fuse3' >&2 ;;
+        arch|cachyos|manjaro|endeavouros) echo 'Install FUSE3 with: sudo pacman -S fuse3' >&2 ;;
         *) echo 'Install your distribution FUSE3 package (libfuse3 + fusermount3) and ensure /dev/fuse is accessible.' >&2 ;;
     esac
 else

@@ -182,6 +182,7 @@ public sealed class LinuxFuseRemoteFileSystemMountAdapter : IRemoteFileSystemMou
     private CancellationTokenSource? _mountLifetime;
     private Task? _mountTask;
     private string? _mountPoint;
+    private string? _connectionId;
     private bool _createdMountPoint;
 
     public bool IsAvailable
@@ -213,12 +214,22 @@ public sealed class LinuxFuseRemoteFileSystemMountAdapter : IRemoteFileSystemMou
         lock (_gate)
             if (_mountTask is not null) throw new InvalidOperationException("A remote filesystem is already mounted by this adapter.");
 
+        // A previous daemon may have exited before detaching its mount. Inspect mountinfo
+        // before touching the directory, since a disconnected FUSE mount cannot be read.
+        var abandonedConnection = FindConnectionId(fullMountPoint);
+        if (abandonedConnection is not null)
+        {
+            await RunFuseUnmountAsync(fullMountPoint, cancellationToken).ConfigureAwait(false);
+            AbortConnection(abandonedConnection);
+        }
+
         var existed = Directory.Exists(fullMountPoint);
         Directory.CreateDirectory(fullMountPoint);
         if (Directory.EnumerateFileSystemEntries(fullMountPoint).Any())
             throw new IOException($"FUSE mount point is not empty: {fullMountPoint}");
 
-        var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        // A completed or disconnected UI/CLI request must not cancel an existing mount.
+        var lifetime = new CancellationTokenSource();
         var operations = new RemoteFuseOperations(new RemoteFuseFileSystemCore(volume, remoteFileSystem, lifetime.Token));
         var args = new[]
         {
@@ -250,6 +261,7 @@ public sealed class LinuxFuseRemoteFileSystemMountAdapter : IRemoteFileSystemMou
                 }
                 await Task.Delay(50, startup.Token).ConfigureAwait(false);
             }
+            lock (_gate) _connectionId = FindConnectionId(fullMountPoint);
         }
         catch
         {
@@ -263,17 +275,15 @@ public sealed class LinuxFuseRemoteFileSystemMountAdapter : IRemoteFileSystemMou
         Task? mountTask;
         CancellationTokenSource? lifetime;
         string? mountPoint;
+        string? connectionId;
         bool removeDirectory;
         lock (_gate)
         {
             mountTask = _mountTask;
             lifetime = _mountLifetime;
             mountPoint = _mountPoint;
+            connectionId = _connectionId;
             removeDirectory = _createdMountPoint;
-            _mountTask = null;
-            _mountLifetime = null;
-            _mountPoint = null;
-            _createdMountPoint = false;
         }
         if (mountTask is null || mountPoint is null)
         {
@@ -281,10 +291,14 @@ public sealed class LinuxFuseRemoteFileSystemMountAdapter : IRemoteFileSystemMou
             return;
         }
 
+        // Keep ownership if the OS rejects unmounting, so the manager can retry it.
+        if (IsMounted(mountPoint)) await RunFuseUnmountAsync(mountPoint, cancellationToken).ConfigureAwait(false);
         lifetime?.Cancel();
+        // Lazy detach alone leaves a connection alive while callers hold references.
+        // Abort only this adapter's FUSE connection so pending kernel calls can finish.
+        if (connectionId is not null) AbortConnection(connectionId);
         try
         {
-            if (IsMounted(mountPoint)) await RunFuseUnmountAsync(mountPoint, cancellationToken).ConfigureAwait(false);
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeout.CancelAfter(TimeSpan.FromSeconds(10));
             try { await mountTask.WaitAsync(timeout.Token).ConfigureAwait(false); }
@@ -293,6 +307,14 @@ public sealed class LinuxFuseRemoteFileSystemMountAdapter : IRemoteFileSystemMou
         }
         finally
         {
+            lock (_gate)
+            {
+                _mountTask = null;
+                _mountLifetime = null;
+                _mountPoint = null;
+                _connectionId = null;
+                _createdMountPoint = false;
+            }
             lifetime?.Dispose();
             if (removeDirectory)
             {
@@ -304,6 +326,15 @@ public sealed class LinuxFuseRemoteFileSystemMountAdapter : IRemoteFileSystemMou
     }
 
     public async ValueTask DisposeAsync() => await UnmountAsync(CancellationToken.None).ConfigureAwait(false);
+
+    private static void AbortConnection(string connectionId)
+    {
+        try { File.WriteAllText($"/sys/fs/fuse/connections/{connectionId}/abort", "1"); }
+        catch (DirectoryNotFoundException) { }
+        catch (FileNotFoundException) { }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        { Console.Error.WriteLine($"Could not abort detached XAS FUSE connection {connectionId}: {ex.Message}"); }
+    }
 
     private static bool CanLoadFuse3()
     {
@@ -348,7 +379,8 @@ public sealed class LinuxFuseRemoteFileSystemMountAdapter : IRemoteFileSystemMou
             RedirectStandardError = true,
             CreateNoWindow = true
         };
-        info.ArgumentList.Add("-u");
+        // Detach even when an application still has the mount as its current directory.
+        info.ArgumentList.Add("-uz");
         info.ArgumentList.Add(mountPoint);
         using var process = Process.Start(info) ?? throw new IOException("Could not start fusermount3.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -379,6 +411,21 @@ public sealed class LinuxFuseRemoteFileSystemMountAdapter : IRemoteFileSystemMou
             if (string.Equals(current, expected, StringComparison.Ordinal)) return true;
         }
         return false;
+    }
+
+    private static string? FindConnectionId(string mountPoint)
+    {
+        foreach (var line in File.ReadLines("/proc/self/mountinfo"))
+        {
+            var fields = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var separator = Array.IndexOf(fields, "-");
+            if (separator < 6 || separator + 1 >= fields.Length || fields[separator + 1] != "fuse.xas" ||
+                DecodeMountInfoPath(fields[4]) != mountPoint) continue;
+            var device = fields[2].Split(':');
+            if (device.Length == 2 && device[0] == "0" && device[1].Length > 0 && device[1].All(char.IsAsciiDigit))
+                return device[1];
+        }
+        return null;
     }
 
     private static string DecodeMountInfoPath(string value) => value
@@ -554,6 +601,9 @@ internal sealed class RemoteFuseOperations(RemoteFuseFileSystemCore core) : IFus
 
     public PosixResult Flush(ReadOnlyNativeMemory<byte> fileNamePtr, ref FuseFileInfo fileInfo)
     {
+        // Closing a read-only handle must not require write access on the remote file.
+        const int accessModeMask = 3; // Linux O_ACCMODE; O_RDONLY is zero.
+        if (((int)fileInfo.flags & accessModeMask) == 0) return PosixResult.Success;
         try
         {
             var path = PathOf(fileNamePtr);

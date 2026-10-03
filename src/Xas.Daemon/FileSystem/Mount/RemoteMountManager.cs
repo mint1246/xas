@@ -30,6 +30,7 @@ public sealed class RemoteMountManager : IAsyncDisposable
     private readonly RemoteMountPaths _mountPaths = new(Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "xas"));
     private readonly ConcurrentDictionary<MountKey, MountedVolume> _mounted = new();
+    private readonly ConcurrentDictionary<MountKey, SemaphoreSlim> _mountGates = new();
     // Explicit mounts are user intent and must survive automatic removable-volume policy changes.
     private readonly ConcurrentDictionary<MountKey, byte> _manualMounts = new();
     private readonly ConcurrentDictionary<MountKey, byte> _suppressed = new();
@@ -232,11 +233,14 @@ public sealed class RemoteMountManager : IAsyncDisposable
     private async Task ReconcileAsync(string deviceId, CancellationToken token)
     {
         var session = _sessions.GetSession(deviceId);
-        if (session is null || !session.Online || !session.BulkReady)
+        if (session is null)
         {
             await UnmountDeviceAsync(deviceId).ConfigureAwait(false);
             return;
         }
+        // The volume client resolves the current lane for each operation. Preserve the
+        // native mount through reconnects rather than leaving busy, abandoned FUSE mounts.
+        if (!session.Online || !session.BulkReady) return;
 
         var snapshot = session.Snapshot;
         if (snapshot.Device?.Capabilities.Any(c => c.Capability == Capability.FileSystem && c.Version > 0) != true)
@@ -308,6 +312,19 @@ public sealed class RemoteMountManager : IAsyncDisposable
     private async Task MountAsync(MountKey key, string deviceName, PeerSession session, RemoteVolume volume,
         CancellationToken token)
     {
+        var gate = _mountGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            if (_mounted.ContainsKey(key)) return;
+            await MountCoreAsync(key, deviceName, session, volume, token).ConfigureAwait(false);
+        }
+        finally { gate.Release(); }
+    }
+
+    private async Task MountCoreAsync(MountKey key, string deviceName, PeerSession session, RemoteVolume volume,
+        CancellationToken token)
+    {
         var adapter = _adapterFactory();
         if (!adapter.IsAvailable)
         {
@@ -346,16 +363,26 @@ public sealed class RemoteMountManager : IAsyncDisposable
 
     private async Task UnmountAsync(MountKey key)
     {
-        if (!_mounted.TryRemove(key, out var mounted)) return;
-        try { await mounted.Adapter.UnmountAsync(CancellationToken.None).ConfigureAwait(false); }
-        catch (Exception ex) { _log?.Invoke($"Unmount of {mounted.Volume.Name} from {mounted.DeviceName} failed: {ex.Message}"); }
-        finally { await mounted.Adapter.DisposeAsync().ConfigureAwait(false); }
-        _log?.Invoke($"Unmounted {mounted.Volume.Name} from {mounted.DeviceName}.");
+        var gate = _mountGates.GetOrAdd(key, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (!_mounted.TryGetValue(key, out var mounted)) return;
+            await mounted.Adapter.UnmountAsync(CancellationToken.None).ConfigureAwait(false);
+            _mounted.TryRemove(key, out _);
+            await mounted.Adapter.DisposeAsync().ConfigureAwait(false);
+            _log?.Invoke($"Unmounted {mounted.Volume.Name} from {mounted.DeviceName}.");
+        }
+        finally { gate.Release(); }
     }
 
     private async Task UnmountAllAsync()
     {
-        foreach (var key in _mounted.Keys.ToArray()) await UnmountAsync(key).ConfigureAwait(false);
+        foreach (var key in _mounted.Keys.ToArray())
+        {
+            try { await UnmountAsync(key).ConfigureAwait(false); }
+            catch (Exception ex) { _log?.Invoke($"Could not unmount {key.VolumeId} from {key.DeviceId}: {ex.Message}"); }
+        }
     }
 
     private ConfiguredPeer ResolvePeer(string? deviceId) => _configuration.Resolve(deviceId)

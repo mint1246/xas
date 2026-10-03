@@ -41,7 +41,8 @@ public sealed class WinFspRemoteFileSystemMountAdapter : IRemoteFileSystemMountA
         if (_host is not null) return ValueTask.FromException(new InvalidOperationException("A remote filesystem is already mounted."));
         if (!IsAvailable) return ValueTask.FromException(new PlatformNotSupportedException("The WinFsp runtime/driver is not installed."));
 
-        var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        // The request only controls startup; the daemon owns the mounted drive afterwards.
+        var lifetime = new CancellationTokenSource();
         var filesystem = new RemoteWinFspFileSystem(volume, remoteFileSystem, lifetime.Token);
         var host = new FileSystemHost(filesystem);
         try
