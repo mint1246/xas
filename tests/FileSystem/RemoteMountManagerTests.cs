@@ -176,6 +176,39 @@ public static class RemoteMountManagerTests
             Assert(await manager.UnmountVolumeAsync(peerId, "PROJECTS", CancellationToken.None),
                 "Manual export unmount did not report an existing native mount.");
 
+            var main = new RemoteVolume("main-root", "root", "fixed", false, 128_000_000, 96_000_000, "ext4");
+            current = [current[0], main];
+            session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(7));
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 2);
+            Assert(manager.GetSnapshots().Any(m => m.VolumeId == main.Id),
+                "The main drive was not mounted automatically.");
+            configuration.SetAutoMountRemoteRemovable(false);
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1);
+            Equal(main.Id, manager.GetSnapshots()[0].VolumeId,
+                "The removable-drive setting removed the automatic main-drive mount.");
+            configuration.SetAutoMountRemoteMainDrive(false);
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
+            configuration.SetAutoMountRemoteMainDrive(true);
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1);
+            Assert(await manager.UnmountVolumeAsync(peerId, main.Id, CancellationToken.None),
+                "Main-drive unmount failed.");
+            configuration.SetAutoMountRemoteRemovable(true);
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1);
+            Equal("sd-1", manager.GetSnapshots()[0].VolumeId,
+                "A manually unmounted main drive was automatically remounted.");
+            await manager.MountVolumeAsync(peerId, main.Id, CancellationToken.None);
+            configuration.SetAutoMountRemoteMainDrive(false);
+            await Task.Delay(150);
+            Assert(manager.GetSnapshots().Any(m => m.VolumeId == main.Id),
+                "Disabling automatic main-drive mounting removed an explicit mount.");
+
+            session.Detach(PeerLane.Bulk, bulk);
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
+            Assert(await session.AttachAsync(PeerLane.Bulk, bulk), "Could not restore the bulk lane for main-drive reconnect.");
+            await WaitUntilAsync(() => manager.GetSnapshots().Count == 2);
+            Assert(manager.GetSnapshots().Any(m => m.VolumeId == main.Id),
+                "Reconnect did not restore the explicit main-drive mount.");
+
             session.Detach(PeerLane.Bulk, bulk);
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
             Equal(1, adapters[8].UnmountCount, "Losing the bulk lane left a stale drive mounted.");

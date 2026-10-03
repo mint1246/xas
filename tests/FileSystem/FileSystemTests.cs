@@ -42,6 +42,7 @@ public static class FileSystemTests
         await RemoteClientUsesBinaryWritesForVersion2();
         await RemoteErrorsRetainFilesystemSemantics();
         await FileSystemExportsAreExplicitAndReadOnlyIsEnforced();
+        await MainDriveIsSharedByDefaultAndCanBeDisabled();
     }
 
     private static async Task FileSystemExportsAreExplicitAndReadOnlyIsEnforced()
@@ -54,6 +55,7 @@ public static class FileSystemTests
         {
             var configuration = new LocalConfiguration(Path.Combine(root, "config"));
             configuration.SetAutoExposeRemovable(false);
+            configuration.SetAutoExposeMainDrive(false);
             configuration.UpsertFileSystemExport(new FileSystemExport("docs", exportRoot, "Docs", ReadOnly: true));
             var permissions = new PeerPermissionStore(Path.Combine(root, "trust"));
             permissions.SetAllowed("peer", Capability.FileSystem, true);
@@ -87,8 +89,54 @@ public static class FileSystemTests
             catch (UnauthorizedAccessException) { }
 
             var reloaded = new LocalConfiguration(Path.Combine(root, "config"));
-            Assert(!reloaded.AutoExposeRemovable && reloaded.FileSystemExports.Single().Id == "docs",
+            Assert(!reloaded.AutoExposeRemovable && !reloaded.AutoExposeMainDrive && reloaded.FileSystemExports.Single().Id == "docs",
                 "Filesystem export policy did not persist in local configuration.");
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    private static async Task MainDriveIsSharedByDefaultAndCanBeDisabled()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows()) return;
+        var root = Path.Combine(Path.GetTempPath(), "xas-main-drive-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var configuration = new LocalConfiguration(root);
+            Assert(configuration.AutoExposeMainDrive && configuration.AutoMountRemoteMainDrive,
+                "Main-drive sharing and mounting were not enabled by default.");
+            // Settings saved by older versions must also pick up the new defaults.
+            await File.WriteAllTextAsync(Path.Combine(root, "settings.json"),
+                "{\"Peers\":[],\"AutoExposeRemovable\":false,\"AutoMountRemoteRemovable\":true}");
+            var reloaded = new LocalConfiguration(root);
+            Assert(reloaded.AutoExposeMainDrive && reloaded.AutoMountRemoteMainDrive,
+                "Existing configuration did not retain main-drive defaults.");
+            configuration.SetAutoExposeRemovable(false);
+            var permissions = new PeerPermissionStore(Path.Combine(root, "trust"));
+            var service = new FileSystemService(permissions, configuration);
+            var request = new ProtocolMessage(MessageKind.Request, 1, 0, "fs.volumes", []);
+            try
+            {
+                await service.HandleAsync("peer", request, CancellationToken.None);
+                throw new Exception("Main-drive sharing bypassed peer filesystem permission.");
+            }
+            catch (UnauthorizedAccessException) { }
+            permissions.SetAllowed("peer", Capability.FileSystem, true);
+            var reply = await service.HandleAsync("peer", request, CancellationToken.None);
+            var volumes = RemoteFileSystemWire.Decode<RemoteVolume[]>(reply.Payload);
+            Assert(volumes.Length == 1 && volumes[0].Kind == "fixed" && volumes[0].Id.StartsWith("main-"),
+                "The main drive was not exposed without removable media.");
+            var stat = await service.HandleAsync("peer", new ProtocolMessage(MessageKind.Request, 2, 0, "fs.stat",
+                RemoteFileSystemWire.Encode(new RemotePath(volumes[0].Id, ""))), CancellationToken.None);
+            Assert(RemoteFileSystemWire.Decode<RemoteFileStat>(stat.Payload).Directory,
+                "The main drive root could not be accessed.");
+            configuration.SetAutoExposeMainDrive(false);
+            configuration.SetAutoMountRemoteMainDrive(false);
+            reply = await service.HandleAsync("peer", request, CancellationToken.None);
+            Assert(RemoteFileSystemWire.Decode<RemoteVolume[]>(reply.Payload).Length == 0,
+                "Disabling main-drive sharing left it exposed.");
+            reloaded = new LocalConfiguration(root);
+            Assert(!reloaded.AutoExposeMainDrive && !reloaded.AutoMountRemoteMainDrive,
+                "Disabled main-drive settings did not persist.");
         }
         finally { Directory.Delete(root, true); }
     }

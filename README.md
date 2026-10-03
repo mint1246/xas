@@ -10,7 +10,7 @@ XAS runs a daemon in each user's desktop session. Devices pair through a code co
 
 - Interactive remote shells using Windows ConPTY or a Linux PTY, streamed commands, remote exit codes, and piped stdin.
 - File and recursive directory copy with overwrite protection and modification-time preservation.
-- Remote filesystem mounts through WinFsp on Windows and FUSE3 on Linux, explicit directory exports, removable-volume discovery, and remote eject.
+- Remote filesystem mounts through WinFsp on Windows and FUSE3 on Linux, main-drive sharing, explicit directory exports, removable-volume discovery, and remote eject.
 - Plain-text clipboard push, pull, and continuous synchronization.
 - Windows virtual-monitor handoff to a Linux desktop through SudoVDA, with **Ctrl+Alt+Esc** for emergency return.
 - LAN discovery, per-peer capability grants, a local configuration UI, and background startup services.
@@ -101,7 +101,9 @@ xas unmount <volume-name-or-id>
 xas eject <volume-name-or-id>
 ```
 
-Interactive mode requires an attached terminal and restores terminal settings on exit. Commands stream stdout/stderr and return the remote process's exit code. `xas cp` refuses to overwrite existing files unless `-f` is supplied and does not follow symbolic links or reparse points. Configure explicit filesystem exports and automatic removable-volume behavior through `xas ui`.
+Interactive mode requires an attached terminal and restores terminal settings on exit. Commands stream stdout/stderr and return the remote process's exit code. `xas cp` refuses to overwrite existing files unless `-f` is supplied and does not follow symbolic links or reparse points. Configure filesystem sharing and automatic mounting through `xas ui`.
+
+Main-drive sharing and automatic mounting are enabled by default for peers with filesystem permission: Linux exposes `/` as `root`, and Windows exposes its system drive. Removable drives are also shared and mounted automatically. Each behavior can be disabled independently in the Storage tab. Explicit directory exports remain available for narrower sharing. Linux mounts appear at `~/xas/<computer>/<volume>` (for example, `~/xas/DESKTOP-77IJ101/F:`); a short suffix is added only when computer or volume names collide. New mount locations take effect after updating and restarting the daemon.
 
 Use `xas --sudo -c "..."` or `xas exec --sudo <executable> ...` for elevated execution. Linux uses the normal system sudo policy and a PTY for authentication. Windows uses the installed administrator broker and requires `xas allow <caller-id> privilegedshell` on the receiver. `--admin` is an alias for `--sudo`.
 

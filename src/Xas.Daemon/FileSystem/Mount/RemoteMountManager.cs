@@ -14,7 +14,7 @@ public sealed record RemoteVolumeStatus(string DeviceId, string DeviceName, Remo
     string? MountedAt, bool AutoMountSuppressed);
 
 /// <summary>
-/// Reconciles remote removable volumes with native local mounts. The daemon owns this for its entire
+/// Reconciles remote main and removable volumes with native local mounts. The daemon owns this for its entire
 /// lifetime so a CLI process is never responsible for keeping a drive letter alive.
 /// </summary>
 public sealed class RemoteMountManager : IAsyncDisposable
@@ -27,6 +27,8 @@ public sealed class RemoteMountManager : IAsyncDisposable
     private readonly Func<PeerSession, CancellationToken, ValueTask<RemoteVolume[]>> _volumeProvider;
     private readonly Func<PeerSession, string, CancellationToken, ValueTask> _ejectVolume;
     private readonly Action<string>? _log;
+    private readonly RemoteMountPaths _mountPaths = new(Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "xas"));
     private readonly ConcurrentDictionary<MountKey, MountedVolume> _mounted = new();
     // Explicit mounts are user intent and must survive automatic removable-volume policy changes.
     private readonly ConcurrentDictionary<MountKey, byte> _manualMounts = new();
@@ -263,7 +265,6 @@ public sealed class RemoteMountManager : IAsyncDisposable
         }
 
         var available = volumes.ToDictionary(v => v.Id, StringComparer.Ordinal);
-        var autoMountEnabled = _configuration.AutoMountRemoteRemovable;
 
         foreach (var suppressed in _suppressed.Keys.Where(k => k.DeviceId == deviceId).ToArray())
             if (!available.ContainsKey(suppressed.VolumeId)) _suppressed.TryRemove(suppressed, out _);
@@ -271,9 +272,7 @@ public sealed class RemoteMountManager : IAsyncDisposable
         foreach (var existing in _mounted.Keys.Where(k => k.DeviceId == deviceId).ToArray())
         {
             if (!available.ContainsKey(existing.VolumeId) ||
-                (!autoMountEnabled && !_manualMounts.ContainsKey(existing)) ||
-                (!_manualMounts.ContainsKey(existing) &&
-                 !string.Equals(available[existing.VolumeId].Kind, "removable", StringComparison.OrdinalIgnoreCase)))
+                (!_manualMounts.ContainsKey(existing) && !ShouldAutoMount(available[existing.VolumeId])))
             {
                 await UnmountAsync(existing).ConfigureAwait(false);
                 if (!available.ContainsKey(existing.VolumeId)) _manualMounts.TryRemove(existing, out _);
@@ -293,14 +292,18 @@ public sealed class RemoteMountManager : IAsyncDisposable
                 await MountAsync(key, snapshot.Name, session, volume, token).ConfigureAwait(false);
         }
 
-        if (!autoMountEnabled) return;
-        foreach (var volume in available.Values.Where(v => string.Equals(v.Kind, "removable", StringComparison.OrdinalIgnoreCase)))
+        foreach (var volume in available.Values.Where(ShouldAutoMount))
         {
             var key = new MountKey(deviceId, volume.Id);
             if (_mounted.ContainsKey(key) || _suppressed.ContainsKey(key)) continue;
             await MountAsync(key, snapshot.Name, session, volume, token).ConfigureAwait(false);
         }
     }
+
+    private bool ShouldAutoMount(RemoteVolume volume) =>
+        string.Equals(volume.Kind, "removable", StringComparison.OrdinalIgnoreCase)
+            ? _configuration.AutoMountRemoteRemovable
+            : string.Equals(volume.Kind, "fixed", StringComparison.OrdinalIgnoreCase) && _configuration.AutoMountRemoteMainDrive;
 
     private async Task MountAsync(MountKey key, string deviceName, PeerSession session, RemoteVolume volume,
         CancellationToken token)
@@ -423,28 +426,11 @@ public sealed class RemoteMountManager : IAsyncDisposable
         finally { adapter.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
     }
 
-    private static string DefaultMountPoint(string deviceId, string deviceName, RemoteVolume volume)
+    private string DefaultMountPoint(string deviceId, string deviceName, RemoteVolume volume)
     {
         if (OperatingSystem.IsWindows()) return string.Empty;
         if (!OperatingSystem.IsLinux()) return string.Empty;
-        var dataHome = Environment.GetEnvironmentVariable("XDG_DATA_HOME");
-        if (string.IsNullOrWhiteSpace(dataHome))
-            dataHome = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "share");
-        var device = SafePathComponent(deviceName, deviceId);
-        var remoteVolume = SafePathComponent(volume.Name, volume.Id);
-        return Path.Combine(dataHome, "xas", "mounts", device, remoteVolume);
-    }
-
-    private static string SafePathComponent(string displayName, string stableId)
-    {
-        var invalid = Path.GetInvalidFileNameChars().ToHashSet();
-        var chars = displayName.Trim().Select(ch => char.IsControl(ch) || invalid.Contains(ch) || ch is '/' or '\\' ? '_' : ch).ToArray();
-        var readable = new string(chars).Trim(' ', '.');
-        if (string.IsNullOrWhiteSpace(readable)) readable = "remote";
-        if (readable.Length > 48) readable = readable[..48];
-        var digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(
-            System.Text.Encoding.UTF8.GetBytes(stableId))).ToLowerInvariant()[..8];
-        return $"{readable}-{digest}";
+        return _mountPaths.GetMountPoint(deviceId, deviceName, volume);
     }
 
     public async ValueTask DisposeAsync()

@@ -47,6 +47,8 @@ public sealed class LocalConfiguration
     public IReadOnlyList<ConfiguredPeer> Peers { get { lock (_gate) return _settings.Peers.ToArray(); } }
     public bool AutoExposeRemovable { get { lock (_gate) return _settings.AutoExposeRemovable; } }
     public bool AutoMountRemoteRemovable { get { lock (_gate) return _settings.AutoMountRemoteRemovable; } }
+    public bool AutoExposeMainDrive { get { lock (_gate) return _settings.AutoExposeMainDrive; } }
+    public bool AutoMountRemoteMainDrive { get { lock (_gate) return _settings.AutoMountRemoteMainDrive; } }
     public IReadOnlyList<FileSystemExport> FileSystemExports { get { lock (_gate) return _settings.FileSystemExports.ToArray(); } }
 
     public ConfiguredPeer? Resolve(string? idPrefix)
@@ -109,6 +111,18 @@ public sealed class LocalConfiguration
         Changed?.Invoke();
     }
 
+    public void SetAutoExposeMainDrive(bool enabled)
+    {
+        lock (_gate) { _settings.AutoExposeMainDrive = enabled; Save(); }
+        Changed?.Invoke();
+    }
+
+    public void SetAutoMountRemoteMainDrive(bool enabled)
+    {
+        lock (_gate) { _settings.AutoMountRemoteMainDrive = enabled; Save(); }
+        Changed?.Invoke();
+    }
+
     public void UpsertFileSystemExport(FileSystemExport export)
     {
         ArgumentNullException.ThrowIfNull(export);
@@ -157,6 +171,8 @@ public sealed class LocalConfiguration
         public ConfiguredPeer[] Peers { get; set; } = [];
         public bool AutoExposeRemovable { get; set; } = true;
         public bool AutoMountRemoteRemovable { get; set; } = true;
+        public bool AutoExposeMainDrive { get; set; } = true;
+        public bool AutoMountRemoteMainDrive { get; set; } = true;
         public FileSystemExport[] FileSystemExports { get; set; } = [];
 
         public Settings() { }

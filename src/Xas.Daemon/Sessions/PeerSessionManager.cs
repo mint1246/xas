@@ -613,7 +613,6 @@ public sealed class PeerSessionManager : IAsyncDisposable
                 try
                 {
                     current = _dispatcher.FileSystem.GetVolumesSnapshot()
-                        .Where(v => v.Kind == "removable")
                         .OrderBy(v => v.Id, StringComparer.Ordinal)
                         .ToArray();
                 }

@@ -425,6 +425,9 @@ public static class IntegrationTests
                 "The local web UI state did not expose storage state.");
             Assert(storage.TryGetProperty("AutoExposeRemovable", out _),
                 "The local web UI storage state omitted the local removable-drive setting.");
+            Assert(storage.GetProperty("AutoExposeMainDrive").GetBoolean() &&
+                   storage.GetProperty("AutoMountRemoteMainDrive").GetBoolean(),
+                "The local web UI storage state omitted default main-drive sharing or mounting.");
             Assert(storage.TryGetProperty("Mounts", out _),
                 "The local web UI storage state omitted current native mounts.");
         }
@@ -446,6 +449,16 @@ public static class IntegrationTests
             Assert(settingsResponse.IsSuccessStatusCode, "The local web UI storage settings endpoint rejected valid settings.");
             Assert(!configuration.AutoExposeRemovable && configuration.AutoMountRemoteRemovable,
                 "Camel-case web UI storage settings were not applied to daemon configuration.");
+            Assert(configuration.AutoExposeMainDrive && configuration.AutoMountRemoteMainDrive,
+                "A legacy storage settings request overwrote main-drive settings.");
+        }
+
+        using (var settingsResponse = await PostAsync("/api/storage/settings",
+                   "{\"autoExposeRemovable\":false,\"autoMountRemoteRemovable\":true,\"autoExposeMainDrive\":false,\"autoMountRemoteMainDrive\":false}"))
+        {
+            Assert(settingsResponse.IsSuccessStatusCode && !configuration.AutoExposeMainDrive &&
+                   !configuration.AutoMountRemoteMainDrive,
+                "The local web UI did not apply main-drive settings.");
         }
 
         using (var permissionResponse = await PostAsync("/api/permission",

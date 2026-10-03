@@ -141,6 +141,26 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
             }
         }
 
+        if (configuration.AutoExposeMainDrive)
+        {
+            foreach (var volume in EnumerateMainVolume())
+            {
+                try
+                {
+                    var root = Path.GetFullPath(volume.Root);
+                    if (!Directory.Exists(root)) continue;
+                    RejectLinks(root);
+                    var id = "main-" + StableVolumeId(root);
+                    roots[id] = new VolumeRoot(root, volume.ReadOnly, "fixed", null);
+                    var storage = GetStorageInfo(root);
+                    result.Add(new RemoteVolume(id, volume.Name, "fixed", volume.ReadOnly,
+                        storage.TotalBytes, storage.FreeBytes, storage.FileSystem));
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+        }
+
         lock (_volumeGate)
         {
             _volumes.Clear();
@@ -441,6 +461,28 @@ internal sealed class LocalFileSystemBackend(LocalConfiguration configuration)
             var sourceDevice = DecodeMountInfoPath(fields[separator + 2]);
             if (!sourceDevice.StartsWith("/dev/", StringComparison.Ordinal)) sourceDevice = null;
             yield return new MountedVolume(mountPoint, name, readOnly, sourceDevice);
+        }
+    }
+
+    private static IEnumerable<MountedVolume> EnumerateMainVolume()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var root = Path.GetPathRoot(Environment.GetFolderPath(Environment.SpecialFolder.System));
+            if (!string.IsNullOrEmpty(root)) yield return new MountedVolume(root, root, false, null);
+            yield break;
+        }
+
+        if (!OperatingSystem.IsLinux() || !File.Exists("/proc/self/mountinfo")) yield break;
+        foreach (var line in File.ReadLines("/proc/self/mountinfo"))
+        {
+            var fields = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var separator = Array.IndexOf(fields, "-");
+            if (separator < 6 || separator + 3 >= fields.Length || fields[4] != "/") continue;
+            var readOnly = fields[5].Split(',').Contains("ro", StringComparer.Ordinal) ||
+                           fields[separator + 3].Split(',').Contains("ro", StringComparer.Ordinal);
+            yield return new MountedVolume("/", "root", readOnly, null);
+            yield break;
         }
     }
 
