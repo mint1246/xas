@@ -189,14 +189,17 @@ internal static class UserDaemonSupervisor
 
     [DllImport("kernel32.dll")] private static extern uint WTSGetActiveConsoleSessionId();
     [DllImport("wtsapi32.dll", SetLastError = true)] private static extern bool WTSQueryUserToken(uint sessionId, out SafeAccessTokenHandle token);
-    [DllImport("advapi32.dll", SetLastError = true)] private static extern bool DuplicateTokenEx(
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool DuplicateTokenEx(
         SafeAccessTokenHandle existing, uint access, IntPtr attributes, int impersonationLevel, int tokenType,
         out SafeAccessTokenHandle duplicate);
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool CreateProcessAsUser(
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcessAsUser(
         SafeAccessTokenHandle token, string applicationName, StringBuilder commandLine, IntPtr processAttributes,
         IntPtr threadAttributes, bool inheritHandles, uint creationFlags, IntPtr environment, string? currentDirectory,
         ref StartupInfo startup, out ProcessInfo processInfo);
-    [DllImport("userenv.dll", SetLastError = true)] private static extern bool CreateEnvironmentBlock(
+    [DllImport("userenv.dll", SetLastError = true)]
+    private static extern bool CreateEnvironmentBlock(
         out IntPtr environment, SafeAccessTokenHandle token, bool inherit);
     [DllImport("userenv.dll")] private static extern bool DestroyEnvironmentBlock(IntPtr environment);
     [DllImport("kernel32.dll")] private static extern bool CloseHandle(IntPtr handle);

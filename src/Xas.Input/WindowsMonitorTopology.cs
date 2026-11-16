@@ -173,18 +173,21 @@ public static class WindowsMonitorTopology
     private static bool Overlaps(WindowsCaptureRegion a, WindowsCaptureRegion b) =>
         a.Left < b.Right && b.Left < a.Right && a.Top < b.Bottom && b.Top < a.Bottom;
 
-    [UnmanagedFunctionPointer(CallingConvention.Winapi)] private delegate bool MonitorEnum(
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    private delegate bool MonitorEnum(
         IntPtr monitor, IntPtr hdc, IntPtr rect, IntPtr data);
     [StructLayout(LayoutKind.Sequential)] private struct Point { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] private struct Rect { public int Left, Top, Right, Bottom; }
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct MonitorInfoEx
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MonitorInfoEx
     {
         public uint Size;
         public Rect Monitor, Work;
         public uint Flags;
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
     }
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct DisplayDevice
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DisplayDevice
     {
         public uint Size;
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
@@ -193,7 +196,8 @@ public static class WindowsMonitorTopology
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceId;
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)] public string DeviceKey;
     }
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct DevMode
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct DevMode
     {
         [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string DeviceName;
         public ushort SpecVersion, DriverVersion, Size, DriverExtra;
@@ -206,7 +210,8 @@ public static class WindowsMonitorTopology
         public uint BitsPerPel, PelsWidth, PelsHeight, DisplayFlags, DisplayFrequency,
             IcmMethod, IcmIntent, MediaType, DitherType, Reserved1, Reserved2, PanningWidth, PanningHeight;
     }
-    [DllImport("user32.dll", SetLastError = true)] private static extern bool EnumDisplayMonitors(
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EnumDisplayMonitors(
         IntPtr hdc, IntPtr rect, MonitorEnum callback, IntPtr data);
     [DllImport("user32.dll", EntryPoint = "GetMonitorInfoW", SetLastError = true, CharSet = CharSet.Unicode)]
     private static extern bool GetMonitorInfo(IntPtr monitor, ref MonitorInfoEx info);

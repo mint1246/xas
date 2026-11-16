@@ -74,8 +74,12 @@ internal sealed class WindowsConPtySession : IInteractiveShellSession
 
             // Explicit null standard handles prevent redirected parent handles from being duplicated
             // into the child, allowing ConPTY to supply its own terminal handles.
-            var startup = new Native.STARTUPINFOEX { StartupInfo = new Native.STARTUPINFO
-                { cb = Marshal.SizeOf<Native.STARTUPINFOEX>(), dwFlags = Native.STARTF_USESTDHANDLES }, lpAttributeList = attributeList };
+            var startup = new Native.STARTUPINFOEX
+            {
+                StartupInfo = new Native.STARTUPINFO
+                { cb = Marshal.SizeOf<Native.STARTUPINFOEX>(), dwFlags = Native.STARTF_USESTDHANDLES },
+                lpAttributeList = attributeList
+            };
             var startupPtr = Marshal.AllocHGlobal(Marshal.SizeOf<Native.STARTUPINFOEX>());
             try
             {
@@ -161,15 +165,15 @@ internal static class Native
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] internal struct STARTUPINFO { public int cb; public string? lpReserved, lpDesktop, lpTitle; public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags; public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError; }
     [StructLayout(LayoutKind.Sequential)] internal struct STARTUPINFOEX { public STARTUPINFO StartupInfo; public IntPtr lpAttributeList; }
     [StructLayout(LayoutKind.Sequential)] internal struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
-    [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool CreatePipe(out SafeFileHandle read, out SafeFileHandle write, IntPtr attributes, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool CreatePipe(out SafeFileHandle read, out SafeFileHandle write, IntPtr attributes, uint size);
     [DllImport("kernel32.dll")] internal static extern int CreatePseudoConsole(COORD size, SafeFileHandle input, SafeFileHandle output, uint flags, out IntPtr hpc);
     [DllImport("kernel32.dll")] internal static extern int ResizePseudoConsole(IntPtr hpc, COORD size);
     [DllImport("kernel32.dll")] internal static extern void ClosePseudoConsole(IntPtr hpc);
-    [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
-    [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool InitializeProcThreadAttributeList(IntPtr list, int count, int flags, ref IntPtr size);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size, IntPtr previous, IntPtr returned);
     [DllImport("kernel32.dll")] internal static extern void DeleteProcThreadAttributeList(IntPtr list);
-    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] internal static extern bool CreateProcess(string? app, System.Text.StringBuilder command, IntPtr procAttrs, IntPtr threadAttrs, bool inherit, uint flags, IntPtr env, string cwd, IntPtr startup, out PROCESS_INFORMATION info);
-    [DllImport("kernel32.dll", SetLastError=true)] internal static extern uint WaitForSingleObject(SafeFileHandle handle, uint ms);
-    [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool GetExitCodeProcess(SafeFileHandle process, out uint code);
-    [DllImport("kernel32.dll", SetLastError=true)] internal static extern bool TerminateProcess(SafeFileHandle process, uint exitCode);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] internal static extern bool CreateProcess(string? app, System.Text.StringBuilder command, IntPtr procAttrs, IntPtr threadAttrs, bool inherit, uint flags, IntPtr env, string cwd, IntPtr startup, out PROCESS_INFORMATION info);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern uint WaitForSingleObject(SafeFileHandle handle, uint ms);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool GetExitCodeProcess(SafeFileHandle process, out uint code);
+    [DllImport("kernel32.dll", SetLastError = true)] internal static extern bool TerminateProcess(SafeFileHandle process, uint exitCode);
 }

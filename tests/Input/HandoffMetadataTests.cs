@@ -8,10 +8,19 @@ public static class HandoffMetadataTests
 {
     private static readonly DisplayMetadata Initial = new()
     {
-        Id = "test-display", Name = "Test display", WidthPixels = 1280, HeightPixels = 720,
-        NativeWidthPixels = 2560, NativeHeightPixels = 1440,
-        LogicalX = -1280, LogicalY = 0, LogicalWidth = 1280, LogicalHeight = 720,
-        RefreshMilliHertz = 60000, PhysicalWidthMillimeters = 600, PhysicalHeightMillimeters = 340,
+        Id = "test-display",
+        Name = "Test display",
+        WidthPixels = 1280,
+        HeightPixels = 720,
+        NativeWidthPixels = 2560,
+        NativeHeightPixels = 1440,
+        LogicalX = -1280,
+        LogicalY = 0,
+        LogicalWidth = 1280,
+        LogicalHeight = 720,
+        RefreshMilliHertz = 60000,
+        PhysicalWidthMillimeters = 600,
+        PhysicalHeightMillimeters = 340,
         Scale = 2
     };
 

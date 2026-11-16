@@ -34,19 +34,19 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
         switch (request.Method)
         {
             case "device.info":
-            {
-                var capabilities = new List<CapabilityVersion>
+                {
+                    var capabilities = new List<CapabilityVersion>
                 {
                     new(Capability.Shell, (ushort)(_interactive.IsAvailable ? 3 : 2)),
                     new(Capability.FileSystem, 2)
                 };
-                if (_clipboard.IsAvailable) capabilities.Add(new(Capability.Clipboard, 1));
-                if (inputVersion?.Invoke() is > 0 and var version) capabilities.Add(new(Capability.Input, version));
-                if (_display.IsAvailable) capabilities.Add(new(Capability.Display, 1));
-                var info = new DeviceInfo(identity.DeviceId, Environment.MachineName,
-                    RuntimeInformation.OSDescription, RuntimeInformation.ProcessArchitecture.ToString(), capabilities);
-                return Reply(request, JsonSerializer.SerializeToUtf8Bytes(info));
-            }
+                    if (_clipboard.IsAvailable) capabilities.Add(new(Capability.Clipboard, 1));
+                    if (inputVersion?.Invoke() is > 0 and var version) capabilities.Add(new(Capability.Input, version));
+                    if (_display.IsAvailable) capabilities.Add(new(Capability.Display, 1));
+                    var info = new DeviceInfo(identity.DeviceId, Environment.MachineName,
+                        RuntimeInformation.OSDescription, RuntimeInformation.ProcessArchitecture.ToString(), capabilities);
+                    return Reply(request, JsonSerializer.SerializeToUtf8Bytes(info));
+                }
             case "device.ping":
                 return Reply(request, Array.Empty<byte>());
             case "device.path.probe":
@@ -57,15 +57,15 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
                 // of trusting interface metrics or Wi-Fi PHY rates.
                 return Reply(request, request.Payload);
             case "display.info":
-            {
-                if (request.Payload.Length != 0) throw new InvalidDataException("display.info takes no payload.");
-                if (!permissions.IsAllowed(peerId, Capability.Input))
-                    throw new UnauthorizedAccessException("Display metadata requires this peer's Input grant.");
-                if (!_display.IsAvailable) throw new PlatformNotSupportedException("Linux display metadata is unavailable.");
-                var metadata = await _display.GetPrimaryDisplayAsync(cancellationToken).ConfigureAwait(false)
-                    ?? throw new PlatformNotSupportedException("No active Linux display metadata was returned.");
-                return Reply(request, JsonSerializer.SerializeToUtf8Bytes(metadata));
-            }
+                {
+                    if (request.Payload.Length != 0) throw new InvalidDataException("display.info takes no payload.");
+                    if (!permissions.IsAllowed(peerId, Capability.Input))
+                        throw new UnauthorizedAccessException("Display metadata requires this peer's Input grant.");
+                    if (!_display.IsAvailable) throw new PlatformNotSupportedException("Linux display metadata is unavailable.");
+                    var metadata = await _display.GetPrimaryDisplayAsync(cancellationToken).ConfigureAwait(false)
+                        ?? throw new PlatformNotSupportedException("No active Linux display metadata was returned.");
+                    return Reply(request, JsonSerializer.SerializeToUtf8Bytes(metadata));
+                }
             case "clipboard.get":
             case "clipboard.set":
                 return await _clipboard.HandleAsync(peerId, request, cancellationToken);
@@ -84,39 +84,39 @@ public sealed class RequestDispatcher(DeviceIdentity identity, PeerPermissionSto
             case "fs.eject":
                 return await _fileSystem.HandleAsync(peerId, request, cancellationToken).ConfigureAwait(false);
             case "shell.run":
-            {
-                if (!permissions.IsAllowed(peerId, Capability.Shell))
-                    throw new UnauthorizedAccessException("Shell access is not granted on this device for this peer.");
-                var shellRequest = ShellWire.DecodeRequest(request.Payload);
-                if (shellRequest.Elevated && OperatingSystem.IsWindows() && !permissions.IsAllowed(peerId, Capability.PrivilegedShell))
-                    throw new UnauthorizedAccessException("Privileged shell access is not granted on this device for this peer.");
-                if (shellRequest.Mode == ShellMode.Interactive) throw new NotSupportedException("Interactive PTY/ConPTY shell is not implemented.");
-                await using var stdout = new BoundedCaptureStream(450_000);
-                await using var stderr = new BoundedCaptureStream(450_000);
-                IShellBackend backend = shellRequest.Elevated && OperatingSystem.IsWindows()
-                    ? new WindowsAdminBrokerClient() : _shell;
-                var exitCode = await backend.RunAsync(shellRequest, Stream.Null, stdout, stderr, cancellationToken);
-                return Reply(request, ShellWire.EncodeResult(new ShellResult(exitCode, stdout.ToArray(), stderr.ToArray(),
-                    stdout.Truncated || stderr.Truncated)));
-            }
+                {
+                    if (!permissions.IsAllowed(peerId, Capability.Shell))
+                        throw new UnauthorizedAccessException("Shell access is not granted on this device for this peer.");
+                    var shellRequest = ShellWire.DecodeRequest(request.Payload);
+                    if (shellRequest.Elevated && OperatingSystem.IsWindows() && !permissions.IsAllowed(peerId, Capability.PrivilegedShell))
+                        throw new UnauthorizedAccessException("Privileged shell access is not granted on this device for this peer.");
+                    if (shellRequest.Mode == ShellMode.Interactive) throw new NotSupportedException("Interactive PTY/ConPTY shell is not implemented.");
+                    await using var stdout = new BoundedCaptureStream(450_000);
+                    await using var stderr = new BoundedCaptureStream(450_000);
+                    IShellBackend backend = shellRequest.Elevated && OperatingSystem.IsWindows()
+                        ? new WindowsAdminBrokerClient() : _shell;
+                    var exitCode = await backend.RunAsync(shellRequest, Stream.Null, stdout, stderr, cancellationToken);
+                    return Reply(request, ShellWire.EncodeResult(new ShellResult(exitCode, stdout.ToArray(), stderr.ToArray(),
+                        stdout.Truncated || stderr.Truncated)));
+                }
             case "shell.stream":
-            {
-                if (!permissions.IsAllowed(peerId, Capability.Shell))
-                    throw new UnauthorizedAccessException("Shell access is not granted on this device for this peer.");
-                var (shellRequest, inputBytes) = ShellWire.DecodeInvocation(request.Payload);
-                if (shellRequest.Elevated && OperatingSystem.IsWindows() && !permissions.IsAllowed(peerId, Capability.PrivilegedShell))
-                    throw new UnauthorizedAccessException("Privileged shell access is not granted on this device for this peer.");
-                if (shellRequest.Mode == ShellMode.Interactive) throw new NotSupportedException("Interactive PTY/ConPTY shell is not implemented.");
-                using var stdin = new MemoryStream(inputBytes, writable: false);
-                await using var stdout = new ProtocolOutputStream(request, 1, send, cancellationToken);
-                await using var stderr = new ProtocolOutputStream(request, 2, send, cancellationToken);
-                IShellBackend backend = shellRequest.Elevated && OperatingSystem.IsWindows()
-                    ? new WindowsAdminBrokerClient() : _shell;
-                var exitCode = await backend.RunAsync(shellRequest, stdin, stdout, stderr, cancellationToken);
-                await stdout.EndAsync();
-                await stderr.EndAsync();
-                return Reply(request, ShellWire.EncodeResult(new ShellResult(exitCode, [], [], false)));
-            }
+                {
+                    if (!permissions.IsAllowed(peerId, Capability.Shell))
+                        throw new UnauthorizedAccessException("Shell access is not granted on this device for this peer.");
+                    var (shellRequest, inputBytes) = ShellWire.DecodeInvocation(request.Payload);
+                    if (shellRequest.Elevated && OperatingSystem.IsWindows() && !permissions.IsAllowed(peerId, Capability.PrivilegedShell))
+                        throw new UnauthorizedAccessException("Privileged shell access is not granted on this device for this peer.");
+                    if (shellRequest.Mode == ShellMode.Interactive) throw new NotSupportedException("Interactive PTY/ConPTY shell is not implemented.");
+                    using var stdin = new MemoryStream(inputBytes, writable: false);
+                    await using var stdout = new ProtocolOutputStream(request, 1, send, cancellationToken);
+                    await using var stderr = new ProtocolOutputStream(request, 2, send, cancellationToken);
+                    IShellBackend backend = shellRequest.Elevated && OperatingSystem.IsWindows()
+                        ? new WindowsAdminBrokerClient() : _shell;
+                    var exitCode = await backend.RunAsync(shellRequest, stdin, stdout, stderr, cancellationToken);
+                    await stdout.EndAsync();
+                    await stderr.EndAsync();
+                    return Reply(request, ShellWire.EncodeResult(new ShellResult(exitCode, [], [], false)));
+                }
             default:
                 throw new NotSupportedException($"Unknown request method: {request.Method}");
         }

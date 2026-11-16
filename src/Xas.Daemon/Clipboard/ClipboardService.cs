@@ -30,8 +30,11 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
         if (!backend.IsAvailable) throw new PlatformNotSupportedException("A user-session text clipboard is unavailable.");
 
         ClipboardPayload payload;
-        try { payload = JsonSerializer.Deserialize<ClipboardPayload>(message.Payload, JsonOptions)
-            ?? throw new InvalidDataException("Empty clipboard.changed payload."); }
+        try
+        {
+            payload = JsonSerializer.Deserialize<ClipboardPayload>(message.Payload, JsonOptions)
+            ?? throw new InvalidDataException("Empty clipboard.changed payload.");
+        }
         catch (JsonException ex) { throw new InvalidDataException("Invalid clipboard.changed JSON.", ex); }
         if (string.IsNullOrWhiteSpace(payload.Origin) || payload.Text is null)
             throw new InvalidDataException("clipboard.changed requires an origin and text.");
@@ -124,8 +127,11 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
         CancellationToken token)
     {
         ClipboardPayload payload;
-        try { payload = JsonSerializer.Deserialize<ClipboardPayload>(request.Payload, JsonOptions)
-            ?? throw new InvalidDataException("Empty clipboard.set payload."); }
+        try
+        {
+            payload = JsonSerializer.Deserialize<ClipboardPayload>(request.Payload, JsonOptions)
+            ?? throw new InvalidDataException("Empty clipboard.set payload.");
+        }
         catch (JsonException ex) { throw new InvalidDataException("Invalid clipboard.set JSON.", ex); }
         if (payload.Origin != peerId || payload.Text is null)
             throw new InvalidDataException("clipboard.set origin must match the authenticated peer and text must be present.");

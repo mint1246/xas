@@ -67,8 +67,14 @@ public sealed class WindowsSendInputBackend : IInputInjectionBackend
     private static NativeInput Mouse(int x, int y, uint data, uint flags) => new()
     { Type = 0, Mouse = new NativeMouse { X = x, Y = y, Data = data, Flags = flags } };
     private static NativeInput Key(ushort scan, bool extended, bool down) => new()
-    { Type = 1, Keyboard = new NativeKeyboard { Scan = scan,
-        Flags = (uint)(0x0008 | (extended ? 0x0001 : 0) | (down ? 0 : 0x0002)) } };
+    {
+        Type = 1,
+        Keyboard = new NativeKeyboard
+        {
+            Scan = scan,
+            Flags = (uint)(0x0008 | (extended ? 0x0001 : 0) | (down ? 0 : 0x0002))
+        }
+    };
 
     private static (uint Flags, uint Data) Button(ushort code, bool down) => code switch
     {
@@ -87,30 +93,92 @@ public sealed class WindowsSendInputBackend : IInputInjectionBackend
         if (usage is >= 58 and <= 67) return ((ushort)(usage - 58 + 0x3B), false);
         return usage switch
         {
-            4 => (0x1E, false), 5 => (0x30, false), 6 => (0x2E, false), 7 => (0x20, false),
-            8 => (0x12, false), 9 => (0x21, false), 10 => (0x22, false), 11 => (0x23, false),
-            12 => (0x17, false), 13 => (0x24, false), 14 => (0x25, false), 15 => (0x26, false),
-            16 => (0x32, false), 17 => (0x31, false), 18 => (0x18, false), 19 => (0x19, false),
-            20 => (0x10, false), 21 => (0x13, false), 22 => (0x1F, false), 23 => (0x14, false),
-            24 => (0x16, false), 25 => (0x2F, false), 26 => (0x11, false), 27 => (0x2D, false),
-            28 => (0x15, false), 29 => (0x2C, false), 39 => (0x0B, false),
-            40 => (0x1C, false), 41 => (0x01, false), 42 => (0x0E, false), 43 => (0x0F, false),
-            44 => (0x39, false), 45 => (0x0C, false), 46 => (0x0D, false), 47 => (0x1A, false),
-            48 => (0x1B, false), 49 => (0x2B, false), 51 => (0x27, false), 52 => (0x28, false),
-            53 => (0x29, false), 54 => (0x33, false), 55 => (0x34, false), 56 => (0x35, false),
-            57 => (0x3A, false), 68 => (0x57, false), 69 => (0x58, false),
-            70 => (0x37, true), 71 => (0x46, false), 72 => (0x45, false),
-            73 => (0x52, true), 74 => (0x47, true), 75 => (0x49, true), 76 => (0x53, true),
-            77 => (0x4F, true), 78 => (0x51, true), 79 => (0x4D, true), 80 => (0x4B, true),
-            81 => (0x50, true), 82 => (0x48, true), 83 => (0x45, false),
-            84 => (0x35, true), 85 => (0x37, false), 86 => (0x4A, false), 87 => (0x4E, false),
-            88 => (0x1C, true), 89 => (0x4F, false), 90 => (0x50, false), 91 => (0x51, false),
-            92 => (0x4B, false), 93 => (0x4C, false), 94 => (0x4D, false), 95 => (0x47, false),
-            96 => (0x48, false), 97 => (0x49, false), 98 => (0x52, false), 99 => (0x53, false),
-            100 => (0x56, false), 101 => (0x5D, true),
-            224 => (0x1D, false), 225 => (0x2A, false), 226 => (0x38, false),
-            227 => (0x5B, true), 228 => (0x1D, true), 229 => (0x36, false),
-            230 => (0x38, true), 231 => (0x5C, true),
+            4 => (0x1E, false),
+            5 => (0x30, false),
+            6 => (0x2E, false),
+            7 => (0x20, false),
+            8 => (0x12, false),
+            9 => (0x21, false),
+            10 => (0x22, false),
+            11 => (0x23, false),
+            12 => (0x17, false),
+            13 => (0x24, false),
+            14 => (0x25, false),
+            15 => (0x26, false),
+            16 => (0x32, false),
+            17 => (0x31, false),
+            18 => (0x18, false),
+            19 => (0x19, false),
+            20 => (0x10, false),
+            21 => (0x13, false),
+            22 => (0x1F, false),
+            23 => (0x14, false),
+            24 => (0x16, false),
+            25 => (0x2F, false),
+            26 => (0x11, false),
+            27 => (0x2D, false),
+            28 => (0x15, false),
+            29 => (0x2C, false),
+            39 => (0x0B, false),
+            40 => (0x1C, false),
+            41 => (0x01, false),
+            42 => (0x0E, false),
+            43 => (0x0F, false),
+            44 => (0x39, false),
+            45 => (0x0C, false),
+            46 => (0x0D, false),
+            47 => (0x1A, false),
+            48 => (0x1B, false),
+            49 => (0x2B, false),
+            51 => (0x27, false),
+            52 => (0x28, false),
+            53 => (0x29, false),
+            54 => (0x33, false),
+            55 => (0x34, false),
+            56 => (0x35, false),
+            57 => (0x3A, false),
+            68 => (0x57, false),
+            69 => (0x58, false),
+            70 => (0x37, true),
+            71 => (0x46, false),
+            72 => (0x45, false),
+            73 => (0x52, true),
+            74 => (0x47, true),
+            75 => (0x49, true),
+            76 => (0x53, true),
+            77 => (0x4F, true),
+            78 => (0x51, true),
+            79 => (0x4D, true),
+            80 => (0x4B, true),
+            81 => (0x50, true),
+            82 => (0x48, true),
+            83 => (0x45, false),
+            84 => (0x35, true),
+            85 => (0x37, false),
+            86 => (0x4A, false),
+            87 => (0x4E, false),
+            88 => (0x1C, true),
+            89 => (0x4F, false),
+            90 => (0x50, false),
+            91 => (0x51, false),
+            92 => (0x4B, false),
+            93 => (0x4C, false),
+            94 => (0x4D, false),
+            95 => (0x47, false),
+            96 => (0x48, false),
+            97 => (0x49, false),
+            98 => (0x52, false),
+            99 => (0x53, false),
+            100 => (0x56, false),
+            101 => (0x5D, true),
+            224 => (0x1D, false),
+            225 => (0x2A, false),
+            226 => (0x38, false),
+            227 => (0x5B, true),
+            228 => (0x1D, true),
+            229 => (0x36, false),
+            230 => (0x38, true),
+            231 => (0x5C, true),
             _ => throw new NotSupportedException($"No Windows scan code for HID keyboard usage {usage}.")
         };
     }
@@ -121,16 +189,20 @@ public sealed class WindowsSendInputBackend : IInputInjectionBackend
             throw new Win32Exception(Marshal.GetLastWin32Error(), "SendInput failed (desktop isolation or UIPI may block injection).");
     }
 
-    [StructLayout(LayoutKind.Explicit, Size = 40)] private struct NativeInput
+    [StructLayout(LayoutKind.Explicit, Size = 40)]
+    private struct NativeInput
     {
         [FieldOffset(0)] public uint Type;
         [FieldOffset(8)] public NativeMouse Mouse;
         [FieldOffset(8)] public NativeKeyboard Keyboard;
     }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeMouse
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeMouse
     { public int X, Y; public uint Data, Flags, Time; public UIntPtr ExtraInfo; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeKeyboard
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeKeyboard
     { public ushort VirtualKey, Scan; public uint Flags, Time; public UIntPtr ExtraInfo; }
-    [DllImport("user32.dll", SetLastError = true)] private static extern uint SendInput(uint count,
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint SendInput(uint count,
         [In] NativeInput[] inputs, int size);
 }

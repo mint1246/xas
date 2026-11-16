@@ -91,10 +91,10 @@ public static class VirtualDisplayTests
         if (IsSupported(new DisplayMetadata { Id = "DP-1", Name = "DP-1", WidthPixels = 0, HeightPixels = 1080 }))
             throw new Exception("A zero-width remote display must be rejected.");
         if (IsSupported(new DisplayMetadata
-            { Id = "DP-1", Name = "DP-1", WidthPixels = SudoVdaDriver.MaxWidthPixels + 1, HeightPixels = 4320 }))
+        { Id = "DP-1", Name = "DP-1", WidthPixels = SudoVdaDriver.MaxWidthPixels + 1, HeightPixels = 4320 }))
             throw new Exception("A remote display wider than the driver supports must be rejected.");
         if (!IsSupported(new DisplayMetadata
-            { Id = "DP-1", Name = "DP-1", WidthPixels = 3840, HeightPixels = 2160, RefreshMilliHertz = 60000 }))
+        { Id = "DP-1", Name = "DP-1", WidthPixels = 3840, HeightPixels = 2160, RefreshMilliHertz = 60000 }))
             throw new Exception("A supported remote display mode must be accepted.");
     }
 
@@ -130,19 +130,32 @@ public static class VirtualDisplayTests
     {
         var scaled = new DisplayMetadata
         {
-            Id = "eDP-1", Name = "Built-in display", NativeWidthPixels = 1920, NativeHeightPixels = 1080,
-            LogicalWidth = 1536, LogicalHeight = 864, WidthPixels = 1536, HeightPixels = 864, Scale = 1.25
+            Id = "eDP-1",
+            Name = "Built-in display",
+            NativeWidthPixels = 1920,
+            NativeHeightPixels = 1080,
+            LogicalWidth = 1536,
+            LogicalHeight = 864,
+            WidthPixels = 1536,
+            HeightPixels = 864,
+            Scale = 1.25
         };
         if (SudoVdaDisplayController.ResolveVirtualWidth(scaled) != 1920 ||
             SudoVdaDisplayController.ResolveVirtualHeight(scaled) != 1080)
             throw new Exception("SudoVDA must mirror the physical panel mode when logical scale is present.");
-        var rotated = scaled with { RotationDegrees = 90, LogicalWidth = 864, LogicalHeight = 1536,
-            WidthPixels = 864, HeightPixels = 1536 };
+        var rotated = scaled with
+        {
+            RotationDegrees = 90,
+            LogicalWidth = 864,
+            LogicalHeight = 1536,
+            WidthPixels = 864,
+            HeightPixels = 1536
+        };
         if (SudoVdaDisplayController.ResolveVirtualWidth(rotated) != 1080 ||
             SudoVdaDisplayController.ResolveVirtualHeight(rotated) != 1920)
             throw new Exception("SudoVDA must orient the physical mode to match the rotated desktop.");
         if (SudoVdaDisplayController.ResolveVirtualWidth(new DisplayMetadata
-            { Id = "old", Name = "old", WidthPixels = 1280, HeightPixels = 720 }) != 1280)
+        { Id = "old", Name = "old", WidthPixels = 1280, HeightPixels = 720 }) != 1280)
             throw new Exception("Older peers without native dimensions must retain the logical mode fallback.");
     }
 

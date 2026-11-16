@@ -592,8 +592,11 @@ public sealed class PeerSessionManager : IAsyncDisposable
                 foreach (var session in _sessions.Values)
                 {
                     if (!session.Online) continue;
-                    try { await session.SendAsync(PeerLane.Control,
-                        new ProtocolMessage(MessageKind.Event, 0, 0, "display.changed", payload), token).ConfigureAwait(false); }
+                    try
+                    {
+                        await session.SendAsync(PeerLane.Control,
+                        new ProtocolMessage(MessageKind.Event, 0, 0, "display.changed", payload), token).ConfigureAwait(false);
+                    }
                     catch (Exception ex) when (ex is IOException or ObjectDisposedException) { }
                 }
             }

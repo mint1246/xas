@@ -36,7 +36,9 @@ public sealed class LinuxUinputInputBackend(Func<DisplayMetadata?>? resolveDispl
                 {
                     using var probe = Process.Start(new ProcessStartInfo(helper, "--probe")
                     {
-                        UseShellExecute = false, RedirectStandardOutput = true, RedirectStandardError = true,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
                         CreateNoWindow = true
                     });
                     if (probe is null) return false;
@@ -74,8 +76,11 @@ public sealed class LinuxUinputInputBackend(Func<DisplayMetadata?>? resolveDispl
         var height = display?.HeightPixels is > 0 ? display.HeightPixels : 1080;
         var p = Process.Start(new ProcessStartInfo(path, $"{width} {height}")
         {
-            UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true,
-            RedirectStandardError = true, CreateNoWindow = true
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
         }) ?? throw new IOException("Could not start xas-uinput.");
         lock (_gate)
         {

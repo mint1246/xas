@@ -359,12 +359,22 @@ public sealed class LinuxDisplayMetadataService
         var height = logicalHeight ?? Math.Max(1, (int)Math.Round(orientedHeight / (scale is > 0 ? scale.Value : 1)));
         return new DisplayMetadata
         {
-            Id = id, Name = id, ConnectorId = id,
-            NativeWidthPixels = w, NativeHeightPixels = h,
-            LogicalX = x, LogicalY = y, LogicalWidth = width, LogicalHeight = height,
-            WidthPixels = width, HeightPixels = height,
-            RefreshMilliHertz = hz, PhysicalWidthMillimeters = pw > 0 ? pw : null, PhysicalHeightMillimeters = ph > 0 ? ph : null,
-            RotationDegrees = rotation, Scale = scale
+            Id = id,
+            Name = id,
+            ConnectorId = id,
+            NativeWidthPixels = w,
+            NativeHeightPixels = h,
+            LogicalX = x,
+            LogicalY = y,
+            LogicalWidth = width,
+            LogicalHeight = height,
+            WidthPixels = width,
+            HeightPixels = height,
+            RefreshMilliHertz = hz,
+            PhysicalWidthMillimeters = pw > 0 ? pw : null,
+            PhysicalHeightMillimeters = ph > 0 ? ph : null,
+            RotationDegrees = rotation,
+            Scale = scale
         };
     }
     private static int? HZ(string text) => double.TryParse(text, CultureInfo.InvariantCulture, out var hz) && hz > 0 ? (int)Math.Round(hz * 1000) : null;

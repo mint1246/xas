@@ -160,19 +160,24 @@ internal static class WindowsClipboardNotificationSource
             uint style, int x, int y, int width, int height, nint parent, nint menu, nint instance, nint parameter);
         [DllImport("user32.dll", EntryPoint = "DefWindowProcW")]
         internal static extern nint DefWindowProc(nint window, uint message, nint wParam, nint lParam);
-        [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool AddClipboardFormatListener(nint window);
-        [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool RemoveClipboardFormatListener(nint window);
-        [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool DestroyWindow(nint window);
-        [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool IsWindow(nint window);
         [DllImport("user32.dll", EntryPoint = "GetMessageW", SetLastError = true)]
         internal static extern int GetMessage(out Message message, nint window, uint minFilter, uint maxFilter);
         [DllImport("user32.dll", EntryPoint = "DispatchMessageW")]
         internal static extern nint DispatchMessage(ref Message message);
-        [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("user32.dll", EntryPoint = "PostMessageW", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool PostMessage(nint window, uint message, nint wParam, nint lParam);
         [DllImport("user32.dll")]
         internal static extern void PostQuitMessage(int exitCode);

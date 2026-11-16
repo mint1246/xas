@@ -118,9 +118,13 @@ internal sealed class DaemonWebHost : IAsyncDisposable
                         trusted.TryGetValue(id, out var t);
                         return new
                         {
-                            DeviceId = id, Name = s?.Name ?? t?.DisplayName ?? id,
-                            Online = s?.Online ?? false, RealtimeReady = s?.RealtimeReady ?? false,
-                            Endpoint = s?.Endpoint, LastSeen = s?.LastSeen, Paired = t is not null,
+                            DeviceId = id,
+                            Name = s?.Name ?? t?.DisplayName ?? id,
+                            Online = s?.Online ?? false,
+                            RealtimeReady = s?.RealtimeReady ?? false,
+                            Endpoint = s?.Endpoint,
+                            LastSeen = s?.LastSeen,
+                            Paired = t is not null,
                             Permissions = Enum.GetValues<Capability>().ToDictionary(c => c.ToString(), c => _permissions.IsAllowed(id, c))
                         };
                     });

@@ -402,7 +402,8 @@ public sealed class FileTransferServer : IAsyncDisposable
         internal uint Id { get; } = id; internal TransferKind Kind { get; } = kind; internal string Path { get; } = path;
         internal string TempPath { get; } = tempPath; internal bool Overwrite { get; } = overwrite; internal long? Timestamp { get; } = timestamp;
         internal FileStream? Stream { get; set; } = stream; internal SemaphoreSlim Lock { get; } = new(1, 1);
-        internal CancellationTokenSource Cancel { get; } = new(); internal bool Finished { get; set; } internal long Bytes { get; set; }
+        internal CancellationTokenSource Cancel { get; } = new(); internal bool Finished { get; set; }
+        internal long Bytes { get; set; }
     }
     private sealed record FileEntry(string? Name, string Kind, long Length, long LastWriteUnixMs);
     private sealed record ListResponse(FileEntry[] Entries, bool HasMore);

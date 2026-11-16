@@ -222,202 +222,202 @@ internal sealed class LocalIpcServer(PeerSessionManager sessions, PairingService
         switch (request.Method)
         {
             case LocalIpcProtocol.Devices:
-            {
-                var online = _sessions.GetSnapshots().ToDictionary(s => s.DeviceId, StringComparer.Ordinal);
-                var devices = _configuration.Peers.Select(p => online.TryGetValue(p.DeviceId, out var snapshot) && snapshot.Device is not null
-                    ? new KnownDeviceInfo(p.DeviceId, snapshot.Device.Name, snapshot.Device.Os, snapshot.Device.Architecture,
-                        snapshot.Device.Capabilities, snapshot.Online, snapshot.Endpoint, snapshot.LastSeen, snapshot.RoundTripTime?.TotalMilliseconds)
-                    : new KnownDeviceInfo(p.DeviceId, p.Name, "Unknown", "Unknown", Array.Empty<CapabilityVersion>(),
-                        snapshot?.Online ?? false, snapshot?.Endpoint ?? $"{p.Host}:{p.Port}", snapshot?.LastSeen,
-                        snapshot?.RoundTripTime?.TotalMilliseconds)).ToArray();
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(devices, LocalIpcProtocol.Json));
-            }
+                {
+                    var online = _sessions.GetSnapshots().ToDictionary(s => s.DeviceId, StringComparer.Ordinal);
+                    var devices = _configuration.Peers.Select(p => online.TryGetValue(p.DeviceId, out var snapshot) && snapshot.Device is not null
+                        ? new KnownDeviceInfo(p.DeviceId, snapshot.Device.Name, snapshot.Device.Os, snapshot.Device.Architecture,
+                            snapshot.Device.Capabilities, snapshot.Online, snapshot.Endpoint, snapshot.LastSeen, snapshot.RoundTripTime?.TotalMilliseconds)
+                        : new KnownDeviceInfo(p.DeviceId, p.Name, "Unknown", "Unknown", Array.Empty<CapabilityVersion>(),
+                            snapshot?.Online ?? false, snapshot?.Endpoint ?? $"{p.Host}:{p.Port}", snapshot?.LastSeen,
+                            snapshot?.RoundTripTime?.TotalMilliseconds)).ToArray();
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(devices, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.Info:
-            {
-                var target = ReadTarget(request.Payload);
-                var configured = Resolve(target.DeviceId);
-                if (configured is null) return Response(request, JsonSerializer.SerializeToUtf8Bytes<DeviceInfo?>(null, LocalIpcProtocol.Json));
-                var snapshot = _sessions.GetSnapshots().FirstOrDefault(s => s.DeviceId == configured.DeviceId);
-                var info = snapshot?.Device;
-                if (info is null && _sessions.GetSession(configured.DeviceId) is { } infoSession)
-                    info = JsonSerializer.Deserialize<DeviceInfo>((await infoSession.RequestAsync(PeerLane.Control, "device.info", [], token).ConfigureAwait(false)).Payload);
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(info, LocalIpcProtocol.Json));
-            }
+                {
+                    var target = ReadTarget(request.Payload);
+                    var configured = Resolve(target.DeviceId);
+                    if (configured is null) return Response(request, JsonSerializer.SerializeToUtf8Bytes<DeviceInfo?>(null, LocalIpcProtocol.Json));
+                    var snapshot = _sessions.GetSnapshots().FirstOrDefault(s => s.DeviceId == configured.DeviceId);
+                    var info = snapshot?.Device;
+                    if (info is null && _sessions.GetSession(configured.DeviceId) is { } infoSession)
+                        info = JsonSerializer.Deserialize<DeviceInfo>((await infoSession.RequestAsync(PeerLane.Control, "device.info", [], token).ConfigureAwait(false)).Payload);
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(info, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.SetDefault:
                 _configuration.SetDefault(ReadTarget(request.Payload).DeviceId ?? throw new InvalidDataException("Device ID is required."));
                 return Response(request, []);
             case LocalIpcProtocol.Ping:
-            {
-                var configured = Resolve(ReadTarget(request.Payload).DeviceId);
-                if (configured is null || _sessions.GetSession(configured.DeviceId) is not { } pingSession)
-                    return Response(request, [0]);
-                try
                 {
-                    var ping = await pingSession.RequestAsync(PeerLane.Control, "device.ping", [], token).ConfigureAwait(false);
-                    return Response(request, [ping.Kind == MessageKind.Response ? (byte)1 : (byte)0]);
+                    var configured = Resolve(ReadTarget(request.Payload).DeviceId);
+                    if (configured is null || _sessions.GetSession(configured.DeviceId) is not { } pingSession)
+                        return Response(request, [0]);
+                    try
+                    {
+                        var ping = await pingSession.RequestAsync(PeerLane.Control, "device.ping", [], token).ConfigureAwait(false);
+                        return Response(request, [ping.Kind == MessageKind.Response ? (byte)1 : (byte)0]);
+                    }
+                    catch (IOException) { return Response(request, [0]); }
                 }
-                catch (IOException) { return Response(request, [0]); }
-            }
             case LocalIpcProtocol.ClipboardPush:
-            {
-                var target = Resolve(ReadTarget(request.Payload).DeviceId)
-                    ?? throw new InvalidOperationException("No matching paired device.");
-                var session = _sessions.GetSession(target.DeviceId)
-                    ?? throw new IOException($"Device {target.DeviceId} is offline.");
-                var local = await _clipboard.HandleAsync(target.DeviceId,
-                    new ProtocolMessage(MessageKind.Request, 1, 0, "clipboard.get", []), token).ConfigureAwait(false);
-                var remote = await session.RequestAsync(PeerLane.Control, "clipboard.set", local.Payload, token).ConfigureAwait(false);
-                if (remote.Payload.Length != 0) throw new InvalidDataException("Invalid remote clipboard.set response.");
-                return Response(request, []);
-            }
+                {
+                    var target = Resolve(ReadTarget(request.Payload).DeviceId)
+                        ?? throw new InvalidOperationException("No matching paired device.");
+                    var session = _sessions.GetSession(target.DeviceId)
+                        ?? throw new IOException($"Device {target.DeviceId} is offline.");
+                    var local = await _clipboard.HandleAsync(target.DeviceId,
+                        new ProtocolMessage(MessageKind.Request, 1, 0, "clipboard.get", []), token).ConfigureAwait(false);
+                    var remote = await session.RequestAsync(PeerLane.Control, "clipboard.set", local.Payload, token).ConfigureAwait(false);
+                    if (remote.Payload.Length != 0) throw new InvalidDataException("Invalid remote clipboard.set response.");
+                    return Response(request, []);
+                }
             case LocalIpcProtocol.ClipboardPull:
-            {
-                var target = Resolve(ReadTarget(request.Payload).DeviceId)
-                    ?? throw new InvalidOperationException("No matching paired device.");
-                var session = _sessions.GetSession(target.DeviceId)
-                    ?? throw new IOException($"Device {target.DeviceId} is offline.");
-                var remote = await session.RequestAsync(PeerLane.Control, "clipboard.get", [], token).ConfigureAwait(false);
-                await _clipboard.ApplyChangedEventAsync(target.DeviceId,
-                    new ProtocolMessage(MessageKind.Event, 0, 0, "clipboard.changed", remote.Payload), token).ConfigureAwait(false);
-                return Response(request, []);
-            }
+                {
+                    var target = Resolve(ReadTarget(request.Payload).DeviceId)
+                        ?? throw new InvalidOperationException("No matching paired device.");
+                    var session = _sessions.GetSession(target.DeviceId)
+                        ?? throw new IOException($"Device {target.DeviceId} is offline.");
+                    var remote = await session.RequestAsync(PeerLane.Control, "clipboard.get", [], token).ConfigureAwait(false);
+                    await _clipboard.ApplyChangedEventAsync(target.DeviceId,
+                        new ProtocolMessage(MessageKind.Event, 0, 0, "clipboard.changed", remote.Payload), token).ConfigureAwait(false);
+                    return Response(request, []);
+                }
             case LocalIpcProtocol.ClipboardStatus:
-            {
-                var target = Resolve(ReadTarget(request.Payload).DeviceId)
-                    ?? throw new InvalidOperationException("No matching paired device.");
-                var session = _sessions.GetSession(target.DeviceId);
-                if (session is null || !session.Online)
-                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(
-                        new LocalClipboardStatus(false, $"{target.Name} is offline."), LocalIpcProtocol.Json));
-                if (!_permissions.IsAllowed(target.DeviceId, Capability.Clipboard) || !_clipboard.IsAvailable)
-                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(
-                        new LocalClipboardStatus(false, "Local clipboard access is unavailable or not granted for this peer."), LocalIpcProtocol.Json));
-                try
                 {
-                    _ = await session.RequestAsync(PeerLane.Control, "clipboard.get", [], token).ConfigureAwait(false);
-                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(
-                        new LocalClipboardStatus(true, $"Background clipboard sync with {target.Name} is active."), LocalIpcProtocol.Json));
+                    var target = Resolve(ReadTarget(request.Payload).DeviceId)
+                        ?? throw new InvalidOperationException("No matching paired device.");
+                    var session = _sessions.GetSession(target.DeviceId);
+                    if (session is null || !session.Online)
+                        return Response(request, JsonSerializer.SerializeToUtf8Bytes(
+                            new LocalClipboardStatus(false, $"{target.Name} is offline."), LocalIpcProtocol.Json));
+                    if (!_permissions.IsAllowed(target.DeviceId, Capability.Clipboard) || !_clipboard.IsAvailable)
+                        return Response(request, JsonSerializer.SerializeToUtf8Bytes(
+                            new LocalClipboardStatus(false, "Local clipboard access is unavailable or not granted for this peer."), LocalIpcProtocol.Json));
+                    try
+                    {
+                        _ = await session.RequestAsync(PeerLane.Control, "clipboard.get", [], token).ConfigureAwait(false);
+                        return Response(request, JsonSerializer.SerializeToUtf8Bytes(
+                            new LocalClipboardStatus(true, $"Background clipboard sync with {target.Name} is active."), LocalIpcProtocol.Json));
+                    }
+                    catch (Exception ex) when (ex is IOException or RemoteProtocolException or PlatformNotSupportedException)
+                    {
+                        return Response(request, JsonSerializer.SerializeToUtf8Bytes(
+                            new LocalClipboardStatus(false, $"Clipboard sync is unavailable: {ex.Message}"), LocalIpcProtocol.Json));
+                    }
                 }
-                catch (Exception ex) when (ex is IOException or RemoteProtocolException or PlatformNotSupportedException)
-                {
-                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(
-                        new LocalClipboardStatus(false, $"Clipboard sync is unavailable: {ex.Message}"), LocalIpcProtocol.Json));
-                }
-            }
             case LocalIpcProtocol.StorageVolumes:
-            {
-                var manager = RequireRemoteMounts();
-                var target = ReadTarget(request.Payload);
-                var volumes = await manager.GetRemoteVolumesAsync(target.DeviceId, token).ConfigureAwait(false);
-                var response = volumes.Select(ToLocalVolumeInfo).ToArray();
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(response, LocalIpcProtocol.Json));
-            }
+                {
+                    var manager = RequireRemoteMounts();
+                    var target = ReadTarget(request.Payload);
+                    var volumes = await manager.GetRemoteVolumesAsync(target.DeviceId, token).ConfigureAwait(false);
+                    var response = volumes.Select(ToLocalVolumeInfo).ToArray();
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(response, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.StorageMounts:
-            {
-                var manager = RequireRemoteMounts();
-                var target = ReadTarget(request.Payload);
-                var resolvedDevice = target.DeviceId is null ? null : Resolve(target.DeviceId)?.DeviceId
-                    ?? throw new InvalidOperationException("No matching paired device.");
-                var response = manager.GetSnapshots()
-                    .Where(m => resolvedDevice is null || m.DeviceId == resolvedDevice)
-                    .Select(m => new LocalRemoteVolumeInfo(m.DeviceId, m.DeviceName, m.VolumeId, m.VolumeName,
-                        m.Kind, m.ReadOnly, m.TotalBytes, m.FreeBytes, m.FileSystem, m.MountPoint, false))
-                    .ToArray();
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(response, LocalIpcProtocol.Json));
-            }
+                {
+                    var manager = RequireRemoteMounts();
+                    var target = ReadTarget(request.Payload);
+                    var resolvedDevice = target.DeviceId is null ? null : Resolve(target.DeviceId)?.DeviceId
+                        ?? throw new InvalidOperationException("No matching paired device.");
+                    var response = manager.GetSnapshots()
+                        .Where(m => resolvedDevice is null || m.DeviceId == resolvedDevice)
+                        .Select(m => new LocalRemoteVolumeInfo(m.DeviceId, m.DeviceName, m.VolumeId, m.VolumeName,
+                            m.Kind, m.ReadOnly, m.TotalBytes, m.FreeBytes, m.FileSystem, m.MountPoint, false))
+                        .ToArray();
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(response, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.StorageMount:
-            {
-                var manager = RequireRemoteMounts();
-                var target = ReadStorageTarget(request.Payload);
-                var mounted = await manager.MountVolumeAsync(target.DeviceId, target.Volume, token).ConfigureAwait(false);
-                var response = new LocalRemoteVolumeInfo(mounted.DeviceId, mounted.DeviceName, mounted.VolumeId,
-                    mounted.VolumeName, mounted.Kind, mounted.ReadOnly, mounted.TotalBytes, mounted.FreeBytes,
-                    mounted.FileSystem, mounted.MountPoint, false);
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(response, LocalIpcProtocol.Json));
-            }
+                {
+                    var manager = RequireRemoteMounts();
+                    var target = ReadStorageTarget(request.Payload);
+                    var mounted = await manager.MountVolumeAsync(target.DeviceId, target.Volume, token).ConfigureAwait(false);
+                    var response = new LocalRemoteVolumeInfo(mounted.DeviceId, mounted.DeviceName, mounted.VolumeId,
+                        mounted.VolumeName, mounted.Kind, mounted.ReadOnly, mounted.TotalBytes, mounted.FreeBytes,
+                        mounted.FileSystem, mounted.MountPoint, false);
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(response, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.StorageUnmount:
-            {
-                var manager = RequireRemoteMounts();
-                var target = ReadStorageTarget(request.Payload);
-                var unmounted = await manager.UnmountVolumeAsync(target.DeviceId, target.Volume, token).ConfigureAwait(false);
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(unmounted, LocalIpcProtocol.Json));
-            }
+                {
+                    var manager = RequireRemoteMounts();
+                    var target = ReadStorageTarget(request.Payload);
+                    var unmounted = await manager.UnmountVolumeAsync(target.DeviceId, target.Volume, token).ConfigureAwait(false);
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(unmounted, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.StorageEject:
-            {
-                var manager = RequireRemoteMounts();
-                var target = ReadStorageTarget(request.Payload);
-                await manager.EjectVolumeAsync(target.DeviceId, target.Volume, token).ConfigureAwait(false);
-                return Response(request, []);
-            }
+                {
+                    var manager = RequireRemoteMounts();
+                    var target = ReadStorageTarget(request.Payload);
+                    await manager.EjectVolumeAsync(target.DeviceId, target.Volume, token).ConfigureAwait(false);
+                    return Response(request, []);
+                }
             case LocalIpcProtocol.UiInfo:
                 return Response(request, JsonSerializer.SerializeToUtf8Bytes(
                     new LocalUiInfo(_uiUrl()), LocalIpcProtocol.Json));
             case LocalIpcProtocol.Revoke:
-            {
-                var target = ReadTarget(request.Payload).DeviceId
-                    ?? throw new InvalidDataException("Device ID is required.");
-                var revoked = await _peerAdministration.RevokeAsync(target).ConfigureAwait(false);
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(revoked, LocalIpcProtocol.Json));
-            }
+                {
+                    var target = ReadTarget(request.Payload).DeviceId
+                        ?? throw new InvalidDataException("Device ID is required.");
+                    var revoked = await _peerAdministration.RevokeAsync(target).ConfigureAwait(false);
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(revoked, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.Endpoint:
-            {
-                var update = JsonSerializer.Deserialize<LocalEndpointUpdate>(request.Payload, LocalIpcProtocol.Json)
-                    ?? throw new InvalidDataException("Invalid endpoint update.");
-                if (string.IsNullOrWhiteSpace(update.Host) || update.Port is < 1 or > 65535)
-                    throw new InvalidDataException("Endpoint host and port are invalid.");
-                var configured = Resolve(update.DeviceId) ?? throw new InvalidOperationException("No matching paired device.");
-                _configuration.UpsertPeer(configured with { Host = update.Host, Port = update.Port });
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(configured.DeviceId, LocalIpcProtocol.Json));
-            }
+                {
+                    var update = JsonSerializer.Deserialize<LocalEndpointUpdate>(request.Payload, LocalIpcProtocol.Json)
+                        ?? throw new InvalidDataException("Invalid endpoint update.");
+                    if (string.IsNullOrWhiteSpace(update.Host) || update.Port is < 1 or > 65535)
+                        throw new InvalidDataException("Endpoint host and port are invalid.");
+                    var configured = Resolve(update.DeviceId) ?? throw new InvalidOperationException("No matching paired device.");
+                    _configuration.UpsertPeer(configured with { Host = update.Host, Port = update.Port });
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(configured.DeviceId, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.PairBegin:
-            {
-                var begin = JsonSerializer.Deserialize<LocalPairBegin>(request.Payload, LocalIpcProtocol.Json)
-                    ?? throw new InvalidDataException("Invalid pair request.");
-                if (begin.ControlPort is < 1 or >= 65535) throw new InvalidDataException("Invalid control port for pairing.");
-                var pending = await _pairing.BeginAsync(begin.Host, checked(begin.ControlPort + 1), begin.ExpectedDeviceId, token).ConfigureAwait(false);
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(pending, LocalIpcProtocol.Json));
-            }
+                {
+                    var begin = JsonSerializer.Deserialize<LocalPairBegin>(request.Payload, LocalIpcProtocol.Json)
+                        ?? throw new InvalidDataException("Invalid pair request.");
+                    if (begin.ControlPort is < 1 or >= 65535) throw new InvalidDataException("Invalid control port for pairing.");
+                    var pending = await _pairing.BeginAsync(begin.Host, checked(begin.ControlPort + 1), begin.ExpectedDeviceId, token).ConfigureAwait(false);
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(pending, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.PairCandidates:
-            {
-                var trusted = _trust.List().Select(p => p.DeviceId).ToHashSet(StringComparer.Ordinal);
-                var candidates = _sessions.GetDiscoveredPeers()
-                    .Where(p => !trusted.Contains(p.DeviceId))
-                    .Select(p => new LocalPairCandidate(p.DeviceId, p.Name, p.Address, p.TcpPort, p.LastSeen))
-                    .OrderBy(p => p.DisplayName, StringComparer.OrdinalIgnoreCase)
-                    .ThenBy(p => p.DeviceId, StringComparer.Ordinal)
-                    .ToArray();
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(candidates, LocalIpcProtocol.Json));
-            }
+                {
+                    var trusted = _trust.List().Select(p => p.DeviceId).ToHashSet(StringComparer.Ordinal);
+                    var candidates = _sessions.GetDiscoveredPeers()
+                        .Where(p => !trusted.Contains(p.DeviceId))
+                        .Select(p => new LocalPairCandidate(p.DeviceId, p.Name, p.Address, p.TcpPort, p.LastSeen))
+                        .OrderBy(p => p.DisplayName, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(p => p.DeviceId, StringComparer.Ordinal)
+                        .ToArray();
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(candidates, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.PairDiscover:
-            {
-                var target = JsonSerializer.Deserialize<LocalPairTarget>(request.Payload, LocalIpcProtocol.Json)
-                    ?? throw new InvalidDataException("Invalid discovered pair request.");
-                var candidate = ResolvePairCandidate(target.Query);
-                if (candidate.TcpPort >= 65535) throw new InvalidOperationException("The discovered device cannot expose the pairing port.");
-                var pending = await _pairing.BeginAsync(candidate.Address, checked(candidate.TcpPort + 1), candidate.DeviceId, token).ConfigureAwait(false);
-                return Response(request, JsonSerializer.SerializeToUtf8Bytes(pending, LocalIpcProtocol.Json));
-            }
+                {
+                    var target = JsonSerializer.Deserialize<LocalPairTarget>(request.Payload, LocalIpcProtocol.Json)
+                        ?? throw new InvalidDataException("Invalid discovered pair request.");
+                    var candidate = ResolvePairCandidate(target.Query);
+                    if (candidate.TcpPort >= 65535) throw new InvalidOperationException("The discovered device cannot expose the pairing port.");
+                    var pending = await _pairing.BeginAsync(candidate.Address, checked(candidate.TcpPort + 1), candidate.DeviceId, token).ConfigureAwait(false);
+                    return Response(request, JsonSerializer.SerializeToUtf8Bytes(pending, LocalIpcProtocol.Json));
+                }
             case LocalIpcProtocol.PairList:
                 return Response(request, JsonSerializer.SerializeToUtf8Bytes(_pairing.ListPending(), LocalIpcProtocol.Json));
             case LocalIpcProtocol.PairApprove:
-            {
-                var decision = JsonSerializer.Deserialize<LocalPairDecision>(request.Payload, LocalIpcProtocol.Json)
-                    ?? throw new InvalidDataException("Invalid pair decision.");
-                var pending = _pairing.ListPending().FirstOrDefault(p => p.PairingId == decision.PairingId)
-                    ?? throw new KeyNotFoundException("Pairing request not found or expired.");
-                var paired = await _pairing.ApproveAsync(decision.PairingId, decision.Approve, token).ConfigureAwait(false);
-                if (decision.Approve && !paired)
-                    throw new InvalidOperationException("The other device rejected the pairing request or the pairing session failed.");
-                if (paired)
                 {
-                    if (string.IsNullOrWhiteSpace(pending.Address) || pending.ControlPort is < 1 or >= 65535)
-                        throw new InvalidDataException("Paired device did not provide a usable control endpoint.");
-                    _configuration.UpsertPeer(new ConfiguredPeer(pending.DeviceId, pending.DisplayName, pending.Address, pending.ControlPort));
-                    PairPermissionPresets.Apply(_permissions, pending.DeviceId, decision.Preset);
+                    var decision = JsonSerializer.Deserialize<LocalPairDecision>(request.Payload, LocalIpcProtocol.Json)
+                        ?? throw new InvalidDataException("Invalid pair decision.");
+                    var pending = _pairing.ListPending().FirstOrDefault(p => p.PairingId == decision.PairingId)
+                        ?? throw new KeyNotFoundException("Pairing request not found or expired.");
+                    var paired = await _pairing.ApproveAsync(decision.PairingId, decision.Approve, token).ConfigureAwait(false);
+                    if (decision.Approve && !paired)
+                        throw new InvalidOperationException("The other device rejected the pairing request or the pairing session failed.");
+                    if (paired)
+                    {
+                        if (string.IsNullOrWhiteSpace(pending.Address) || pending.ControlPort is < 1 or >= 65535)
+                            throw new InvalidDataException("Paired device did not provide a usable control endpoint.");
+                        _configuration.UpsertPeer(new ConfiguredPeer(pending.DeviceId, pending.DisplayName, pending.Address, pending.ControlPort));
+                        PairPermissionPresets.Apply(_permissions, pending.DeviceId, decision.Preset);
+                    }
+                    _sessions.UpdateConfiguredPeers(_configuration.Peers);
+                    return Response(request, []);
                 }
-                _sessions.UpdateConfiguredPeers(_configuration.Peers);
-                return Response(request, []);
-            }
             default:
                 throw new InvalidDataException($"Unknown local command: {request.Method}");
         }

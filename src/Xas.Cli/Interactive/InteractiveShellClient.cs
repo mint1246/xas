@@ -143,8 +143,11 @@ public static class InteractiveShellClient
             inputCancellation.Cancel();
             if (sessionId != 0 && !cancellationToken.IsCancellationRequested && exit.Task.IsCompleted)
             {
-                try { await peer.RequestAsync("shell.close", EncodeSessionId(sessionId), cancellationToken: CancellationToken.None)
-                    .AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
+                try
+                {
+                    await peer.RequestAsync("shell.close", EncodeSessionId(sessionId), cancellationToken: CancellationToken.None)
+                    .AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                }
                 catch (Exception) { /* The server may reap on exit or disconnect. */ }
             }
         }

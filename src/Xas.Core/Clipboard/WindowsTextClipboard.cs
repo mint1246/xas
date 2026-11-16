@@ -142,13 +142,17 @@ public sealed class WindowsTextClipboard : ITextClipboardBackend, IClipboardChan
         [DllImport("user32.dll", EntryPoint = "CreateWindowExW", CharSet = CharSet.Unicode, SetLastError = true)]
         internal static extern IntPtr CreateWindowEx(uint extendedStyle, string className, string windowName,
             uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
-        [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool DestroyWindow(IntPtr window);
-        [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool OpenClipboard(IntPtr owner);
-        [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool CloseClipboard();
-        [DllImport("user32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("user32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool EmptyClipboard();
         [DllImport("user32.dll", SetLastError = true)]
         internal static extern IntPtr GetClipboardData(uint format);
@@ -162,7 +166,8 @@ public sealed class WindowsTextClipboard : ITextClipboardBackend, IClipboardChan
         internal static extern IntPtr GlobalFree(IntPtr memory);
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern IntPtr GlobalLock(IntPtr memory);
-        [DllImport("kernel32.dll", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)]
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool GlobalUnlock(IntPtr memory);
     }
 }

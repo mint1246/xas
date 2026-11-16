@@ -35,8 +35,11 @@ public static class ClipboardTests
             var changed = Decode(await service.HandleAsync("peer", get, CancellationToken.None));
             Assert(changed.Origin == "local" && changed.Text == "changed locally",
                 "A new local clipboard change retained the remote origin.");
-            var spoof = set with { Payload = JsonSerializer.SerializeToUtf8Bytes(
-                new ClipboardPayload("other", 1, "spoof"), new JsonSerializerOptions(JsonSerializerDefaults.Web)) };
+            var spoof = set with
+            {
+                Payload = JsonSerializer.SerializeToUtf8Bytes(
+                new ClipboardPayload("other", 1, "spoof"), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            };
             try { await service.HandleAsync("peer", spoof, CancellationToken.None); throw new Exception("Spoofed clipboard origin succeeded."); }
             catch (InvalidDataException) { }
 
@@ -48,8 +51,11 @@ public static class ClipboardTests
             Assert(eventImported is { Origin: "peer", Version: 99, Text: "event text" },
                 "Incoming clipboard.changed event was not applied with its origin/version.");
 
-            var selfEvent = changedMessage with { Payload = JsonSerializer.SerializeToUtf8Bytes(
-                new ClipboardPayload("local", 100, "must not loop"), new JsonSerializerOptions(JsonSerializerDefaults.Web)) };
+            var selfEvent = changedMessage with
+            {
+                Payload = JsonSerializer.SerializeToUtf8Bytes(
+                new ClipboardPayload("local", 100, "must not loop"), new JsonSerializerOptions(JsonSerializerDefaults.Web))
+            };
             await service.ApplyChangedEventAsync("peer", selfEvent, CancellationToken.None);
             var afterSelfEvent = Decode(await service.HandleAsync("peer", get, CancellationToken.None));
             Assert(afterSelfEvent.Text == "event text", "A clipboard event originating locally looped back into the clipboard.");

@@ -159,8 +159,11 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
             peer.MessageReceived -= OnMessage;
             if (sessionId != 0)
             {
-                try { await peer.RequestAsync(ShellExecWire.Close, ShellExecWire.EncodeSessionId(sessionId),
-                    cancellationToken: CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); }
+                try
+                {
+                    await peer.RequestAsync(ShellExecWire.Close, ShellExecWire.EncodeSessionId(sessionId),
+                    cancellationToken: CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                }
                 catch { /* Daemon also reaps sessions on local disconnect. */ }
             }
             eventGate.Dispose();

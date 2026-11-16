@@ -26,7 +26,8 @@ public sealed class InteractiveShellManager : IAsyncDisposable
         Func<ProtocolMessage, CancellationToken, ValueTask> send)
         : this(peerId, permissions, send, OperatingSystem.IsWindows()
             ? new WindowsConPtyBackend()
-            : new LinuxPtyBackend()) { }
+            : new LinuxPtyBackend())
+    { }
 
     public InteractiveShellManager(string peerId, PeerPermissionStore permissions,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, IInteractiveShellBackend backend)
@@ -264,7 +265,8 @@ public sealed class InteractiveShellManager : IAsyncDisposable
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             _shutdown.Cancel();
-            try { await pty.DisposeAsync().ConfigureAwait(false); } finally
+            try { await pty.DisposeAsync().ConfigureAwait(false); }
+            finally
             {
                 if (_pump is not null) try { await _pump.ConfigureAwait(false); } catch { }
                 _shutdown.Dispose(); _inputLock.Dispose();

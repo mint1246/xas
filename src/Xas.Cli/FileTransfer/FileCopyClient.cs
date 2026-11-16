@@ -79,31 +79,31 @@ public static class FileCopyClient
         string remotePath, string localPath, string sourceName, bool recursive, bool overwrite,
         TextWriter progress, CancellationToken token)
     {
-            var destinationIsDirectory = from.Remote
-                ? Directory.Exists(localPath) || HasTrailingSeparator(to.Path)
-                : await IsRemoteDirectoryAsync(protocol, remotePath, HasTrailingSeparator(to.Path), token).ConfigureAwait(false);
-            if (from.Remote)
+        var destinationIsDirectory = from.Remote
+            ? Directory.Exists(localPath) || HasTrailingSeparator(to.Path)
+            : await IsRemoteDirectoryAsync(protocol, remotePath, HasTrailingSeparator(to.Path), token).ConfigureAwait(false);
+        if (from.Remote)
+        {
+            var stat = await StatAsync(protocol, remotePath, token).ConfigureAwait(false);
+            if (destinationIsDirectory) localPath = Path.Combine(localPath, sourceName);
+            if (stat.Kind == "directory")
             {
-                var stat = await StatAsync(protocol, remotePath, token).ConfigureAwait(false);
-                if (destinationIsDirectory) localPath = Path.Combine(localPath, sourceName);
-                if (stat.Kind == "directory")
-                {
-                    if (!recursive) throw new IOException("Copying a directory requires recursive mode.");
-                    await DownloadDirectoryAsync(protocol, remotePath, localPath, overwrite, progress, token).ConfigureAwait(false);
-                }
-                else await DownloadFileAsync(protocol, remotePath, localPath, overwrite, progress, token).ConfigureAwait(false);
+                if (!recursive) throw new IOException("Copying a directory requires recursive mode.");
+                await DownloadDirectoryAsync(protocol, remotePath, localPath, overwrite, progress, token).ConfigureAwait(false);
             }
-            else
+            else await DownloadFileAsync(protocol, remotePath, localPath, overwrite, progress, token).ConfigureAwait(false);
+        }
+        else
+        {
+            var attrs = File.GetAttributes(localPath);
+            if (destinationIsDirectory) remotePath = JoinRemote(remotePath, sourceName);
+            if ((attrs & FileAttributes.Directory) != 0)
             {
-                var attrs = File.GetAttributes(localPath);
-                if (destinationIsDirectory) remotePath = JoinRemote(remotePath, sourceName);
-                if ((attrs & FileAttributes.Directory) != 0)
-                {
-                    if (!recursive) throw new IOException("Copying a directory requires recursive mode.");
-                    await UploadDirectoryAsync(protocol, localPath, remotePath, overwrite, progress, token).ConfigureAwait(false);
-                }
-                else await UploadFileAsync(protocol, localPath, remotePath, overwrite, progress, token).ConfigureAwait(false);
+                if (!recursive) throw new IOException("Copying a directory requires recursive mode.");
+                await UploadDirectoryAsync(protocol, localPath, remotePath, overwrite, progress, token).ConfigureAwait(false);
             }
+            else await UploadFileAsync(protocol, localPath, remotePath, overwrite, progress, token).ConfigureAwait(false);
+        }
     }
 
     private static async Task UploadDirectoryAsync(MultiplexedProtocolPeer peer, string local, string remote,

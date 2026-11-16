@@ -51,8 +51,11 @@ internal static class Program
     {
         var status = new ServiceStatus
         {
-            ServiceType = 0x10, CurrentState = state, ControlsAccepted = controls,
-            Win32ExitCode = exitCode, WaitHint = waitHint
+            ServiceType = 0x10,
+            CurrentState = state,
+            ControlsAccepted = controls,
+            Win32ExitCode = exitCode,
+            WaitHint = waitHint
         };
         if (_statusHandle is not null) SetServiceStatus(_statusHandle, ref status);
     }

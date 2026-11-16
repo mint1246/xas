@@ -34,34 +34,34 @@ public sealed class FileSystemService(PeerPermissionStore permissions, LocalConf
                     RequireEmpty(request.Payload);
                     return Reply(request, RemoteFileSystemWire.Encode(_backend.GetVolumes()));
                 case "fs.stat":
-                {
-                    var arg = Decode<RemotePath>(request.Payload);
-                    return Reply(request, RemoteFileSystemWire.Encode(_backend.Stat(arg)));
-                }
+                    {
+                        var arg = Decode<RemotePath>(request.Payload);
+                        return Reply(request, RemoteFileSystemWire.Encode(_backend.Stat(arg)));
+                    }
                 case "fs.list":
-                {
-                    var arg = Decode<RemoteListPath>(request.Payload);
-                    return Reply(request, RemoteFileSystemWire.Encode(_backend.List(arg)));
-                }
+                    {
+                        var arg = Decode<RemoteListPath>(request.Payload);
+                        return Reply(request, RemoteFileSystemWire.Encode(_backend.List(arg)));
+                    }
                 case "fs.read":
-                {
-                    var arg = Decode<RemoteReadRange>(request.Payload);
-                    if (arg.Length < 0 || arg.Length > RemoteFileSystemWire.MaxChunkBytes) throw new InvalidDataException("Read length exceeds the filesystem transfer limit.");
-                    return Reply(request, _backend.Read(arg, cancellationToken));
-                }
+                    {
+                        var arg = Decode<RemoteReadRange>(request.Payload);
+                        if (arg.Length < 0 || arg.Length > RemoteFileSystemWire.MaxChunkBytes) throw new InvalidDataException("Read length exceeds the filesystem transfer limit.");
+                        return Reply(request, _backend.Read(arg, cancellationToken));
+                    }
                 case "fs.write":
-                {
-                    var arg = Decode<RemoteWriteRange>(request.Payload);
-                    if (arg.Data.Length > RemoteFileSystemWire.LegacyMaxChunkBytes) throw new InvalidDataException("Legacy filesystem write length exceeds 64 KiB.");
-                    var written = await _backend.WriteAsync(arg, cancellationToken).ConfigureAwait(false);
-                    return Reply(request, RemoteFileSystemWire.Encode(new RemoteWriteResult(written)));
-                }
+                    {
+                        var arg = Decode<RemoteWriteRange>(request.Payload);
+                        if (arg.Data.Length > RemoteFileSystemWire.LegacyMaxChunkBytes) throw new InvalidDataException("Legacy filesystem write length exceeds 64 KiB.");
+                        var written = await _backend.WriteAsync(arg, cancellationToken).ConfigureAwait(false);
+                        return Reply(request, RemoteFileSystemWire.Encode(new RemoteWriteResult(written)));
+                    }
                 case "fs.write.v2":
-                {
-                    var arg = RemoteFileSystemWire.DecodeWriteV2(request.Payload);
-                    var written = await _backend.WriteAsync(arg, cancellationToken).ConfigureAwait(false);
-                    return Reply(request, RemoteFileSystemWire.Encode(new RemoteWriteResult(written)));
-                }
+                    {
+                        var arg = RemoteFileSystemWire.DecodeWriteV2(request.Payload);
+                        var written = await _backend.WriteAsync(arg, cancellationToken).ConfigureAwait(false);
+                        return Reply(request, RemoteFileSystemWire.Encode(new RemoteWriteResult(written)));
+                    }
                 case "fs.create":
                     _backend.Create(Decode<RemoteCreatePath>(request.Payload));
                     return Reply(request, []);
@@ -78,11 +78,11 @@ public sealed class FileSystemService(PeerPermissionStore permissions, LocalConf
                     _backend.SetInfo(Decode<RemoteSetInfo>(request.Payload));
                     return Reply(request, []);
                 case "fs.flush":
-                {
-                    var arg = Decode<RemoteFlushPath>(request.Payload);
-                    _backend.Flush(arg);
-                    return Reply(request, []);
-                }
+                    {
+                        var arg = Decode<RemoteFlushPath>(request.Payload);
+                        _backend.Flush(arg);
+                        return Reply(request, []);
+                    }
                 case "fs.eject":
                     await _backend.EjectAsync(Decode<RemoteVolumeRequest>(request.Payload), cancellationToken).ConfigureAwait(false);
                     return Reply(request, []);
