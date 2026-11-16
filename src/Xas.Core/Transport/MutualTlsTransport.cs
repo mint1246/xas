@@ -27,8 +27,13 @@ public static class MutualTlsTransport
 
     /// <summary>Connects and authenticates a peer. The returned connection owns the TCP socket.</summary>
     public static async Task<AuthenticatedPeerConnection> ConnectAsync(
-        string host, int port, DeviceIdentity identity, PeerTrustStore trustStore,
-        string expectedPeerDeviceId, TimeSpan handshakeTimeout, CancellationToken cancellationToken = default,
+        string host,
+        int port,
+        DeviceIdentity identity,
+        PeerTrustStore trustStore,
+        string expectedPeerDeviceId,
+        TimeSpan handshakeTimeout,
+        CancellationToken cancellationToken = default,
         IPAddress? localAddress = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(host);
@@ -41,11 +46,17 @@ public static class MutualTlsTransport
         client.NoDelay = true;
         if (localAddress is not null)
             client.Client.Bind(new IPEndPoint(localAddress, 0));
-        using var timeout = CreateTimeout(handshakeTimeout, cancellationToken);
+        using var timeout = LinkedTimeout(handshakeTimeout, cancellationToken);
         try
         {
             await client.ConnectAsync(host, port, timeout.Token).ConfigureAwait(false);
-            return await AuthenticateClientAsync(client, identity, trustStore, host, expectedPeerDeviceId, timeout.Token).ConfigureAwait(false);
+            return await AuthenticateClientAsync(
+                client,
+                identity,
+                trustStore,
+                host,
+                expectedPeerDeviceId,
+                timeout.Token).ConfigureAwait(false);
         }
         catch
         {
@@ -56,15 +67,18 @@ public static class MutualTlsTransport
 
     /// <summary>Authenticates an accepted TCP socket. The returned connection owns the socket.</summary>
     public static async Task<AuthenticatedPeerConnection> AcceptAsync(
-        TcpClient client, DeviceIdentity identity, PeerTrustStore trustStore,
-        TimeSpan handshakeTimeout, CancellationToken cancellationToken = default)
+        TcpClient client,
+        DeviceIdentity identity,
+        PeerTrustStore trustStore,
+        TimeSpan handshakeTimeout,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(client);
         client.NoDelay = true;
         ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(trustStore);
         ValidateTimeout(handshakeTimeout);
-        using var timeout = CreateTimeout(handshakeTimeout, cancellationToken);
+        using var timeout = LinkedTimeout(handshakeTimeout, cancellationToken);
         try
         {
             var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false);
@@ -76,7 +90,8 @@ public static class MutualTlsTransport
                     ClientCertificateRequired = true,
                     EnabledSslProtocols = SupportedProtocols,
                     CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
-                    RemoteCertificateValidationCallback = (_, certificate, _, _) => trustStore.IsTrusted(certificate)
+                    RemoteCertificateValidationCallback =
+                        PeerCertificateValidation(trustStore)
                 };
                 await ssl.AuthenticateAsServerAsync(options, timeout.Token).ConfigureAwait(false);
                 var peerId = GetPeerDeviceId(ssl.RemoteCertificate);
@@ -96,10 +111,16 @@ public static class MutualTlsTransport
     }
 
     private static async Task<AuthenticatedPeerConnection> AuthenticateClientAsync(
-        TcpClient client, DeviceIdentity identity, PeerTrustStore trustStore,
-        string host, string expectedPeerDeviceId, CancellationToken cancellationToken)
+        TcpClient client,
+        DeviceIdentity identity,
+        PeerTrustStore trustStore,
+        string host,
+        string expectedPeerDeviceId,
+        CancellationToken cancellationToken)
     {
-        var ssl = new SslStream(client.GetStream(), leaveInnerStreamOpen: false);
+        var authenticatedStream = new SslStream(
+            client.GetStream(),
+            leaveInnerStreamOpen: false);
         try
         {
             var certificates = new X509CertificateCollection { identity.Certificate };
@@ -109,40 +130,57 @@ public static class MutualTlsTransport
                 ClientCertificates = certificates,
                 EnabledSslProtocols = SupportedProtocols,
                 CertificateRevocationCheckMode = X509RevocationMode.NoCheck,
-                RemoteCertificateValidationCallback = (_, certificate, _, _) => trustStore.IsTrusted(certificate)
+                RemoteCertificateValidationCallback =
+                    PeerCertificateValidation(trustStore)
             };
-            await ssl.AuthenticateAsClientAsync(options, cancellationToken).ConfigureAwait(false);
-            var peerId = GetPeerDeviceId(ssl.RemoteCertificate);
+            await authenticatedStream.AuthenticateAsClientAsync(options, cancellationToken)
+                .ConfigureAwait(false);
+            var peerId = GetPeerDeviceId(authenticatedStream.RemoteCertificate);
             if (!string.Equals(peerId, expectedPeerDeviceId, StringComparison.Ordinal))
-                throw new AuthenticationException("The authenticated peer does not match the intended device.");
-            return new AuthenticatedPeerConnection(ssl, peerId);
+                throw new AuthenticationException(
+                    "The authenticated peer does not match the intended device.");
+            return new AuthenticatedPeerConnection(authenticatedStream, peerId);
         }
         catch
         {
-            await ssl.DisposeAsync().ConfigureAwait(false);
+            await authenticatedStream.DisposeAsync().ConfigureAwait(false);
             throw;
         }
-
     }
 
     private static string GetPeerDeviceId(X509Certificate? certificate)
     {
-        if (certificate is null) throw new AuthenticationException("The peer did not provide a certificate.");
-        using var cert = certificate is X509Certificate2 x509 ? new X509Certificate2(x509) : new X509Certificate2(certificate);
-        var fingerprint = Convert.ToHexString(SHA256.HashData(cert.PublicKey.ExportSubjectPublicKeyInfo()));
+        if (certificate is null)
+            throw new AuthenticationException("The peer did not provide a certificate.");
+
+        using var peerCertificate = certificate is X509Certificate2 x509
+            ? new X509Certificate2(x509)
+            : new X509Certificate2(certificate);
+        var publicKey = peerCertificate.PublicKey.ExportSubjectPublicKeyInfo();
+        var fingerprint = Convert.ToHexString(SHA256.HashData(publicKey));
         return "xas-" + fingerprint[..32].ToLowerInvariant();
     }
 
-    private static CancellationTokenSource CreateTimeout(TimeSpan timeout, CancellationToken cancellationToken)
+    private static CancellationTokenSource LinkedTimeout(
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
-        var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        source.CancelAfter(timeout);
-        return source;
+        var timeoutSource = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutSource.CancelAfter(timeout);
+        return timeoutSource;
+    }
+
+    private static RemoteCertificateValidationCallback PeerCertificateValidation(
+        PeerTrustStore trustStore)
+    {
+        return (_, certificate, _, _) => trustStore.IsTrusted(certificate);
     }
 
     private static void ValidateTimeout(TimeSpan timeout)
     {
         if (timeout <= TimeSpan.Zero && timeout != Timeout.InfiniteTimeSpan)
-            throw new ArgumentOutOfRangeException(nameof(timeout), "Timeout must be positive or infinite.");
+            throw new ArgumentOutOfRangeException(
+                nameof(timeout),
+                "Timeout must be positive or infinite.");
     }
 }

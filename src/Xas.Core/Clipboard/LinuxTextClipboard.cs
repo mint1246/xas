@@ -22,67 +22,125 @@ public sealed class LinuxTextClipboard : ITextClipboardBackend, IClipboardChange
 
     public LinuxTextClipboard()
     {
-        if (!OperatingSystem.IsLinux()) return;
+        if (!OperatingSystem.IsLinux())
+            return;
 
         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
         {
             _pasteProgram = FindOnPath("wl-paste");
             _copyProgram = FindOnPath("wl-copy");
-            if (_pasteProgram is not null && _copyProgram is not null) _session = SessionKind.Wayland;
-            else _availabilityError = "Wayland session detected, but wl-paste/wl-copy from wl-clipboard are not both available in PATH.";
+            if (_pasteProgram is not null && _copyProgram is not null)
+            {
+                _session = SessionKind.Wayland;
+            }
+            else
+            {
+                _availabilityError =
+                    "Wayland session detected, but wl-paste/wl-copy from "
+                    + "wl-clipboard are not both available in PATH.";
+            }
         }
 
-        if (_session == SessionKind.None && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY")))
+        if (_session == SessionKind.None
+            && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DISPLAY")))
         {
             var xclip = FindOnPath("xclip");
             var xsel = FindOnPath("xsel");
-            if (xclip is not null) { _pasteProgram = xclip; _copyProgram = xclip; _session = SessionKind.Xclip; }
-            else if (xsel is not null) { _pasteProgram = xsel; _copyProgram = xsel; _session = SessionKind.Xsel; }
-            else if (_availabilityError is null) _availabilityError = "X11 session detected, but neither xclip nor xsel is available in PATH.";
+            if (xclip is not null)
+            {
+                _pasteProgram = xclip;
+                _copyProgram = xclip;
+                _session = SessionKind.Xclip;
+            }
+            else if (xsel is not null)
+            {
+                _pasteProgram = xsel;
+                _copyProgram = xsel;
+                _session = SessionKind.Xsel;
+            }
+            else if (_availabilityError is null)
+            {
+                _availabilityError =
+                    "X11 session detected, but neither xclip nor xsel is available in PATH.";
+            }
         }
 
         if (_session == SessionKind.None && _availabilityError is null)
-            _availabilityError = "No graphical Linux clipboard session was detected. WAYLAND_DISPLAY and DISPLAY are both unset.";
+        {
+            _availabilityError =
+                "No graphical Linux clipboard session was detected. "
+                + "WAYLAND_DISPLAY and DISPLAY are both unset.";
+        }
     }
 
     public bool IsAvailable => OperatingSystem.IsLinux() && _session != SessionKind.None;
 
-    public async ValueTask<ClipboardTextSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
+    public async ValueTask<ClipboardTextSnapshot> GetSnapshotAsync(
+        CancellationToken cancellationToken = default)
     {
         EnsureAvailable();
         var args = _session switch
         {
             SessionKind.Wayland => new[] { "--no-newline", "--type", "text" },
-            SessionKind.Xclip => new[] { "-quiet", "-selection", "clipboard", "-out", "-target", "UTF8_STRING" },
+            SessionKind.Xclip => new[]
+            {
+                "-quiet", "-selection", "clipboard", "-out", "-target", "UTF8_STRING"
+            },
             SessionKind.Xsel => new[] { "--clipboard", "--output" },
             _ => throw new PlatformNotSupportedException()
         };
-        var bytes = await RunCaptureAsync(_pasteProgram!, args, cancellationToken).ConfigureAwait(false);
-        if (bytes.Length > MaxTextBytes) throw new InvalidDataException("Clipboard text exceeds the 256 KiB limit.");
+        var bytes = await RunCaptureAsync(
+            _pasteProgram!,
+            args,
+            cancellationToken).ConfigureAwait(false);
+        if (bytes.Length > MaxTextBytes)
+            throw new InvalidDataException("Clipboard text exceeds the 256 KiB limit.");
         string text;
-        try { text = StrictUtf8.GetString(bytes); }
-        catch (DecoderFallbackException ex) { throw new InvalidDataException("Clipboard content is not valid UTF-8 text.", ex); }
+        try
+        {
+            text = StrictUtf8.GetString(bytes);
+        }
+        catch (DecoderFallbackException ex)
+        {
+            throw new InvalidDataException(
+                "Clipboard content is not valid UTF-8 text.",
+                ex);
+        }
         return new ClipboardTextSnapshot(text, StableChangeId(bytes));
     }
 
-    public async ValueTask SetTextAsync(string text, CancellationToken cancellationToken = default)
+    public async ValueTask SetTextAsync(
+        string text,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(text);
         EnsureAvailable();
         cancellationToken.ThrowIfCancellationRequested();
         var bytes = StrictUtf8.GetBytes(text);
-        if (bytes.Length > MaxTextBytes) throw new ArgumentOutOfRangeException(nameof(text), "Clipboard text exceeds the 256 KiB limit.");
+        if (bytes.Length > MaxTextBytes)
+            throw new ArgumentOutOfRangeException(
+                nameof(text),
+                "Clipboard text exceeds the 256 KiB limit.");
         var args = _session switch
         {
             SessionKind.Wayland => new[] { "--type", "text/plain;charset=utf-8" },
-            SessionKind.Xclip => new[] { "-quiet", "-selection", "clipboard", "-in", "-target", "UTF8_STRING" },
+            SessionKind.Xclip => new[]
+            {
+                "-quiet", "-selection", "clipboard", "-in", "-target", "UTF8_STRING"
+            },
             SessionKind.Xsel => new[] { "--clipboard", "--input" },
             _ => throw new PlatformNotSupportedException()
         };
-        await RunWriteAsync(_copyProgram!, args, bytes, cancellationToken).ConfigureAwait(false);
+        await RunWriteAsync(
+            _copyProgram!,
+            args,
+            bytes,
+            cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>Uses wl-paste watch notifications on supported Wayland compositors, with polling fallbacks elsewhere.</summary>
+    /// <summary>
+    /// Uses wl-paste notifications where supported and polls as a fallback.
+    /// </summary>
     public async IAsyncEnumerable<ClipboardTextSnapshot> WatchChangesAsync(
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
     {
@@ -96,8 +154,13 @@ public sealed class LinuxTextClipboard : ITextClipboardBackend, IClipboardChange
                 SingleWriter = true,
                 FullMode = BoundedChannelFullMode.DropOldest
             });
-            var producer = ProduceWaylandChangesAsync(previous, changes.Writer, cancellationToken);
-            await foreach (var current in changes.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            var producer = ProduceWaylandChangesAsync(
+                previous,
+                changes.Writer,
+                cancellationToken);
+            await foreach (var current in changes.Reader
+                .ReadAllAsync(cancellationToken)
+                .ConfigureAwait(false))
             {
                 previous = current;
                 yield return current;
@@ -106,18 +169,26 @@ public sealed class LinuxTextClipboard : ITextClipboardBackend, IClipboardChange
             yield break;
         }
 
-        await foreach (var current in PollChangesAsync(previous, cancellationToken).ConfigureAwait(false))
+        await foreach (var current in PollChangesAsync(previous, cancellationToken)
+            .ConfigureAwait(false))
             yield return current;
     }
 
     private void EnsureAvailable()
     {
-        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux clipboard access is available only on Linux.");
-        if (!IsAvailable) throw new PlatformNotSupportedException(_availabilityError ?? "No supported clipboard tool is available for the current Linux desktop session.");
+        if (!OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException(
+                "Linux clipboard access is available only on Linux.");
+        if (!IsAvailable)
+            throw new PlatformNotSupportedException(
+                _availabilityError
+                ?? "No supported clipboard tool is available for the current Linux desktop session.");
     }
 
-    private async Task ProduceWaylandChangesAsync(ClipboardTextSnapshot previous,
-        ChannelWriter<ClipboardTextSnapshot> writer, CancellationToken token)
+    private async Task ProduceWaylandChangesAsync(
+        ClipboardTextSnapshot previous,
+        ChannelWriter<ClipboardTextSnapshot> writer,
+        CancellationToken token)
     {
         Exception? failure = null;
         try
@@ -126,72 +197,127 @@ public sealed class LinuxTextClipboard : ITextClipboardBackend, IClipboardChange
             if (!token.IsCancellationRequested)
                 await PollChangesToWriterAsync(previous, writer, token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-        catch (Exception ex) when (ex is IOException or System.ComponentModel.Win32Exception or TimeoutException)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex) when (ex is IOException
+            or System.ComponentModel.Win32Exception
+            or TimeoutException)
         {
             // wl-paste --watch requires the compositor's data-control protocol. GNOME/KDE setups
             // that do not expose it still get functional clipboard sync through the local poller.
-            try { await PollChangesToWriterAsync(previous, writer, token).ConfigureAwait(false); }
-            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-            catch (Exception fallback) { failure = new IOException($"Wayland clipboard watch failed ({ex.Message}); polling fallback also failed ({fallback.Message}).", fallback); }
+            try
+            {
+                await PollChangesToWriterAsync(previous, writer, token)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+            }
+            catch (Exception fallback)
+            {
+                failure = new IOException(
+                    $"Wayland clipboard watch failed ({ex.Message}); "
+                    + $"polling fallback also failed ({fallback.Message}).",
+                    fallback);
+            }
         }
-        finally { writer.TryComplete(failure); }
+        finally
+        {
+            writer.TryComplete(failure);
+        }
     }
 
-    private async Task<ClipboardTextSnapshot> WatchWaylandAsync(ClipboardTextSnapshot previous,
-        ChannelWriter<ClipboardTextSnapshot> writer, CancellationToken token)
+    private async Task<ClipboardTextSnapshot> WatchWaylandAsync(
+        ClipboardTextSnapshot previous,
+        ChannelWriter<ClipboardTextSnapshot> writer,
+        CancellationToken token)
     {
         var shell = FindOnPath("sh") ?? (File.Exists("/bin/sh") ? "/bin/sh" : null)
-            ?? throw new PlatformNotSupportedException("Wayland clipboard watch needs a POSIX sh executable.");
-        using var process = Start(_pasteProgram!, ["--type", "text", "--watch", shell, "-c", "cat >/dev/null; printf x"], redirectInput: false);
+            ?? throw new PlatformNotSupportedException(
+                "Wayland clipboard watch needs a POSIX sh executable.");
+        using var process = Start(
+            _pasteProgram!,
+            ["--type", "text", "--watch", shell, "-c", "cat >/dev/null; printf x"],
+            redirectInput: false);
         using var registration = token.Register(Kill, process);
         using var stderr = new MemoryStream();
-        var stderrTask = CopyBoundedAsync(process.StandardError.BaseStream, stderr, 16 * 1024, token);
+        var stderrTask = CopyBoundedAsync(
+            process.StandardError.BaseStream,
+            stderr,
+            16 * 1024,
+            token);
         var signal = new byte[64];
         while (true)
         {
-            var count = await process.StandardOutput.BaseStream.ReadAsync(signal, token).ConfigureAwait(false);
+            var count = await process.StandardOutput.BaseStream
+                .ReadAsync(signal, token)
+                .ConfigureAwait(false);
             if (count == 0) break;
             ClipboardTextSnapshot current;
-            try { current = await GetSnapshotAsync(token).ConfigureAwait(false); }
-            catch (IOException) { continue; } // Current selection may not contain text.
-            if (current.ChangeId == previous.ChangeId && current.Text == previous.Text) continue;
+            try
+            {
+                current = await GetSnapshotAsync(token).ConfigureAwait(false);
+            }
+            catch (IOException)
+            {
+                continue;
+            }
+            if (current.ChangeId == previous.ChangeId && current.Text == previous.Text)
+                continue;
             previous = current;
             await writer.WriteAsync(current, token).ConfigureAwait(false);
         }
         await process.WaitForExitAsync(token).ConfigureAwait(false);
         await stderrTask.ConfigureAwait(false);
         if (!token.IsCancellationRequested)
-            throw new IOException(FormatFailure("wl-paste --watch", process.ExitCode, stderr.ToArray()));
+            throw new IOException(FormatFailure(
+                "wl-paste --watch",
+                process.ExitCode,
+                stderr.ToArray()));
         return previous;
     }
 
-    private async IAsyncEnumerable<ClipboardTextSnapshot> PollChangesAsync(ClipboardTextSnapshot previous,
+    private async IAsyncEnumerable<ClipboardTextSnapshot> PollChangesAsync(
+        ClipboardTextSnapshot previous,
         [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
     {
         using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
         while (await timer.WaitForNextTickAsync(token).ConfigureAwait(false))
         {
             ClipboardTextSnapshot current;
-            try { current = await GetSnapshotAsync(token).ConfigureAwait(false); }
-            catch (IOException) { continue; }
-            if (current.ChangeId == previous.ChangeId && current.Text == previous.Text) continue;
+            try
+            {
+                current = await GetSnapshotAsync(token).ConfigureAwait(false);
+            }
+            catch (IOException)
+            {
+                continue;
+            }
+            if (current.ChangeId == previous.ChangeId && current.Text == previous.Text)
+                continue;
             previous = current;
             yield return current;
         }
     }
 
-    private async Task PollChangesToWriterAsync(ClipboardTextSnapshot previous,
-        ChannelWriter<ClipboardTextSnapshot> writer, CancellationToken token)
+    private async Task PollChangesToWriterAsync(
+        ClipboardTextSnapshot previous,
+        ChannelWriter<ClipboardTextSnapshot> writer,
+        CancellationToken token)
     {
-        await foreach (var current in PollChangesAsync(previous, token).ConfigureAwait(false))
+        await foreach (var current in PollChangesAsync(previous, token)
+            .ConfigureAwait(false))
         {
             previous = current;
             await writer.WriteAsync(current, token).ConfigureAwait(false);
         }
     }
 
-    private static async Task<byte[]> RunCaptureAsync(string executable, string[] arguments, CancellationToken token)
+    private static async Task<byte[]> RunCaptureAsync(
+        string executable,
+        string[] arguments,
+        CancellationToken token)
     {
         using var process = Start(executable, arguments, redirectInput: false);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
@@ -199,11 +325,22 @@ public sealed class LinuxTextClipboard : ITextClipboardBackend, IClipboardChange
         using var registration = timeout.Token.Register(Kill, process);
         using var output = new MemoryStream();
         using var stderr = new MemoryStream();
-        var stderrTask = CopyBoundedAsync(process.StandardError.BaseStream, stderr, 16 * 1024, timeout.Token);
-        var readTask = CopyBoundedAsync(process.StandardOutput.BaseStream, output, MaxTextBytes + 1, timeout.Token);
+        var stderrTask = CopyBoundedAsync(
+            process.StandardError.BaseStream,
+            stderr,
+            16 * 1024,
+            timeout.Token);
+        var readTask = CopyBoundedAsync(
+            process.StandardOutput.BaseStream,
+            output,
+            MaxTextBytes + 1,
+            timeout.Token);
         try
         {
-            await Task.WhenAll(process.WaitForExitAsync(timeout.Token), readTask, stderrTask).ConfigureAwait(false);
+            await Task.WhenAll(
+                process.WaitForExitAsync(timeout.Token),
+                readTask,
+                stderrTask).ConfigureAwait(false);
         }
         catch (InvalidDataException)
         {
@@ -214,45 +351,73 @@ public sealed class LinuxTextClipboard : ITextClipboardBackend, IClipboardChange
         {
             throw new TimeoutException("Clipboard command did not finish within five seconds.");
         }
-        if (process.ExitCode != 0) throw new IOException(FormatFailure(Path.GetFileName(executable), process.ExitCode, stderr.ToArray()));
+        if (process.ExitCode != 0)
+        {
+            throw new IOException(FormatFailure(
+                Path.GetFileName(executable),
+                process.ExitCode,
+                stderr.ToArray()));
+        }
         return output.ToArray();
     }
 
-    private static async Task CopyBoundedAsync(Stream input, Stream output, int limit, CancellationToken token)
+    private static async Task CopyBoundedAsync(
+        Stream input,
+        Stream output,
+        int limit,
+        CancellationToken token)
     {
         var buffer = new byte[8192];
         var total = 0;
         while (true)
         {
             var read = await input.ReadAsync(buffer.AsMemory(), token).ConfigureAwait(false);
-            if (read == 0) return;
+            if (read == 0)
+                return;
             total += read;
-            if (total > limit) throw new InvalidDataException("Clipboard command returned more than the allowed text size.");
+            EnsureOutputWithinLimit(total, limit);
             await output.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
         }
     }
 
-    private static async Task RunWriteAsync(string executable, string[] arguments, byte[] bytes, CancellationToken token)
+    private static async Task RunWriteAsync(
+        string executable,
+        string[] arguments,
+        byte[] bytes,
+        CancellationToken token)
     {
         using var process = Start(executable, arguments, redirectInput: true);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
         timeout.CancelAfter(ProcessTimeout);
         using var registration = timeout.Token.Register(Kill, process);
         using var stderr = new MemoryStream();
-        var stderrTask = CopyBoundedAsync(process.StandardError.BaseStream, stderr, 16 * 1024, timeout.Token);
+        var stderrTask = CopyBoundedAsync(
+            process.StandardError.BaseStream,
+            stderr,
+            16 * 1024,
+            timeout.Token);
         var stdoutTask = process.StandardOutput.BaseStream.CopyToAsync(Stream.Null);
         try
         {
             await process.StandardInput.BaseStream.WriteAsync(bytes, timeout.Token).ConfigureAwait(false);
             await process.StandardInput.BaseStream.FlushAsync(timeout.Token).ConfigureAwait(false);
             process.StandardInput.Close();
-            await Task.WhenAll(process.WaitForExitAsync(timeout.Token), stderrTask, stdoutTask).ConfigureAwait(false);
+            await Task.WhenAll(
+                process.WaitForExitAsync(timeout.Token),
+                stderrTask,
+                stdoutTask).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested)
         {
             throw new TimeoutException("Clipboard command did not finish within five seconds.");
         }
-        if (process.ExitCode != 0) throw new IOException(FormatFailure(Path.GetFileName(executable), process.ExitCode, stderr.ToArray()));
+        if (process.ExitCode != 0)
+        {
+            throw new IOException(FormatFailure(
+                Path.GetFileName(executable),
+                process.ExitCode,
+                stderr.ToArray()));
+        }
     }
 
     private static Process Start(string executable, string[] arguments, bool redirectInput)
@@ -271,7 +436,11 @@ public sealed class LinuxTextClipboard : ITextClipboardBackend, IClipboardChange
         var process = new Process { StartInfo = info };
         try
         {
-            if (!process.Start()) throw new IOException($"Could not start clipboard command '{Path.GetFileName(executable)}'.");
+            if (!process.Start())
+            {
+                throw new IOException(
+                    $"Could not start clipboard command '{Path.GetFileName(executable)}'.");
+            }
             return process;
         }
         catch { process.Dispose(); throw; }
@@ -292,9 +461,18 @@ public sealed class LinuxTextClipboard : ITextClipboardBackend, IClipboardChange
     private static string FormatFailure(string command, int exitCode, byte[] stderr)
     {
         var detail = Encoding.UTF8.GetString(stderr).Trim();
-        return detail.Length == 0
-            ? $"Clipboard command '{command}' failed with exit code {exitCode}. Check WAYLAND_DISPLAY/DISPLAY, XDG_RUNTIME_DIR, and clipboard tool availability."
-            : $"Clipboard command '{command}' failed with exit code {exitCode}: {detail}";
+        if (detail.Length > 0)
+            return $"Clipboard command '{command}' failed with exit code {exitCode}: {detail}";
+
+        return $"Clipboard command '{command}' failed with exit code {exitCode}. "
+            + "Check WAYLAND_DISPLAY/DISPLAY, XDG_RUNTIME_DIR, and clipboard tool availability.";
+    }
+
+    private static void EnsureOutputWithinLimit(int total, int limit)
+    {
+        if (total > limit)
+            throw new InvalidDataException(
+                "Clipboard command returned more than the allowed text size.");
     }
 
     private static string? FindOnPath(string name)

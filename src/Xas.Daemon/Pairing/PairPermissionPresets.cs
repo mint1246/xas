@@ -8,7 +8,15 @@ internal static class PairPermissionPresets
 {
     public static void Apply(PeerPermissionStore permissions, string deviceId, PairPermissionPreset preset)
     {
-        foreach (var capability in new[] { Capability.Input, Capability.Clipboard, Capability.FileSystem, Capability.Shell })
+        var capabilities = new[]
+        {
+            Capability.Input,
+            Capability.Clipboard,
+            Capability.FileSystem,
+            Capability.Shell
+        };
+        foreach (var capability in capabilities)
+        {
             permissions.SetAllowed(deviceId, capability, preset switch
             {
                 PairPermissionPreset.None => false,
@@ -16,6 +24,7 @@ internal static class PairPermissionPresets
                 PairPermissionPreset.Personal => true,
                 _ => throw new InvalidDataException("Unknown pairing permission preset.")
             });
+        }
 
         // Administrator brokering is always a separate, explicit Windows-only grant.
         permissions.SetAllowed(deviceId, Capability.PrivilegedShell, false);

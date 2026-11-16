@@ -8,6 +8,8 @@ namespace Xas.Input;
 /// <summary>Owns the XAS virtual monitor and routes native input over an already authenticated peer session.</summary>
 public static class WindowsMonitorHandoff
 {
+    private readonly record struct RouterOutcome(bool Refresh, bool RetryRouter, bool TopologyChanged);
+
     public static async Task RunAsync(IHotInputPeer peer, CancellationToken token, Action<string>? log = null)
     {
         ArgumentNullException.ThrowIfNull(peer);
@@ -58,137 +60,230 @@ public static class WindowsMonitorHandoff
         if (!controller.IsAvailable) return;
         var changes = Channel.CreateBounded<byte>(new BoundedChannelOptions(1)
         { FullMode = BoundedChannelFullMode.DropWrite, SingleReader = true, SingleWriter = false });
-        var topologyChanged = false;
         void Changed() => changes.Writer.TryWrite(0);
-        void TopologyChanged() { topologyChanged = true; changes.Writer.TryWrite(0); }
+        void TopologyChanged() => changes.Writer.TryWrite(0);
         peer.Changed += Changed;
-        DisplayMetadata? attachedDisplay = null;
-        VirtualDisplayAttachment? attachment = null;
         try
         {
-            while (!token.IsCancellationRequested)
-            {
-                var display = peer.Display;
-                if (display is null)
-                {
-                    await WaitForChangeAsync(changes.Reader, token).ConfigureAwait(false);
-                    continue;
-                }
-
-                if (!HasSameVirtualMonitorMode(display, attachedDisplay) || attachment is null ||
-                    !attachmentExists(attachment))
-                {
-                    log?.Invoke($"Attaching virtual display for {display.Name} at {display.WidthPixels}x{display.HeightPixels}.");
-                    attachment = await controller.AttachAsync(display, token).ConfigureAwait(false);
-                    attachedDisplay = display;
-                }
-
-                WindowsMonitor? monitor;
-                try { monitor = findMonitor(attachment); }
-                catch (Exception ex) when (IsTransientTopologyFailure(ex))
-                {
-                    log?.Invoke($"Windows display topology is temporarily unavailable: {ex.Message}");
-                    await delay(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
-                    continue;
-                }
-                if (monitor is null)
-                {
-                    log?.Invoke("The owned virtual display is not available in the Windows desktop topology.");
-                    await delay(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
-                    continue;
-                }
-
-                using var run = CancellationTokenSource.CreateLinkedTokenSource(token);
-                topologyChanged = false;
-                var router = StartRouter(runRouter, peer, monitor.Region, run.Token, TopologyChanged);
-                var refresh = false;
-                var retryRouter = false;
-                Task<bool>? pendingChange = null;
-                while (!token.IsCancellationRequested && !refresh)
-                {
-                    pendingChange ??= changes.Reader.WaitToReadAsync(run.Token).AsTask();
-                    var completed = await Task.WhenAny(router, pendingChange).ConfigureAwait(false);
-                    if (completed == router)
-                    {
-                        try { await router.ConfigureAwait(false); }
-                        catch (OperationCanceledException) when (run.IsCancellationRequested) { }
-                        catch (Exception ex)
-                        {
-                            // Input acquisition can fail independently of display metadata. Keep the display
-                            // attached and retry the input lease without bouncing the user's monitor.
-                            log?.Invoke($"Remote input is temporarily unavailable; keeping the virtual display attached: {ex.Message}");
-                            retryRouter = true;
-                        }
-                        // The hot router only completes normally for the emergency return or peer disconnect.
-                        if (!retryRouter && !token.IsCancellationRequested)
-                        {
-                            returnToLocal(monitor);
-                            log?.Invoke("Input returned to the local desktop.");
-                        }
-                        break;
-                    }
-                    try { await pendingChange.ConfigureAwait(false); }
-                    catch (OperationCanceledException) when (run.IsCancellationRequested) { break; }
-                    pendingChange = null;
-                    while (changes.Reader.TryRead(out _)) { }
-                    if (topologyChanged || !Equals(peer.Display, attachedDisplay)) refresh = true;
-                }
-                run.Cancel();
-                if (pendingChange is not null)
-                {
-                    try { await pendingChange.ConfigureAwait(false); }
-                    catch (OperationCanceledException) when (run.IsCancellationRequested) { }
-                }
-                try { await router.ConfigureAwait(false); }
-                catch (OperationCanceledException) when (run.IsCancellationRequested) { }
-                catch (Exception) when (retryRouter) { }
-                if (token.IsCancellationRequested) break;
-                if (retryRouter)
-                {
-                    await delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
-                    continue;
-                }
-                if (refresh)
-                {
-                    var updatedDisplay = peer.Display;
-                    var metadataChanged = !Equals(updatedDisplay, attachedDisplay);
-                    var monitorModeChanged = updatedDisplay is not null &&
-                        !HasSameVirtualMonitorMode(updatedDisplay, attachedDisplay);
-                    if (!metadataChanged && topologyChanged)
-                    {
-                        // Moving/rearranging monitors in Windows must only rebind the capture rectangle.
-                        // Recreating SudoVDA here makes ordinary layout edits destroy the monitor and loses
-                        // the user's chosen desktop position.
-                        log?.Invoke("Windows display topology changed; rebinding input to the existing virtual monitor.");
-                    }
-                    else if (updatedDisplay is null)
-                    {
-                        log?.Invoke("Remote display disappeared; removing the virtual monitor.");
-                        await controller.DetachAsync(token).ConfigureAwait(false);
-                        attachment = null;
-                        attachedDisplay = null;
-                    }
-                    else if (monitorModeChanged)
-                    {
-                        log?.Invoke("Remote display mode changed; refreshing the virtual monitor.");
-                        attachment = await controller.AttachAsync(updatedDisplay, token).ConfigureAwait(false);
-                        attachedDisplay = updatedDisplay;
-                    }
-                    else if (metadataChanged && updatedDisplay is not null)
-                    {
-                        // Logical coordinates, scale, and other compositor metadata affect input mapping,
-                        // but not the SudoVDA panel mode. Remember them so the router is rebound without
-                        // tearing down and recreating the physical virtual monitor.
-                        attachedDisplay = updatedDisplay;
-                    }
-                }
-            }
+            await RunHandoffLoopAsync(peer, controller, runRouter, findMonitor, returnToLocal,
+                attachmentExists, delay, changes.Reader, token, log, TopologyChanged)
+                .ConfigureAwait(false);
         }
         finally
         {
             peer.Changed -= Changed;
             changes.Writer.TryComplete();
         }
+    }
+
+    private static async Task RunHandoffLoopAsync(
+        IHotInputPeer peer, IVirtualDisplayController controller,
+        Func<IHotInputPeer, WindowsCaptureRegion, CancellationToken, Action, Task> runRouter,
+        Func<VirtualDisplayAttachment, WindowsMonitor?> findMonitor,
+        Action<WindowsMonitor> returnToLocal,
+        Func<VirtualDisplayAttachment, bool> attachmentExists,
+        Func<TimeSpan, CancellationToken, Task> delay,
+        ChannelReader<byte> changes, CancellationToken token, Action<string>? log,
+        Action topologySignal)
+    {
+        DisplayMetadata? attachedDisplay = null;
+        VirtualDisplayAttachment? attachment = null;
+        while (!token.IsCancellationRequested)
+        {
+            var display = peer.Display;
+            if (display is null)
+            {
+                await WaitForChangeAsync(changes, token).ConfigureAwait(false);
+                continue;
+            }
+
+            if (!HasSameVirtualMonitorMode(display, attachedDisplay) || attachment is null ||
+                !attachmentExists(attachment))
+            {
+                log?.Invoke(
+                    $"Attaching virtual display for {display.Name} at " +
+                    $"{display.WidthPixels}x{display.HeightPixels}.");
+                attachment = await controller.AttachAsync(display, token).ConfigureAwait(false);
+                attachedDisplay = display;
+            }
+
+            var monitor = await FindMonitorOrWaitAsync(attachment!, findMonitor, delay, token, log)
+                .ConfigureAwait(false);
+            if (monitor is null) continue;
+
+            var outcome = await RunRouterUntilChangeAsync(
+                peer, monitor, attachedDisplay, runRouter, changes, returnToLocal,
+                log, token, topologySignal).ConfigureAwait(false);
+            if (token.IsCancellationRequested) break;
+            if (outcome.RetryRouter)
+            {
+                await delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
+                continue;
+            }
+
+            if (outcome.Refresh)
+                (attachment, attachedDisplay) = await RefreshAttachmentAsync(
+                    peer.Display, attachedDisplay, attachment, controller, outcome.TopologyChanged,
+                    token, log).ConfigureAwait(false);
+        }
+    }
+
+    private static async Task<WindowsMonitor?> FindMonitorOrWaitAsync(
+        VirtualDisplayAttachment attachment,
+        Func<VirtualDisplayAttachment, WindowsMonitor?> findMonitor,
+        Func<TimeSpan, CancellationToken, Task> delay,
+        CancellationToken token, Action<string>? log)
+    {
+        WindowsMonitor? monitor;
+        try
+        {
+            monitor = findMonitor(attachment);
+        }
+        catch (Exception exception) when (IsTransientTopologyFailure(exception))
+        {
+            log?.Invoke($"Windows display topology is temporarily unavailable: {exception.Message}");
+            await delay(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
+            return null;
+        }
+
+        if (monitor is not null) return monitor;
+
+        log?.Invoke("The owned virtual display is not available in the Windows desktop topology.");
+        await delay(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
+        return null;
+    }
+
+    private static async Task<(VirtualDisplayAttachment? Attachment, DisplayMetadata? Display)>
+        RefreshAttachmentAsync(
+            DisplayMetadata? updatedDisplay, DisplayMetadata? attachedDisplay,
+            VirtualDisplayAttachment? priorAttachment, IVirtualDisplayController controller,
+            bool topologyChanged, CancellationToken token, Action<string>? log)
+    {
+        var metadataChanged = !Equals(updatedDisplay, attachedDisplay);
+        var modeChanged = updatedDisplay is not null &&
+            !HasSameVirtualMonitorMode(updatedDisplay, attachedDisplay);
+
+        if (!metadataChanged && topologyChanged)
+        {
+            // Moving monitors in Windows only rebinds the capture rectangle, preserving the user's layout.
+            log?.Invoke("Windows display topology changed; rebinding input to the existing virtual monitor.");
+            return (priorAttachment, attachedDisplay);
+        }
+
+        if (updatedDisplay is null)
+        {
+            log?.Invoke("Remote display disappeared; removing the virtual monitor.");
+            await controller.DetachAsync(token).ConfigureAwait(false);
+            return (null, null);
+        }
+
+        if (modeChanged)
+        {
+            log?.Invoke("Remote display mode changed; refreshing the virtual monitor.");
+            var refreshedAttachment = await controller.AttachAsync(updatedDisplay, token).ConfigureAwait(false);
+            return (refreshedAttachment, updatedDisplay);
+        }
+
+        return (priorAttachment, metadataChanged ? updatedDisplay : attachedDisplay);
+    }
+
+    private static async Task<RouterOutcome> RunRouterUntilChangeAsync(
+        IHotInputPeer peer, WindowsMonitor monitor, DisplayMetadata? attachedDisplay,
+        Func<IHotInputPeer, WindowsCaptureRegion, CancellationToken, Action, Task> runRouter,
+        ChannelReader<byte> changes, Action<WindowsMonitor> returnToLocal,
+        Action<string>? log, CancellationToken token, Action topologySignal)
+    {
+        using var run = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var topologyChanged = false;
+        void MarkTopologyChanged()
+        {
+            topologyChanged = true;
+            topologySignal();
+        }
+
+        var router = StartRouter(runRouter, peer, monitor.Region, run.Token, MarkTopologyChanged);
+        var refresh = false;
+        var retryRouter = false;
+        Task<bool>? pendingChange = null;
+        while (!token.IsCancellationRequested && !refresh)
+        {
+            pendingChange ??= changes.WaitToReadAsync(run.Token).AsTask();
+            var completed = await Task.WhenAny(router, pendingChange).ConfigureAwait(false);
+            if (completed == router)
+            {
+                retryRouter = await ObserveRouterAsync(router, run, monitor, returnToLocal, log)
+                    .ConfigureAwait(false);
+                break;
+            }
+
+            if (!await ObserveChangeAsync(pendingChange, run).ConfigureAwait(false)) break;
+            pendingChange = null;
+            while (changes.TryRead(out _)) { }
+            refresh = topologyChanged || !Equals(peer.Display, attachedDisplay);
+        }
+
+        run.Cancel();
+        if (pendingChange is not null)
+            await ObservePendingChangeAsync(pendingChange, run).ConfigureAwait(false);
+        await ObserveRouterCleanupAsync(router, run, retryRouter).ConfigureAwait(false);
+        return new(refresh, retryRouter, topologyChanged);
+    }
+
+    private static async Task<bool> ObserveRouterAsync(
+        Task router, CancellationTokenSource run, WindowsMonitor monitor,
+        Action<WindowsMonitor> returnToLocal, Action<string>? log)
+    {
+        var retryRouter = false;
+        try
+        {
+            await router.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (run.IsCancellationRequested) { }
+        catch (Exception exception)
+        {
+            log?.Invoke(
+                $"Remote input is temporarily unavailable; " +
+                $"keeping the virtual display attached: {exception.Message}");
+            retryRouter = true;
+        }
+
+        if (!retryRouter && !run.IsCancellationRequested)
+        {
+            returnToLocal(monitor);
+            log?.Invoke("Input returned to the local desktop.");
+        }
+
+        return retryRouter;
+    }
+
+    private static async Task<bool> ObserveChangeAsync(
+        Task<bool> pendingChange, CancellationTokenSource run)
+    {
+        try
+        {
+            await pendingChange.ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException) when (run.IsCancellationRequested)
+        {
+            // The linked token cancels this pending topology wait during router cleanup.
+            return false;
+        }
+    }
+
+    private static async Task ObservePendingChangeAsync(
+        Task<bool> pendingChange, CancellationTokenSource run)
+    {
+        try { await pendingChange.ConfigureAwait(false); }
+        catch (OperationCanceledException) when (run.IsCancellationRequested) { }
+    }
+
+    private static async Task ObserveRouterCleanupAsync(
+        Task router, CancellationTokenSource run, bool retryRouter)
+    {
+        try { await router.ConfigureAwait(false); }
+        catch (OperationCanceledException) when (run.IsCancellationRequested) { }
+        catch (Exception) when (retryRouter) { }
     }
 
     private static WindowsMonitor? FindOwnedRemote(VirtualDisplayAttachment attachment)

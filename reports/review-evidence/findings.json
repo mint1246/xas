@@ -1,0 +1,297 @@
+[
+  {
+    "id": "R10",
+    "p": "P1",
+    "area": "Commands",
+    "title": "Forward bound CLI command-close requests to the remote session",
+    "state": "Static end-to-end request trace",
+    "sources": [
+      [
+        "src/Xas.Cli/LocalDaemonClient.cs",
+        107,
+        131
+      ],
+      [
+        "src/Xas.Cli/LocalDaemonClient.cs",
+        153,
+        164
+      ],
+      [
+        "src/Xas.Core/LocalIpc/LocalIpcProtocol.cs",
+        44,
+        46
+      ],
+      [
+        "src/Xas.Daemon/LocalIpc/LocalIpcServer.cs",
+        131,
+        143
+      ],
+      [
+        "src/Xas.Daemon/Shell/StreamingCommandManager.cs",
+        36,
+        48
+      ]
+    ],
+    "trigger": "Finish or cancel a one-shot command run by LocalDaemonClient, which opens shell.exec.open after local.bind.",
+    "problem": "The CLI sends shell.exec.close during cleanup. LocalIpcProtocol.ShellClose is the same method string, so the server intercepts it before the bound-session forwarding path. That branch only checks openShells, which is populated by local.shell.open. The current CLI uses the other open path, leaving that dictionary empty. The server therefore returns success without asking the peer to close the command.",
+    "impact": "Cancellation can leave a remote command running. Completed command sessions and their input buffers remain in StreamingCommandManager until the shared peer lane disconnects, causing accumulation across routine CLI use.",
+    "fix": "Track bound commands and forward their close requests with the correct remote ID. Distinguish local remapped closes from raw bound closes, and close owned commands when a local IPC connection disappears.",
+    "test": "Open a command through local.bind plus shell.exec.open, send shell.exec.close, and assert the remote close handler is invoked. Verify cancellation terminates a live fake command and repeated completed commands do not retain sessions.",
+    "evidence": "The same close method is used by the CLI and the remapped IPC branch. The forwarding fallback is below that unconditional successful response; the remote manager removes and cancels sessions only when it receives close or is itself disposed."
+  },
+  {
+    "id": "R1",
+    "p": "P1",
+    "area": "Commands",
+    "title": "Isolate shell events by the command that owns them",
+    "state": "Reproduced forwarding defect; primary CLI path traced",
+    "sources": [
+      [
+        "src/Xas.Daemon/LocalIpc/LocalIpcServer.cs",
+        100,
+        106
+      ],
+      [
+        "src/Xas.Daemon/LocalIpc/LocalIpcServer.cs",
+        434,
+        448
+      ],
+      [
+        "src/Xas.Cli/LocalDaemonClient.cs",
+        179,
+        186
+      ]
+    ],
+    "trigger": "Run two CLI commands against the same peer at the same time, or run a command while another shell is producing output.",
+    "problem": "Every bound IPC client subscribes to all PeerSession.MessageReceived events, without filtering the lane or command stream. LocalDaemonClient throws on a different stream ID. The alternative local.shell.open forwarder also accepts every shell stream and rewrites it to its own local ID, including another command’s exit event.",
+    "impact": "Ordinary concurrent commands can disconnect a CLI, mix output, or finish with another command’s exit code. A forwarding failure propagates into the shared peer receive loop and can affect other users of that lane.",
+    "fix": "Track which remote stream IDs each IPC client owns. Filter lane, method, and stream before forwarding; filter buffered early events after the open response resolves the ID. Keep local-client send failures from terminating a shared remote lane.",
+    "test": "Open two commands on one peer, interleave stdout and different exit codes, and verify that each client receives only its own events. Disconnect one client while the other continues.",
+    "evidence": "The isolated harness fed exit event 102 to a forwarder owning stream 101. It forwarded that exit as local stream 1. The main CLI uses the unfiltered bound handler shown above."
+  },
+  {
+    "id": "R2",
+    "p": "P1",
+    "area": "Connections",
+    "title": "Close outbound lanes before waiting for dialers during shutdown",
+    "state": "Reproduced with an in-memory connection",
+    "sources": [
+      [
+        "src/Xas.Daemon/Sessions/PeerSessionManager.cs",
+        500,
+        510
+      ],
+      [
+        "src/Xas.Daemon/Sessions/PeerSessionManager.cs",
+        616,
+        633
+      ]
+    ],
+    "trigger": "Stop or dispose a session manager while an outbound managed lane remains connected to an idle peer.",
+    "problem": "DisposeAsync cancels _shutdown and then awaits all _dialers before disposing _connections. RunConnectionAsync waits on protocol.Completion without linking that receive loop to the supplied token. Cancellation alone therefore does not close an established outbound lane.",
+    "impact": "Graceful daemon shutdown can wait indefinitely for the other machine to disconnect. Cleanup and restart depend on forceful process termination.",
+    "fix": "Dispose the tracked connections before joining dialers, or register connection disposal against the lane lifetime token. Ensure handshakes and established reads both observe shutdown.",
+    "test": "Establish a managed outbound lane whose peer remains idle, cancel shutdown, and assert bounded disposal without requiring remote EOF.",
+    "evidence": "The harness invoked the actual RunConnectionAsync with a synthetic realtime handshake, tracked the resulting task as a dialer, and called DisposeAsync. Both tasks remained pending after cancellation; synthetic EOF released disposal."
+  },
+  {
+    "id": "R3",
+    "p": "P1",
+    "area": "Filesystem",
+    "title": "Preserve filesystem error codes across the RPC boundary",
+    "state": "Windows mapping reproduced; Linux mapping traced",
+    "sources": [
+      [
+        "src/Xas.Core/Protocol/MultiplexedProtocolPeer.cs",
+        156,
+        172
+      ],
+      [
+        "src/Xas.Core/Protocol/MultiplexedProtocolPeer.cs",
+        192,
+        196
+      ],
+      [
+        "src/Xas.Daemon/FileSystem/Mount/WinFspRemoteFileSystemMountAdapter.cs",
+        562,
+        579
+      ],
+      [
+        "src/Xas.Daemon/FileSystem/Mount/LinuxFuseRemoteFileSystemMountAdapter.cs",
+        600,
+        617
+      ]
+    ],
+    "trigger": "A native mounted-volume operation asks the peer for a missing file, a forbidden path, or an already existing destination.",
+    "problem": "The server encodes only exception text. The client receives RemoteProtocolException, so the native adapters cannot match FileNotFoundException, UnauthorizedAccessException, or IOException. They fall through to a generic I/O error. The friendly-message branches do not apply because RemoteProtocolException is not an IOException.",
+    "impact": "Missing-path lookups report disk I/O failure instead of “not found.” This breaks normal create/replace workflows on native mounts and loses useful access-denied and conflict semantics.",
+    "fix": "Add structured filesystem error codes to error responses and translate them at the filesystem client boundary. Map those codes to NTSTATUS and errno instead of parsing localized exception text.",
+    "test": "Exercise missing paths, denied writes, and destination collisions through a real protocol peer and both native callback mappings; direct fake-backend exceptions do not cover the wire behavior.",
+    "evidence": "The same missing-file condition mapped to 0xC0000034 locally and 0xC00000E9 after the RPC error wrapper. FUSE’s equivalent fallback is visible in source; invoking its native type on Windows was skipped because initialization needs libc."
+  },
+  {
+    "id": "R4",
+    "p": "P1",
+    "area": "Monitor",
+    "title": "Keep persistent input failures from recreating the monitor forever",
+    "state": "Static control-flow finding; no live display reproduction",
+    "sources": [
+      [
+        "src/Xas.Input/HotInputRouter.cs",
+        69,
+        76
+      ],
+      [
+        "src/Xas.Input/WindowsMonitorHandoff.cs",
+        71,
+        79
+      ],
+      [
+        "src/Xas.Daemon/WindowsKvmCoordinator.cs",
+        41,
+        67
+      ]
+    ],
+    "trigger": "The peer supplies display metadata but repeatedly rejects input.open—for example, its input backend is unavailable, activation fails, or another peer holds the lease.",
+    "problem": "The monitor is attached before the router requests the input lease. A RemoteProtocolException escapes the router and handoff; disposing the handoff controller removes its monitor. The coordinator then creates a fresh handoff. The current uncommitted change adds a two-second pause but keeps retrying indefinitely.",
+    "impact": "A stable peer-side input error can still cause repeated desktop monitor addition/removal. This is a concrete path compatible with the reported deployed symptom, but the deployed root cause was not established.",
+    "fix": "Handle input acquisition failures inside the router/handoff while retaining the attached display. Gate handoff on compatible input capabilities, classify persistent failures, and suspend retries until a relevant state change rather than rebuilding the monitor.",
+    "test": "Use injected display and input services: return valid display metadata and reject input.open repeatedly. Assert one monitor attachment, no repeated detach/add, a visible error, and recovery when the rejection clears.",
+    "evidence": "InputControlService.Acquire can reject an unavailable backend or occupied lease independently of display.info. The coordinator restarts completed handoffs regardless of the failure category. No daemon, service, hooks, or monitor IOCTLs were started during review."
+  },
+  {
+    "id": "R5",
+    "p": "P1",
+    "area": "Privileged service",
+    "title": "Observe cancellation after elevated commands finish receiving stdin",
+    "state": "Static control-flow finding",
+    "sources": [
+      [
+        "src/Xas.PrivilegedService/BrokerServer.cs",
+        78,
+        89
+      ],
+      [
+        "src/Xas.PrivilegedService/BrokerServer.cs",
+        348,
+        362
+      ],
+      [
+        "src/Xas.PrivilegedService/Program.cs",
+        32,
+        37
+      ]
+    ],
+    "trigger": "Start a long-running elevated command with empty or finite stdin, then cancel the CLI or stop the background service.",
+    "problem": "ReceiveInputAsync stops reading the pipe on EndStdin. After that, disconnects cannot reach its IOException branch that kills the child. HandleAsync awaits process.WaitForExitAsync without a stop token and the broker accepts one connection at a time. The service stop event is checked only outside the active handler.",
+    "impact": "The elevated child can keep running after cancellation, block all later administrator commands, and hold service shutdown in StopPending. Killing the daemon does not reliably release a broker request whose stdin reader has already exited.",
+    "fix": "Give each broker request a lifetime linked to service stop and pipe disconnect, independent of stdin EOF. Terminate the owned process tree on cancellation and bound cleanup. Continue observing the connection after closing child stdin.",
+    "test": "Run a synthetic long-lived child with stdin already closed, cancel the client and service separately, and verify child termination, bounded shutdown, and acceptance of the next request.",
+    "evidence": "The source explicitly breaks the input loop at EndStdin and waits for the child with no cancellation. This was not exercised against the stopped installed service."
+  },
+  {
+    "id": "R6",
+    "p": "P2",
+    "area": "Filesystem",
+    "title": "Preserve manually mounted exports during automatic reconciliation",
+    "state": "Reproduced with fake native adapters",
+    "sources": [
+      [
+        "src/Xas.Daemon/FileSystem/Mount/RemoteMountManager.cs",
+        87,
+        101
+      ],
+      [
+        "src/Xas.Daemon/FileSystem/Mount/RemoteMountManager.cs",
+        248,
+        257
+      ]
+    ],
+    "trigger": "Manually mount an explicitly exported directory, then receive a session-change or remote-volume-change event.",
+    "problem": "MountVolumeAsync accepts any reported volume, including exports. ReconcileAsync builds its desired set from removable volumes only, then removes every mounted volume absent from that set. It does not record whether a mount was manual or automatic.",
+    "impact": "A successfully mounted export disappears on the next reconciliation even though the peer and export are still available. Disabling automatic mounts also enters an unconditional unmount path for manually mounted volumes.",
+    "fix": "Track mount intent separately. Preserve manual mounts while their volume remains available and permitted; apply the removable-only desired set and automatic-mount toggle only to automatic mounts.",
+    "test": "Manually mount an export, reconcile an unchanged online peer, and assert that it remains mounted. Repeat with automatic removable mounting disabled.",
+    "evidence": "The harness mounted export-documents using a fake adapter, observed one mount, and directly invoked the actual reconciler with that same available export. The mount count became zero and the adapter was unmounted."
+  },
+  {
+    "id": "R7",
+    "p": "P2",
+    "area": "Filesystem",
+    "title": "Perform remote durable flushes before reporting sync success",
+    "state": "Static data-flow finding",
+    "sources": [
+      [
+        "src/Xas.Daemon/FileSystem/Mount/LinuxFuseRemoteFileSystemMountAdapter.cs",
+        552,
+        555
+      ],
+      [
+        "src/Xas.Daemon/FileSystem/Mount/WinFspRemoteFileSystemMountAdapter.cs",
+        319,
+        329
+      ],
+      [
+        "src/Xas.Daemon/FileSystem/FileSystemService.cs",
+        200,
+        210
+      ]
+    ],
+    "trigger": "An application calls fsync or flush on a native remote mount before treating a save or transaction as durable.",
+    "problem": "FUSE FSync and FSyncDir return success without contacting the peer. WinFsp Flush only fetches metadata. The filesystem RPC has no durable-flush operation; the server writes and disposes a FileStream without Flush(true).",
+    "impact": "Applications are told their data is synchronized while it can still be in the remote OS cache. A remote crash or power loss can lose data after a successful sync response.",
+    "fix": "Define file and directory sync RPC semantics, perform the corresponding remote durable flush, and propagate failures. Until supported, do not promise a successful durability operation.",
+    "test": "Use a backend that records or fails durable flushes. Verify that native sync reaches it and that failure is returned to the application.",
+    "evidence": "This finding concerns the native fs.* mount API. The separate explicit file-upload commit path does call Flush(true), so it is not included in this defect."
+  },
+  {
+    "id": "R8",
+    "p": "P2",
+    "area": "Installation",
+    "title": "Restart the Linux user daemon when installing an upgrade",
+    "state": "Static installer finding",
+    "sources": [
+      [
+        "scripts/install-linux.sh",
+        10,
+        17
+      ],
+      [
+        "scripts/install-linux.sh",
+        51,
+        72
+      ]
+    ],
+    "trigger": "Run install-linux.sh while an existing xas-daemon.service is already active.",
+    "problem": "The installer replaces the binaries and reloads the unit, then calls enable --now. Starting an already active unit does not replace its running process; there is no stop, restart, or try-restart step.",
+    "impact": "Installation reports success while the old daemon continues running and the new CLI talks to it. Bug fixes and protocol changes do not take effect until a later restart.",
+    "fix": "Coordinate replacement with the existing user service and explicitly restart it after installation. Verify the resulting running process and handle systems without an available user service manager.",
+    "test": "Install over an active disposable service instance and verify that its PID/build changes and that startup failures fail the installer.",
+    "evidence": "Installer inspection only. No Linux installation or service mutation was performed."
+  },
+  {
+    "id": "R9",
+    "p": "P2",
+    "area": "Web UI",
+    "title": "Avoid invalidating every browser tab when the control page reloads",
+    "state": "Static session-management finding",
+    "sources": [
+      [
+        "src/Xas.Daemon/Web/DaemonWebHost.cs",
+        100,
+        111
+      ],
+      [
+        "src/Xas.Daemon/Web/DaemonWebHost.cs",
+        267,
+        276
+      ]
+    ],
+    "trigger": "Open the control panel in a second tab, or reload one tab while another remains open.",
+    "problem": "Every GET / clears the entire CSRF session dictionary and issues a new cookie/token pair. Existing pages retain their old embedded CSRF token, while the shared browser cookie changes. Their next state request or mutation fails authorization.",
+    "impact": "Opening or reloading the management UI causes otherwise valid tabs to return 403 until reloaded. An unrelated page load also invalidates a different browser session.",
+    "fix": "Reuse a valid session on page load, or retain bounded independently expiring sessions. Account for cookies shared across tabs so each page can obtain the current CSRF token.",
+    "test": "Open two tabs, reload either, then fetch state and update a harmless setting from the other; both sessions should remain usable.",
+    "evidence": "The dictionary-wide Clear occurs before authorization on GET /. The authorization path requires the page token to match the cookie’s current session."
+  }
+]

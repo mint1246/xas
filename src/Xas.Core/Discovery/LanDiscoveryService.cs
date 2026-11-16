@@ -26,21 +26,48 @@ public sealed class LanDiscoveryService : IAsyncDisposable
     private Task? _announceTask;
     private bool _disposed;
 
-    public LanDiscoveryService(string deviceId, string name, int tcpPort = XasProtocol.DefaultPort,
+    public LanDiscoveryService(
+        string deviceId,
+        string name,
+        int tcpPort = XasProtocol.DefaultPort,
         LanDiscoveryOptions? options = null)
     {
-        if (!IsValidText(deviceId, 128)) throw new ArgumentException("Device ID must be 1-128 printable characters.", nameof(deviceId));
-        if (!IsValidText(name, 128)) throw new ArgumentException("Name must be 1-128 printable characters.", nameof(name));
-        if (tcpPort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(tcpPort));
+        if (!IsValidText(deviceId, 128))
+            throw new ArgumentException(
+                "Device ID must be 1-128 printable characters.",
+                nameof(deviceId));
+        if (!IsValidText(name, 128))
+            throw new ArgumentException(
+                "Name must be 1-128 printable characters.",
+                nameof(name));
+        if (tcpPort is < 1 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(tcpPort));
         _deviceId = deviceId;
         _name = name;
         _tcpPort = tcpPort;
         _options = options ?? new LanDiscoveryOptions();
-        if (_options.UdpPort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(options), "UDP port must be between 1 and 65535.");
-        if (_options.AnnouncementInterval < TimeSpan.FromMilliseconds(250)) throw new ArgumentOutOfRangeException(nameof(options), "Announcement interval must be at least 250 ms.");
-        if (_options.PeerExpiration <= _options.AnnouncementInterval) throw new ArgumentOutOfRangeException(nameof(options), "Peer expiration must exceed the announcement interval.");
-        if (!IPAddress.TryParse(_options.MulticastAddress, out var group) || group.AddressFamily != AddressFamily.InterNetwork || !IsMulticast(group))
-            throw new ArgumentException("A valid IPv4 multicast address is required.", nameof(options));
+        if (_options.UdpPort is < 1 or > 65535)
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "UDP port must be between 1 and 65535.");
+
+        if (_options.AnnouncementInterval < TimeSpan.FromMilliseconds(250))
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "Announcement interval must be at least 250 ms.");
+
+        if (_options.PeerExpiration <= _options.AnnouncementInterval)
+            throw new ArgumentOutOfRangeException(
+                nameof(options),
+                "Peer expiration must exceed the announcement interval.");
+
+        if (!IPAddress.TryParse(_options.MulticastAddress, out var group)
+            || group.AddressFamily != AddressFamily.InterNetwork
+            || !IsMulticast(group))
+            throw new ArgumentException(
+                "A valid IPv4 multicast address is required.",
+                nameof(options));
+
         _group = group;
     }
 
@@ -51,7 +78,12 @@ public sealed class LanDiscoveryService : IAsyncDisposable
 
     public IReadOnlyList<DiscoveredPeer> GetPeers()
     {
-        lock (_gate) return _peers.Values.OrderBy(p => p.DeviceId, StringComparer.Ordinal).ToArray();
+        lock (_gate)
+        {
+            return _peers.Values
+                .OrderBy(peer => peer.DeviceId, StringComparer.Ordinal)
+                .ToArray();
+        }
     }
 
     public Task StartAsync(CancellationToken cancellationToken = default)
@@ -59,7 +91,8 @@ public sealed class LanDiscoveryService : IAsyncDisposable
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_lifetime is not null) throw new InvalidOperationException("Discovery is already running.");
+            if (_lifetime is not null)
+                throw new InvalidOperationException("Discovery is already running.");
             cancellationToken.ThrowIfCancellationRequested();
             var client = CreateClient();
             _client = client;
@@ -83,8 +116,14 @@ public sealed class LanDiscoveryService : IAsyncDisposable
             receive = _receiveTask;
             announce = _announceTask;
         }
-        try { await Task.WhenAll(receive!, announce!).ConfigureAwait(false); }
-        catch (OperationCanceledException) { }
+        try
+        {
+            await Task.WhenAll(receive!, announce!).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Both background loops use the shared lifetime token.
+        }
         lock (_gate)
         {
             _lifetime?.Dispose();
@@ -111,25 +150,52 @@ public sealed class LanDiscoveryService : IAsyncDisposable
         while (!cancellationToken.IsCancellationRequested)
         {
             UdpReceiveResult result;
-            try { result = await client.ReceiveAsync(cancellationToken).ConfigureAwait(false); }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
-            catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested) { break; }
-            catch (SocketException) when (cancellationToken.IsCancellationRequested) { break; }
-            if (result.Buffer.Length is 0 or > MaxAnnouncementBytes) continue;
-            if (!TryParse(result.Buffer, result.RemoteEndPoint.Address, out var peer) || peer.DeviceId == _deviceId) continue;
-            DiscoveredPeer? updated = null;
-            lock (_gate)
+            try
             {
-                var now = DateTimeOffset.UtcNow;
-                if (_peers.TryGetValue(peer.DeviceId, out var old) && old.Name == peer.Name && old.Address == peer.Address && old.TcpPort == peer.TcpPort)
-                    _peers[peer.DeviceId] = old with { LastSeen = now };
-                else
-                {
-                    updated = peer with { LastSeen = now };
-                    _peers[peer.DeviceId] = updated;
-                }
+                result = await client.ReceiveAsync(cancellationToken).ConfigureAwait(false);
             }
-            if (updated is not null) PeerUpdated?.Invoke(updated);
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (ObjectDisposedException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (SocketException) when (cancellationToken.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (result.Buffer.Length is 0 or > MaxAnnouncementBytes)
+                continue;
+            if (!TryParse(result.Buffer, result.RemoteEndPoint.Address, out var peer)
+                || peer.DeviceId == _deviceId)
+                continue;
+
+            var updated = UpdatePeer(peer);
+            if (updated is not null)
+                PeerUpdated?.Invoke(updated);
+        }
+    }
+
+    private DiscoveredPeer? UpdatePeer(DiscoveredPeer peer)
+    {
+        lock (_gate)
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (_peers.TryGetValue(peer.DeviceId, out var old)
+                && old.Name == peer.Name
+                && old.Address == peer.Address
+                && old.TcpPort == peer.TcpPort)
+            {
+                _peers[peer.DeviceId] = old with { LastSeen = now };
+                return null;
+            }
+
+            var updated = peer with { LastSeen = now };
+            _peers[peer.DeviceId] = updated;
+            return updated;
         }
     }
 
@@ -151,7 +217,13 @@ public sealed class LanDiscoveryService : IAsyncDisposable
         lock (_gate)
         {
             foreach (var (id, peer) in _peers.ToArray())
-                if (now - peer.LastSeen > _options.PeerExpiration) { _peers.Remove(id); expired.Add(peer); }
+            {
+                if (now - peer.LastSeen <= _options.PeerExpiration)
+                    continue;
+
+                _peers.Remove(id);
+                expired.Add(peer);
+            }
         }
         foreach (var peer in expired) PeerExpired?.Invoke(peer);
     }
@@ -169,7 +241,8 @@ public sealed class LanDiscoveryService : IAsyncDisposable
             writer.WriteNumber("tcpPort", _tcpPort);
             writer.WriteEndObject();
         }
-        if (buffer.WrittenCount > MaxAnnouncementBytes) throw new InvalidOperationException("Announcement exceeds the protocol limit.");
+        if (buffer.WrittenCount > MaxAnnouncementBytes)
+            throw new InvalidOperationException("Announcement exceeds the protocol limit.");
         return buffer.WrittenSpan.ToArray();
     }
 
@@ -178,20 +251,80 @@ public sealed class LanDiscoveryService : IAsyncDisposable
         peer = null!;
         try
         {
-            using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { AllowTrailingCommas = false, CommentHandling = JsonCommentHandling.Disallow, MaxDepth = 4 });
+            using var document = JsonDocument.Parse(
+                bytes,
+                new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = false,
+                    CommentHandling = JsonCommentHandling.Disallow,
+                    MaxDepth = 4
+                });
             var root = document.RootElement;
-            if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("type", out var type) || type.GetString() != AnnouncementType ||
-                !root.TryGetProperty("version", out var version) || !version.TryGetInt32(out var v) || v != XasProtocol.Version ||
-                !root.TryGetProperty("deviceId", out var id) || id.ValueKind != JsonValueKind.String || !IsValidText(id.GetString(), 128) ||
-                !root.TryGetProperty("name", out var name) || name.ValueKind != JsonValueKind.String || !IsValidText(name.GetString(), 128) ||
-                !root.TryGetProperty("tcpPort", out var port) || !port.TryGetInt32(out var tcpPort) || tcpPort is < 1 or > 65535) return false;
-            peer = new DiscoveredPeer(id.GetString()!, name.GetString()!, address.ToString(), tcpPort, DateTimeOffset.UtcNow);
+            if (!TryReadAnnouncement(root, out var deviceId, out var name, out var tcpPort))
+                return false;
+
+            peer = new DiscoveredPeer(
+                deviceId,
+                name,
+                address.ToString(),
+                tcpPort,
+                DateTimeOffset.UtcNow);
             return true;
         }
-        catch (JsonException) { return false; }
-        catch (InvalidOperationException) { return false; }
+        catch (JsonException)
+        {
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
-    private static bool IsValidText(string? value, int maxLength) => value is { Length: > 0 } && value.Length <= maxLength && value.All(c => !char.IsControl(c));
-    private static bool IsMulticast(IPAddress address) { var first = address.GetAddressBytes()[0]; return first is >= 224 and <= 239; }
+    private static bool TryReadAnnouncement(
+        JsonElement root,
+        out string deviceId,
+        out string name,
+        out int tcpPort)
+    {
+        deviceId = string.Empty;
+        name = string.Empty;
+        tcpPort = 0;
+
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("type", out var type)
+            || type.GetString() != AnnouncementType
+            || !root.TryGetProperty("version", out var version)
+            || !version.TryGetInt32(out var protocolVersion)
+            || protocolVersion != XasProtocol.Version
+            || !root.TryGetProperty("deviceId", out var id)
+            || id.ValueKind != JsonValueKind.String
+            || !IsValidText(id.GetString(), 128)
+            || !root.TryGetProperty("name", out var peerName)
+            || peerName.ValueKind != JsonValueKind.String
+            || !IsValidText(peerName.GetString(), 128)
+            || !root.TryGetProperty("tcpPort", out var port)
+            || !port.TryGetInt32(out tcpPort)
+            || tcpPort is < 1 or > 65535)
+        {
+            return false;
+        }
+
+        deviceId = id.GetString()!;
+        name = peerName.GetString()!;
+        return true;
+    }
+
+    private static bool IsValidText(string? value, int maxLength)
+    {
+        return value is { Length: > 0 }
+            && value.Length <= maxLength
+            && value.All(character => !char.IsControl(character));
+    }
+
+    private static bool IsMulticast(IPAddress address)
+    {
+        var firstOctet = address.GetAddressBytes()[0];
+        return firstOctet is >= 224 and <= 239;
+    }
 }

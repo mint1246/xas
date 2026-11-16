@@ -32,7 +32,8 @@ internal static class SudoVdaDriver
     internal const uint DriverPing = 0x222220;          // function 0x888, the watchdog keepalive
 
     /// <summary>Recomputes <c>CTL_CODE</c> the way <c>winioctl.h</c> defines it, for verification.</summary>
-    internal static uint ControlCode(uint function) => (0x22 /* FILE_DEVICE_UNKNOWN */ << 16) | (function << 2);
+    internal static uint ControlCode(uint function) =>
+        (0x22 /* FILE_DEVICE_UNKNOWN */ << 16) | (function << 2);
 
     private const int DigcfPresent = 0x00000002;
     private const int DigcfDeviceInterface = 0x00000010;
@@ -51,20 +52,31 @@ internal static class SudoVdaDriver
         if (devices is 0 or InvalidHandleValue) return null;
         try
         {
-            for (uint index = 0; ; index++)
-            {
-                var data = default(DeviceInterfaceData);
-                data.Size = Marshal.SizeOf<DeviceInterfaceData>();
-                if (!SetupDiEnumDeviceInterfaces(devices, IntPtr.Zero, ref interfaceClass, index, ref data)) return null;
-                var path = ReadDevicePath(devices, ref data);
-                if (string.IsNullOrEmpty(path)) continue;
-                // Shared access: Apollo and other clients may hold their own handle at the same time.
-                var handle = CreateFile(path, 0xC0000000, FileShareReadWrite, IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
-                if (!handle.IsInvalid) return handle;
-                handle.Dispose();
-            }
+            return FindDevice(devices, ref interfaceClass);
         }
         finally { SetupDiDestroyDeviceInfoList(devices); }
+    }
+
+    private static SafeFileHandle? FindDevice(IntPtr devices, ref Guid interfaceClass)
+    {
+        for (uint index = 0; ; index++)
+        {
+            var data = default(DeviceInterfaceData);
+            data.Size = Marshal.SizeOf<DeviceInterfaceData>();
+            if (!SetupDiEnumDeviceInterfaces(
+                    devices, IntPtr.Zero, ref interfaceClass, index, ref data))
+                return null;
+
+            var path = ReadDevicePath(devices, ref data);
+            if (string.IsNullOrEmpty(path)) continue;
+
+            // Shared access: Apollo and other clients may hold their own handle at the same time.
+            var handle = CreateFile(path, 0xC0000000, FileShareReadWrite,
+                IntPtr.Zero, OpenExisting, 0, IntPtr.Zero);
+            if (!handle.IsInvalid) return handle;
+
+            handle.Dispose();
+        }
     }
 
     /// <summary>Creates a monitor owned by <paramref name="monitorId"/> and reports the target it created.</summary>
@@ -80,7 +92,8 @@ internal static class SudoVdaDriver
             DeviceName = ToFixedAscii(deviceName),
             SerialNumber = ToFixedAscii("XAS")
         };
-        if (!DeviceIoControl(device, AddVirtualDisplay, ref parameters, (uint)Marshal.SizeOf<VirtualDisplayAddParams>(),
+        if (!DeviceIoControl(device, AddVirtualDisplay, ref parameters,
+                (uint)Marshal.SizeOf<VirtualDisplayAddParams>(),
                 out var result, (uint)Marshal.SizeOf<VirtualDisplayAddResult>(), out _, IntPtr.Zero))
             throw new Win32Exception(Marshal.GetLastWin32Error(),
                 $"SudoVDA rejected the {width}x{height}@{refreshHertz} virtual display request.");
@@ -93,7 +106,8 @@ internal static class SudoVdaDriver
         var parameters = new VirtualDisplayRemoveParams { MonitorGuid = monitorId };
         if (!DeviceIoControl(device, RemoveVirtualDisplay, ref parameters,
                 (uint)Marshal.SizeOf<VirtualDisplayRemoveParams>(), IntPtr.Zero, 0, out _, IntPtr.Zero))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "SudoVDA could not remove the virtual display.");
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(), "SudoVDA could not remove the virtual display.");
     }
 
     /// <summary>
@@ -126,7 +140,9 @@ internal static class SudoVdaDriver
         try
         {
             Marshal.WriteInt32(buffer, IntPtr.Size == 8 ? 8 : 6);
-            if (!SetupDiGetDeviceInterfaceDetail(devices, ref data, buffer, required, out _, IntPtr.Zero)) return null;
+            if (!SetupDiGetDeviceInterfaceDetail(
+                    devices, ref data, buffer, required, out _, IntPtr.Zero))
+                return null;
             var path = Marshal.PtrToStringAnsi(buffer + 4);
             return string.IsNullOrEmpty(path) ? null : path;
         }
@@ -170,7 +186,8 @@ internal static class SudoVdaDriver
     }
 
     [DllImport("setupapi.dll", SetLastError = true)]
-    private static extern IntPtr SetupDiGetClassDevs(ref Guid classGuid, IntPtr enumerator, IntPtr parent, int flags);
+    private static extern IntPtr SetupDiGetClassDevs(
+        ref Guid classGuid, IntPtr enumerator, IntPtr parent, int flags);
 
     [DllImport("setupapi.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
@@ -193,7 +210,8 @@ internal static class SudoVdaDriver
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DeviceIoControl(SafeFileHandle device, uint controlCode,
-        ref VirtualDisplayAddParams input, uint inputSize, out VirtualDisplayAddResult output, uint outputSize,
+        ref VirtualDisplayAddParams input, uint inputSize,
+        out VirtualDisplayAddResult output, uint outputSize,
         out uint bytesReturned, IntPtr overlapped);
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -205,5 +223,6 @@ internal static class SudoVdaDriver
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DeviceIoControl(SafeFileHandle device, uint controlCode,
-        IntPtr input, uint inputSize, IntPtr output, uint outputSize, out uint bytesReturned, IntPtr overlapped);
+        IntPtr input, uint inputSize, IntPtr output, uint outputSize,
+        out uint bytesReturned, IntPtr overlapped);
 }

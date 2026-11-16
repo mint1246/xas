@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
+
 using Xas.Cli;
 using Xas.Cli.Interactive;
 using Xas.Cli.FileTransfer;
@@ -23,10 +24,12 @@ public static class IntegrationTests
 {
     public static async Task RunAsync()
     {
-        var root = Path.Combine(Path.GetTempPath(), "xas-integration-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(
+            Path.GetTempPath(), "xas-integration-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         var previousIpcInstance = Environment.GetEnvironmentVariable("XAS_LOCAL_IPC_INSTANCE");
-        Environment.SetEnvironmentVariable("XAS_LOCAL_IPC_INSTANCE", "integration-" + Guid.NewGuid().ToString("N"));
+        Environment.SetEnvironmentVariable(
+            "XAS_LOCAL_IPC_INSTANCE", "integration-" + Guid.NewGuid().ToString("N"));
         try
         {
             using var serverIdentity = DeviceIdentity.LoadOrCreate(Path.Combine(root, "server"));
@@ -41,52 +44,45 @@ public static class IntegrationTests
             permissions.SetAllowed(clientIdentity.DeviceId, Capability.Clipboard, true);
             var inputBackend = new RecordingInputBackend();
             var remoteClipboard = new RecordingTextClipboard("remote initial");
-            var daemonConfiguration = new LocalConfiguration(Path.Combine(root, "daemon-config"));
+            var daemonConfiguration = new LocalConfiguration(
+                Path.Combine(root, "daemon-config"));
 
             var port = ReservePort();
             using var stop = new CancellationTokenSource();
-            var daemon = new DaemonHost(serverIdentity, serverTrust, permissions, port,
+            var daemon = new DaemonHost(
+                serverIdentity, serverTrust, permissions, port,
                 inputBackend, remoteClipboard, configuration: daemonConfiguration, webPort: 0,
                 enableNativeOrchestration: false);
             var serverTask = daemon.RunAsync(stop.Token);
             try
             {
                 await Task.Delay(300);
-                await using var tls = await MutualTlsTransport.ConnectAsync("127.0.0.1", port, clientIdentity,
-                    clientTrust, serverIdentity.DeviceId, TimeSpan.FromSeconds(10));
+                await using var tls = await MutualTlsTransport.ConnectAsync(
+                    "127.0.0.1", port, clientIdentity, clientTrust,
+                    serverIdentity.DeviceId, TimeSpan.FromSeconds(10));
                 await using var frames = new BinaryFrameConnection(tls.Stream, leaveOpen: true);
                 await using var peer = new MultiplexedProtocolPeer(frames, (_, _) =>
                     ValueTask.FromException<ProtocolMessage>(new NotSupportedException()));
 
                 var info = await peer.RequestAsync("device.info", []);
                 var device = JsonSerializer.Deserialize<DeviceInfo>(info.Payload);
-                Assert(device?.DeviceId == serverIdentity.DeviceId, "Info returned the wrong device.");
-                if (device is null) throw new Exception("Info response was empty.");
-                Assert(device.Capabilities.Any(c => c.Capability == Capability.Shell && c.Version >= 2), "Streaming shell capability was not advertised.");
+                Assert(device?.DeviceId == serverIdentity.DeviceId,
+                    "Info returned the wrong device.");
+                if (device is null)
+                {
+                    throw new Exception("Info response was empty.");
+                }
+                Assert(device.Capabilities.Any(
+                    capability => capability.Capability == Capability.Shell &&
+                        capability.Version >= 2),
+                    "Streaming shell capability was not advertised.");
                 Assert(device.Capabilities.Any(c => c.Capability == Capability.Input && c.Version == 1),
                     "Available input backend was not advertised.");
 
-                daemonConfiguration.UpsertPeer(new ConfiguredPeer(clientIdentity.DeviceId, "client", "127.0.0.1", 9));
-                using (var localDaemon = new LocalDaemonClient(Stream.Null, Stream.Null, Stream.Null))
-                {
-                    var localDevices = await localDaemon.ListDevicesAsync(CancellationToken.None);
-                    Assert(localDevices.Any(d => d.DeviceId == clientIdentity.DeviceId),
-                        "The local daemon IPC device list did not expose configured daemon state.");
-                    await localDaemon.SetDefaultDeviceAsync(clientIdentity.DeviceId, CancellationToken.None);
-                    Assert(daemonConfiguration.DefaultDeviceId == clientIdentity.DeviceId,
-                        "The local daemon IPC default-device update did not mutate daemon configuration.");
-                    var uiUrl = await localDaemon.GetUiUrlAsync(CancellationToken.None);
-                    Assert(Uri.TryCreate(uiUrl, UriKind.Absolute, out var uiUri) && uiUri.IsLoopback && uiUri.Port > 0,
-                        "The local daemon IPC did not return a valid loopback UI URL.");
-                    if (uiUri is null) throw new InvalidOperationException("The local daemon IPC returned an invalid UI URL.");
-                    if (OperatingSystem.IsWindows())
-                    {
-                        var mounts = await localDaemon.ListRemoteMountsAsync(null, CancellationToken.None);
-                        Assert(mounts.Count == 0,
-                            "A fresh integration daemon unexpectedly reported a native remote mount.");
-                    }
-                    await ExerciseWebUiAsync(uiUri, daemonConfiguration, permissions, clientIdentity.DeviceId);
-                }
+                daemonConfiguration.UpsertPeer(new ConfiguredPeer(
+                    clientIdentity.DeviceId, "client", "127.0.0.1", 9));
+                await ExerciseLocalDaemonAsync(
+                    daemonConfiguration, permissions, clientIdentity.DeviceId);
 
                 try
                 {
@@ -395,8 +391,44 @@ public static class IntegrationTests
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 
-    private static async Task ExerciseWebUiAsync(Uri uiUri, LocalConfiguration configuration,
-        PeerPermissionStore permissions, string peerId)
+    private static async Task ExerciseLocalDaemonAsync(
+        LocalConfiguration configuration,
+        PeerPermissionStore permissions,
+        string peerId)
+    {
+        using var localDaemon = new LocalDaemonClient(Stream.Null, Stream.Null, Stream.Null);
+        var localDevices = await localDaemon.ListDevicesAsync(CancellationToken.None);
+        Assert(localDevices.Any(device => device.DeviceId == peerId),
+            "The local daemon IPC device list did not expose configured daemon state.");
+
+        await localDaemon.SetDefaultDeviceAsync(peerId, CancellationToken.None);
+        Assert(configuration.DefaultDeviceId == peerId,
+            "The local daemon IPC default-device update did not mutate daemon configuration.");
+
+        var uiUrl = await localDaemon.GetUiUrlAsync(CancellationToken.None);
+        var isValidUiUrl = Uri.TryCreate(uiUrl, UriKind.Absolute, out var uiUri) &&
+            uiUri.IsLoopback && uiUri.Port > 0;
+        Assert(isValidUiUrl,
+            "The local daemon IPC did not return a valid loopback UI URL.");
+        if (uiUri is null)
+            throw new InvalidOperationException("The local daemon IPC returned an invalid UI URL.");
+
+        if (OperatingSystem.IsWindows())
+        {
+            var mounts = await localDaemon.ListRemoteMountsAsync(
+                null, CancellationToken.None);
+            Assert(mounts.Count == 0,
+                "A fresh integration daemon unexpectedly reported a native remote mount.");
+        }
+
+        await ExerciseWebUiAsync(uiUri, configuration, permissions, peerId);
+    }
+
+    private static async Task ExerciseWebUiAsync(
+        Uri uiUri,
+        LocalConfiguration configuration,
+        PeerPermissionStore permissions,
+        string peerId)
     {
         var cookies = new CookieContainer();
         using var handler = new HttpClientHandler { CookieContainer = cookies, UseCookies = true };

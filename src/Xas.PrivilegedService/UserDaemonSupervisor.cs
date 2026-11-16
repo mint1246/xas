@@ -30,31 +30,10 @@ internal static class UserDaemonSupervisor
             {
                 try
                 {
-                    var activeSession = WTSGetActiveConsoleSessionId();
-                    if (activeSession == NoSession)
-                    {
-                        StopDaemon(ref daemon);
-                        daemonSession = NoSession;
-                    }
-                    else
-                    {
-                        if (daemon is not null && (HasExited(daemon) || daemonSession != activeSession))
-                            StopDaemon(ref daemon);
-
-                        if (daemon is null)
-                        {
-                            daemon = FindInstalledDaemon(activeSession);
-                            if (daemon is not null) Log($"Adopted Xas.Daemon PID {daemon.Id} in session {activeSession}.");
-                            else
-                            {
-                                daemon = StartDaemon(activeSession);
-                                Log($"Started Xas.Daemon PID {daemon.Id} in session {activeSession}.");
-                            }
-                            daemonSession = activeSession;
-                        }
-                    }
+                    EnsureDaemonInActiveSession(ref daemon, ref daemonSession);
                 }
-                catch (Exception ex) when (ex is Win32Exception or IOException or UnauthorizedAccessException or InvalidOperationException)
+                catch (Exception ex) when (ex is Win32Exception or IOException or
+                    UnauthorizedAccessException or InvalidOperationException)
                 {
                     Log($"User daemon supervision failed: {ex.Message}");
                     StopDaemon(ref daemon);
@@ -65,6 +44,27 @@ internal static class UserDaemonSupervisor
             }
         }
         finally { StopDaemon(ref daemon); }
+    }
+
+    private static void EnsureDaemonInActiveSession(ref Process? daemon, ref uint daemonSession)
+    {
+        var activeSession = WTSGetActiveConsoleSessionId();
+        if (activeSession == NoSession)
+        {
+            StopDaemon(ref daemon);
+            daemonSession = NoSession;
+            return;
+        }
+
+        if (daemon is not null && (HasExited(daemon) || daemonSession != activeSession))
+            StopDaemon(ref daemon);
+        if (daemon is not null) return;
+
+        var adoptedDaemon = FindInstalledDaemon(activeSession);
+        daemon = adoptedDaemon ?? StartDaemon(activeSession);
+        var action = adoptedDaemon is null ? "Started" : "Adopted";
+        Log($"{action} Xas.Daemon PID {daemon.Id} in session {activeSession}.");
+        daemonSession = activeSession;
     }
 
     private static bool HasExited(Process process)
@@ -80,9 +80,14 @@ internal static class UserDaemonSupervisor
         {
             try
             {
-                if ((uint)process.SessionId != sessionId || process.HasExited) { process.Dispose(); continue; }
+                if ((uint)process.SessionId != sessionId || process.HasExited)
+                {
+                    process.Dispose();
+                    continue;
+                }
                 var actual = process.MainModule?.FileName;
-                if (actual is not null && StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(actual), expected))
+                if (actual is not null && StringComparer.OrdinalIgnoreCase.Equals(
+                        Path.GetFullPath(actual), expected))
                     return process;
             }
             catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
@@ -98,7 +103,8 @@ internal static class UserDaemonSupervisor
     {
         try
         {
-            var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "xas");
+            var commonData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+            var root = Path.Combine(commonData, "xas");
             Directory.CreateDirectory(root);
             var path = Path.Combine(root, "service.log");
             if (File.Exists(path) && new FileInfo(path).Length > 1024 * 1024)
@@ -111,32 +117,60 @@ internal static class UserDaemonSupervisor
     private static Process StartDaemon(uint sessionId)
     {
         var daemonPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "Xas.Daemon.exe"));
-        if (!File.Exists(daemonPath)) throw new FileNotFoundException("The installed XAS daemon is missing.", daemonPath);
+        if (!File.Exists(daemonPath))
+            throw new FileNotFoundException("The installed XAS daemon is missing.", daemonPath);
         if (!WTSQueryUserToken(sessionId, out var sessionToken))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not obtain the active desktop user's token.");
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(), "Could not obtain the active desktop user's token.");
         using (sessionToken)
         using (var token = DuplicatePrimaryToken(sessionToken))
         {
-            var startup = new StartupInfo
-            {
-                Size = Marshal.SizeOf<StartupInfo>(),
-                Desktop = @"winsta0\default"
-            };
-            var command = new StringBuilder($"\"{daemonPath}\" serve");
-            if (!CreateEnvironmentBlock(out var environment, token, false))
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not build the desktop user's environment.");
-            try
-            {
-                const uint CreateUnicodeEnvironment = 0x00000400;
-                const uint CreateNoWindow = 0x08000000;
-                if (!CreateProcessAsUser(token, daemonPath, command, IntPtr.Zero, IntPtr.Zero, false,
-                        CreateUnicodeEnvironment | CreateNoWindow, environment, AppContext.BaseDirectory,
-                        ref startup, out var info))
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not start the XAS user-session daemon.");
-                try { return Process.GetProcessById((int)info.ProcessId); }
-                finally { CloseHandle(info.Thread); CloseHandle(info.Process); }
-            }
-            finally { DestroyEnvironmentBlock(environment); }
+            return StartDaemonProcess(daemonPath, token);
+        }
+    }
+
+    private static Process StartDaemonProcess(string daemonPath, SafeAccessTokenHandle token)
+    {
+        var startup = new StartupInfo
+        {
+            Size = Marshal.SizeOf<StartupInfo>(),
+            Desktop = @"winsta0\default"
+        };
+        var command = new StringBuilder($"\"{daemonPath}\" serve");
+        if (!CreateEnvironmentBlock(out var environment, token, false))
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(), "Could not build the desktop user's environment.");
+
+        try
+        {
+            return CreateDaemonProcess(daemonPath, command, token, environment, ref startup);
+        }
+        finally
+        {
+            DestroyEnvironmentBlock(environment);
+        }
+    }
+
+    private static Process CreateDaemonProcess(
+        string daemonPath, StringBuilder command, SafeAccessTokenHandle token,
+        IntPtr environment, ref StartupInfo startup)
+    {
+        const uint CreateUnicodeEnvironment = 0x00000400;
+        const uint CreateNoWindow = 0x08000000;
+        if (!CreateProcessAsUser(token, daemonPath, command, IntPtr.Zero, IntPtr.Zero, false,
+                CreateUnicodeEnvironment | CreateNoWindow, environment, AppContext.BaseDirectory,
+                ref startup, out var info))
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(), "Could not start the XAS user-session daemon.");
+
+        try
+        {
+            return Process.GetProcessById((int)info.ProcessId);
+        }
+        finally
+        {
+            CloseHandle(info.Thread);
+            CloseHandle(info.Process);
         }
     }
 
@@ -145,8 +179,10 @@ internal static class UserDaemonSupervisor
         const uint TokenAllAccess = 0xF01FF;
         const int SecurityImpersonation = 2;
         const int TokenPrimary = 1;
-        if (!DuplicateTokenEx(token, TokenAllAccess, IntPtr.Zero, SecurityImpersonation, TokenPrimary, out var duplicate))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not duplicate the desktop user's token.");
+        if (!DuplicateTokenEx(token, TokenAllAccess, IntPtr.Zero,
+                SecurityImpersonation, TokenPrimary, out var duplicate))
+            throw new Win32Exception(
+                Marshal.GetLastWin32Error(), "Could not duplicate the desktop user's token.");
         return duplicate;
     }
 

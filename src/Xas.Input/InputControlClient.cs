@@ -18,18 +18,20 @@ public static class InputControlClient
         IInputPipelineMetrics? metrics = null)
     {
         ArgumentNullException.ThrowIfNull(configured);
-        if (!WindowsInputCapture.IsAvailable)
-            throw new PlatformNotSupportedException("Manual input capture requires a Windows user session.");
+        EnsureWindowsCaptureAvailable();
         using var connect = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        connect.CancelAfter(region is null ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(3));
-        await using var connection = await MutualTlsTransport.ConnectAsync(configured.Host, configured.Port,
-            identity, trust, configured.DeviceId, region is null ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(3),
+        var connectTimeout = region is null ? TimeSpan.FromSeconds(10) : TimeSpan.FromSeconds(3);
+        connect.CancelAfter(connectTimeout);
+        await using var connection = await MutualTlsTransport.ConnectAsync(
+            configured.Host, configured.Port, identity, trust, configured.DeviceId, connectTimeout,
             connect.Token).ConfigureAwait(false);
         await using var frames = new BinaryFrameConnection(connection.Stream, leaveOpen: true);
-        await using var peer = new MultiplexedProtocolPeer(frames, (_, _) =>
-            ValueTask.FromException<ProtocolMessage>(new NotSupportedException("The input controller does not accept remote requests.")));
-        await RunOnPeerAsync(peer, configured.DeviceId, cancellationToken, region, monitorHint, trace, metrics)
-            .ConfigureAwait(false);
+        await using var peer = new MultiplexedProtocolPeer(
+            frames,
+            (_, _) => ValueTask.FromException<ProtocolMessage>(
+                new NotSupportedException("The input controller does not accept remote requests.")));
+        await RunOnPeerAsync(peer, configured.DeviceId, cancellationToken,
+            region, monitorHint, trace, metrics).ConfigureAwait(false);
     }
 
     public static async Task RunOnPeerAsync(MultiplexedProtocolPeer peer, string? expectedDeviceId,
@@ -38,8 +40,7 @@ public static class InputControlClient
         IInputPipelineMetrics? metrics = null)
     {
         ArgumentNullException.ThrowIfNull(peer);
-        if (!WindowsInputCapture.IsAvailable)
-            throw new PlatformNotSupportedException("Manual input capture requires a Windows user session.");
+        EnsureWindowsCaptureAvailable();
         using var setup = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         if (region is not null) setup.CancelAfter(TimeSpan.FromSeconds(55));
         var infoReply = await peer.RequestAsync("device.info", [], cancellationToken: setup.Token).ConfigureAwait(false);
@@ -125,6 +126,14 @@ public static class InputControlClient
             }
             catch (Exception) { /* Closing the connection also releases the server lease. */ }
         }
+    }
+
+    private static void EnsureWindowsCaptureAvailable()
+    {
+        if (WindowsInputCapture.IsAvailable) return;
+
+        throw new PlatformNotSupportedException(
+            "Manual input capture requires a Windows user session.");
     }
 
     private static async Task SendEventsAsync(MultiplexedProtocolPeer peer, WindowsInputCapture capture,

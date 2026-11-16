@@ -9,7 +9,8 @@ using var input = Environment.GetEnvironmentVariable("XAS_TERMINAL_PROBE_USE_CON
     : TerminalMode.OpenInputStream();
 using var output = Console.OpenStandardOutput();
 Console.WriteLine($"READY {ReadFlags()}");
-var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+var inputCompleted = new TaskCompletionSource<bool>(
+    TaskCreationOptions.RunContinuationsAsynchronously);
 var reader = Task.Run(ReadInputAsync);
 Console.WriteLine($"READ_PENDING {!reader.IsCompleted}");
 Console.Out.Flush();
@@ -21,20 +22,21 @@ async Task ReadInputAsync()
     {
         var count = await input.ReadAsync(buffer);
         if (count == 0) break;
-        await output.WriteAsync(Encoding.UTF8.GetBytes("REMOTE:" + Encoding.UTF8.GetString(buffer, 0, count) + "\n"));
+        var response = "REMOTE:" + Encoding.UTF8.GetString(buffer, 0, count) + "\n";
+        await output.WriteAsync(Encoding.UTF8.GetBytes(response));
         if (buffer.AsSpan(0, count).Contains((byte)'!')) break;
     }
-    done.TrySetResult();
+    inputCompleted.TrySetResult(true);
 }
 
 var iterations = 0;
-while (!done.Task.IsCompleted && iterations++ < 80)
+while (!inputCompleted.Task.IsCompleted && iterations++ < 80)
 {
     _ = TerminalMode.CurrentSize();
     Console.WriteLine($"SIZE {iterations} {ReadFlags()}");
     await Task.Delay(250);
 }
-await done.Task.WaitAsync(TimeSpan.FromSeconds(1));
+await inputCompleted.Task.WaitAsync(TimeSpan.FromSeconds(1));
 await reader;
 Console.WriteLine($"DONE {ReadFlags()}");
 terminal.Dispose();
@@ -42,8 +44,9 @@ Console.WriteLine($"RESTORED {ReadFlags()}");
 
 static string ReadFlags()
 {
-    if (Native.tcgetattr(0, out var t) != 0) throw new InvalidOperationException("tcgetattr failed.");
-    return $"echo={(t.LocalFlags & 0x8) != 0} canon={(t.LocalFlags & 0x2) != 0}";
+    if (Native.tcgetattr(0, out var termios) != 0)
+        throw new InvalidOperationException("tcgetattr failed.");
+    return $"echo={(termios.LocalFlags & 0x8) != 0} canon={(termios.LocalFlags & 0x2) != 0}";
 }
 
 [StructLayout(LayoutKind.Sequential)]

@@ -23,34 +23,36 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
     public async Task<IReadOnlyList<KnownDeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken)
     {
         var reply = await RequestAsync(LocalIpcProtocol.Devices, [], cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<KnownDeviceInfo[]>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid device list.");
+        return DeserializeRequired<KnownDeviceInfo[]>(
+            reply, "The daemon returned an invalid device list.");
     }
 
     public async Task<DeviceInfo?> GetDeviceInfoAsync(string? deviceId, CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.Info,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<DeviceInfo?>(reply.Payload, LocalIpcProtocol.Json);
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.Info, new LocalTarget(deviceId), cancellationToken).ConfigureAwait(false);
+        return DeserializeReply<DeviceInfo?>(reply);
     }
 
     public async Task SetDefaultDeviceAsync(string deviceId, CancellationToken cancellationToken) =>
-        _ = await RequestAsync(LocalIpcProtocol.SetDefault,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        _ = await RequestJsonAsync(
+            LocalIpcProtocol.SetDefault, new LocalTarget(deviceId), cancellationToken)
+            .ConfigureAwait(false);
 
     public async Task<bool> PingAsync(string? deviceId, CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.Ping,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        if (reply.Payload.Length != 1 || reply.Payload[0] > 1) throw new InvalidDataException("The daemon returned an invalid ping response.");
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.Ping, new LocalTarget(deviceId), cancellationToken).ConfigureAwait(false);
+        if (reply.Payload.Length != 1 || reply.Payload[0] > 1)
+            throw new InvalidDataException("The daemon returned an invalid ping response.");
         return reply.Payload[0] == 1;
     }
 
     public async Task<string> GetUiUrlAsync(CancellationToken cancellationToken)
     {
         var reply = await RequestAsync(LocalIpcProtocol.UiInfo, [], cancellationToken).ConfigureAwait(false);
-        var info = JsonSerializer.Deserialize<LocalUiInfo>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned invalid UI information.");
+        var info = DeserializeRequired<LocalUiInfo>(
+            reply, "The daemon returned invalid UI information.");
         if (!Uri.TryCreate(info.Url, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttp || !uri.IsLoopback)
             throw new InvalidDataException("The daemon returned a non-loopback UI URL.");
         return uri.AbsoluteUri;
@@ -59,39 +61,44 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
     public async Task<LocalPairPending> BeginPairingAsync(string host, int controlPort, string? expectedDeviceId,
         CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.PairBegin,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalPairBegin(host, controlPort, expectedDeviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<LocalPairPending>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid pairing request.");
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.PairBegin,
+            new LocalPairBegin(host, controlPort, expectedDeviceId),
+            cancellationToken).ConfigureAwait(false);
+        return DeserializeRequired<LocalPairPending>(
+            reply, "The daemon returned an invalid pairing request.");
     }
 
     public async Task<IReadOnlyList<LocalPairCandidate>> ListPairingCandidatesAsync(CancellationToken cancellationToken)
     {
         var reply = await RequestAsync(LocalIpcProtocol.PairCandidates, [], cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<LocalPairCandidate[]>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid pairing candidate list.");
+        return DeserializeRequired<LocalPairCandidate[]>(
+            reply, "The daemon returned an invalid pairing candidate list.");
     }
 
     public async Task<LocalPairPending> BeginDiscoveredPairingAsync(string query, CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.PairDiscover,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalPairTarget(query), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<LocalPairPending>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid pairing request.");
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.PairDiscover, new LocalPairTarget(query), cancellationToken)
+            .ConfigureAwait(false);
+        return DeserializeRequired<LocalPairPending>(
+            reply, "The daemon returned an invalid pairing request.");
     }
 
     public async Task<IReadOnlyList<LocalPairPending>> ListPairingsAsync(CancellationToken cancellationToken)
     {
         var reply = await RequestAsync(LocalIpcProtocol.PairList, [], cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<LocalPairPending[]>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid pairing list.");
+        return DeserializeRequired<LocalPairPending[]>(
+            reply, "The daemon returned an invalid pairing list.");
     }
 
     public async Task ApprovePairingAsync(string pairingId, bool approve, CancellationToken cancellationToken,
         PairPermissionPreset preset = PairPermissionPreset.Personal)
     {
-        _ = await RequestAsync(LocalIpcProtocol.PairApprove,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalPairDecision(pairingId, approve, preset), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
+        _ = await RequestJsonAsync(
+            LocalIpcProtocol.PairApprove,
+            new LocalPairDecision(pairingId, approve, preset),
+            cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<int> RunShellAsync(ShellRequest request, string? deviceId, CancellationToken cancellationToken)
@@ -217,6 +224,20 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
         catch (RemoteProtocolException ex) { throw new XasClientException(ex.Message); }
     }
 
+    private Task<ProtocolMessage> RequestJsonAsync<T>(
+        string method, T request, CancellationToken token) =>
+        RequestAsync(
+            method,
+            JsonSerializer.SerializeToUtf8Bytes(request, LocalIpcProtocol.Json),
+            token);
+
+    private static T? DeserializeReply<T>(ProtocolMessage reply) =>
+        JsonSerializer.Deserialize<T>(reply.Payload, LocalIpcProtocol.Json);
+
+    private static T DeserializeRequired<T>(ProtocolMessage reply, string errorMessage) =>
+        DeserializeReply<T>(reply)
+        ?? throw new InvalidDataException(errorMessage);
+
     private async Task BindAsync(MultiplexedProtocolPeer peer, string? deviceId, CancellationToken token)
     {
         if (_bound) return;
@@ -274,8 +295,8 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
     {
         var reply = await RequestAsync(LocalIpcProtocol.ClipboardStatus,
             JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        var status = JsonSerializer.Deserialize<LocalClipboardStatus>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid clipboard status.");
+        var status = DeserializeRequired<LocalClipboardStatus>(
+            reply, "The daemon returned an invalid clipboard status.");
         using var writer = new StreamWriter(output, Console.OutputEncoding, 1024, leaveOpen: true) { AutoFlush = true };
         await writer.WriteLineAsync(status.Message).ConfigureAwait(false);
         return status.Active ? 0 : 1;
@@ -284,60 +305,68 @@ public sealed class LocalDaemonClient(Stream input, Stream output, Stream error)
     public async Task<IReadOnlyList<LocalRemoteVolumeInfo>> ListRemoteVolumesAsync(string? deviceId,
         CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.StorageVolumes,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<LocalRemoteVolumeInfo[]>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid remote volume list.");
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.StorageVolumes, new LocalTarget(deviceId), cancellationToken)
+            .ConfigureAwait(false);
+        return DeserializeRequired<LocalRemoteVolumeInfo[]>(
+            reply, "The daemon returned an invalid remote volume list.");
     }
 
     public async Task<IReadOnlyList<LocalRemoteVolumeInfo>> ListRemoteMountsAsync(string? deviceId,
         CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.StorageMounts,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<LocalRemoteVolumeInfo[]>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid remote mount list.");
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.StorageMounts, new LocalTarget(deviceId), cancellationToken)
+            .ConfigureAwait(false);
+        return DeserializeRequired<LocalRemoteVolumeInfo[]>(
+            reply, "The daemon returned an invalid remote mount list.");
     }
 
     public async Task<LocalRemoteVolumeInfo> MountRemoteVolumeAsync(string? deviceId, string volume,
         CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.StorageMount,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalStorageVolumeTarget(deviceId, volume), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<LocalRemoteVolumeInfo>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid remote mount response.");
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.StorageMount,
+            new LocalStorageVolumeTarget(deviceId, volume),
+            cancellationToken).ConfigureAwait(false);
+        return DeserializeRequired<LocalRemoteVolumeInfo>(
+            reply, "The daemon returned an invalid remote mount response.");
     }
 
     public async Task<bool> UnmountRemoteVolumeAsync(string? deviceId, string volume,
         CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.StorageUnmount,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalStorageVolumeTarget(deviceId, volume), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<bool>(reply.Payload, LocalIpcProtocol.Json);
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.StorageUnmount,
+            new LocalStorageVolumeTarget(deviceId, volume),
+            cancellationToken).ConfigureAwait(false);
+        return DeserializeReply<bool>(reply);
     }
 
     public async Task EjectRemoteVolumeAsync(string? deviceId, string volume, CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.StorageEject,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalStorageVolumeTarget(deviceId, volume), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        if (reply.Payload.Length != 0) throw new InvalidDataException("The daemon returned an invalid remote eject response.");
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.StorageEject,
+            new LocalStorageVolumeTarget(deviceId, volume),
+            cancellationToken).ConfigureAwait(false);
+        if (reply.Payload.Length != 0)
+            throw new InvalidDataException("The daemon returned an invalid remote eject response.");
     }
 
     public async Task<string> RevokeAsync(string deviceId, CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.Revoke,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalTarget(deviceId), LocalIpcProtocol.Json), cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<string>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid revoke response.");
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.Revoke, new LocalTarget(deviceId), cancellationToken).ConfigureAwait(false);
+        return DeserializeRequired<string>(reply, "The daemon returned an invalid revoke response.");
     }
     public async Task<string> UpdateEndpointAsync(string deviceId, string host, int port,
         CancellationToken cancellationToken)
     {
-        var reply = await RequestAsync(LocalIpcProtocol.Endpoint,
-            JsonSerializer.SerializeToUtf8Bytes(new LocalEndpointUpdate(deviceId, host, port), LocalIpcProtocol.Json),
+        var reply = await RequestJsonAsync(
+            LocalIpcProtocol.Endpoint,
+            new LocalEndpointUpdate(deviceId, host, port),
             cancellationToken).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<string>(reply.Payload, LocalIpcProtocol.Json)
-            ?? throw new InvalidDataException("The daemon returned an invalid endpoint response.");
+        return DeserializeRequired<string>(reply, "The daemon returned an invalid endpoint response.");
     }
     public async Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken)
     {

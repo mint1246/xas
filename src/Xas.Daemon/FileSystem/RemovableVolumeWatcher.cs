@@ -19,10 +19,16 @@ public sealed class RemovableVolumeWatcher(Func<RemoteVolume[]> getVolumes, Time
     public void Start()
     {
         ObjectDisposedException.ThrowIf(_shutdown.IsCancellationRequested, this);
-        if (_pollInterval < TimeSpan.FromMilliseconds(250)) throw new ArgumentOutOfRangeException(nameof(pollInterval));
+        if (_pollInterval < TimeSpan.FromMilliseconds(250))
+        {
+            throw new ArgumentOutOfRangeException(nameof(pollInterval));
+        }
         lock (_gate)
         {
-            if (_loop is not null) throw new InvalidOperationException("Volume watcher is already running.");
+            if (_loop is not null)
+            {
+                throw new InvalidOperationException("Volume watcher is already running.");
+            }
             _loop = WatchAsync(_shutdown.Token);
         }
     }

@@ -9,7 +9,8 @@ public static class TransportTests
 {
     public static async Task RunAsync()
     {
-        var root = Path.Combine(Path.GetTempPath(), "xas-transport-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(
+            Path.GetTempPath(), "xas-transport-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         try
         {
@@ -26,23 +27,31 @@ public static class TransportTests
             {
                 var port = ((IPEndPoint)listener.LocalEndpoint).Port;
                 var accepted = listener.AcceptTcpClientAsync();
-                var clientTask = MutualTlsTransport.ConnectAsync("localhost", port, clientIdentity, clientTrust,
-                    serverIdentity.DeviceId, TimeSpan.FromSeconds(10));
+                var clientTask = ConnectClientAsync(
+                    port, clientIdentity, clientTrust, serverIdentity.DeviceId);
                 using var socket = await accepted;
                 AuthenticatedPeerConnection serverConnection;
-                try { serverConnection = await MutualTlsTransport.AcceptAsync(socket, serverIdentity, serverTrust, TimeSpan.FromSeconds(10)); }
+                try
+                {
+                    serverConnection = await MutualTlsTransport.AcceptAsync(
+                        socket, serverIdentity, serverTrust, TimeSpan.FromSeconds(10));
+                }
                 catch (Exception serverError)
                 {
-                    try { await clientTask; }
-                    catch (Exception clientError) { throw new AggregateException(serverError, clientError); }
+                    await CheckClientFailureAsync(clientTask, serverError);
                     throw;
                 }
                 await using var server = serverConnection;
                 await using var client = await clientTask;
-                Assert(server.PeerDeviceId == clientIdentity.DeviceId, "Server did not authenticate the client identity.");
-                Assert(client.PeerDeviceId == serverIdentity.DeviceId, "Client did not authenticate the server identity.");
+                Assert(server.PeerDeviceId == clientIdentity.DeviceId,
+                    "Server did not authenticate the client identity.");
+                Assert(client.PeerDeviceId == serverIdentity.DeviceId,
+                    "Client did not authenticate the server identity.");
             }
-            finally { listener.Stop(); }
+            finally
+            {
+                listener.Stop();
+            }
 
             var rejectingListener = new TcpListener(IPAddress.Loopback, 0);
             rejectingListener.Start();
@@ -50,17 +59,55 @@ public static class TransportTests
             {
                 var port = ((IPEndPoint)rejectingListener.LocalEndpoint).Port;
                 var accepted = rejectingListener.AcceptTcpClientAsync();
-                var wrongTarget = MutualTlsTransport.ConnectAsync("localhost", port, clientIdentity, clientTrust,
-                    "xas-00000000000000000000000000000000", TimeSpan.FromSeconds(10));
+                var wrongTarget = ConnectClientAsync(
+                    port, clientIdentity, clientTrust,
+                    "xas-00000000000000000000000000000000");
                 using var socket = await accepted;
-                try { await MutualTlsTransport.AcceptAsync(socket, serverIdentity, serverTrust, TimeSpan.FromSeconds(10)); }
+                try
+                {
+                    await MutualTlsTransport.AcceptAsync(
+                        socket, serverIdentity, serverTrust, TimeSpan.FromSeconds(10));
+                }
                 catch { }
-                try { await wrongTarget; throw new Exception("A mismatched intended peer ID was accepted."); }
+                try
+                {
+                    await wrongTarget;
+                    throw new Exception("A mismatched intended peer ID was accepted.");
+                }
                 catch (System.Security.Authentication.AuthenticationException) { }
             }
-            finally { rejectingListener.Stop(); }
+            finally
+            {
+                rejectingListener.Stop();
+            }
         }
-        finally { Directory.Delete(root, recursive: true); }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static Task<AuthenticatedPeerConnection> ConnectClientAsync(
+        int port,
+        DeviceIdentity identity,
+        PeerTrustStore trust,
+        string expectedPeerDeviceId) =>
+        MutualTlsTransport.ConnectAsync(
+            "localhost", port, identity, trust, expectedPeerDeviceId,
+            TimeSpan.FromSeconds(10));
+
+    private static async Task CheckClientFailureAsync(
+        Task clientTask,
+        Exception serverError)
+    {
+        try
+        {
+            await clientTask;
+        }
+        catch (Exception clientError)
+        {
+            throw new AggregateException(serverError, clientError);
+        }
     }
 
     private static void Assert(bool condition, string message)

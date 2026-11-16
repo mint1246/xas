@@ -19,10 +19,14 @@ if (args.Length == 2 && args[0] == "--echo-output" && int.TryParse(args[1], out 
 
 var suites = Assembly.GetExecutingAssembly().GetTypes()
     .Where(type => type.IsClass && type.Name.EndsWith("Tests", StringComparison.Ordinal))
-    .Select(type => (Type: type, Method: type.GetMethod("RunAsync", BindingFlags.Public | BindingFlags.Static)))
+    .Select(type => (
+        Type: type,
+        Method: type.GetMethod("RunAsync", BindingFlags.Public | BindingFlags.Static)))
     .Where(suite => suite.Method is not null)
     .OrderBy(suite => suite.Type.Name)
-    .Where(suite => args.Length != 2 || args[0] != "--suite" || suite.Type.Name == args[1])
+    .Where(suite => args.Length != 2 ||
+        args[0] != "--suite" ||
+        suite.Type.Name == args[1])
     .ToArray();
 
 foreach (var suite in suites)

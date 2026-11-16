@@ -27,16 +27,22 @@ public static class InteractiveShellClient
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         if (!input.CanRead) throw new ArgumentException("Input stream must be readable.", nameof(input));
-        if (!output.CanWrite) throw new ArgumentException("Output stream must be writable.", nameof(output));
-        if (columns == 0 || rows == 0) throw new ArgumentOutOfRangeException(nameof(columns), "Terminal dimensions must be positive.");
+        if (!output.CanWrite)
+            throw new ArgumentException("Output stream must be writable.", nameof(output));
+        if (columns == 0 || rows == 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(columns), "Terminal dimensions must be positive.");
 
-        await using var connection = await MutualTlsTransport.ConnectAsync(configuredPeer.Host, configuredPeer.Port,
-            identity, trustStore, configuredPeer.DeviceId, ConnectTimeout, cancellationToken).ConfigureAwait(false);
+        await using var connection = await MutualTlsTransport.ConnectAsync(
+            configuredPeer.Host, configuredPeer.Port, identity, trustStore, configuredPeer.DeviceId,
+            ConnectTimeout, cancellationToken).ConfigureAwait(false);
         await using var frames = new BinaryFrameConnection(connection.Stream, leaveOpen: true);
         await using var peer = new MultiplexedProtocolPeer(frames, (_, _) =>
-            ValueTask.FromException<ProtocolMessage>(new NotSupportedException("Interactive shell client does not accept remote requests.")));
+            ValueTask.FromException<ProtocolMessage>(
+                new NotSupportedException("Interactive shell client does not accept remote requests.")));
 
-        return await RunOnPeerAsync(peer, input, output, columns, rows, cancellationToken, currentSize, elevated)
+        return await RunOnPeerAsync(
+            peer, input, output, columns, rows, cancellationToken, currentSize, elevated)
             .ConfigureAwait(false);
     }
 
@@ -49,10 +55,14 @@ public static class InteractiveShellClient
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         if (!input.CanRead) throw new ArgumentException("Input stream must be readable.", nameof(input));
-        if (!output.CanWrite) throw new ArgumentException("Output stream must be writable.", nameof(output));
-        if (columns == 0 || rows == 0) throw new ArgumentOutOfRangeException(nameof(columns), "Terminal dimensions must be positive.");
+        if (!output.CanWrite)
+            throw new ArgumentException("Output stream must be writable.", nameof(output));
+        if (columns == 0 || rows == 0)
+            throw new ArgumentOutOfRangeException(
+                nameof(columns), "Terminal dimensions must be positive.");
 
-        var exit = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var exitCompletion = new TaskCompletionSource<int>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         uint sessionId = 0;
         var earlyMessages = new ConcurrentQueue<ProtocolMessage>();
         var earlyBytes = 0;
@@ -66,40 +76,51 @@ public static class InteractiveShellClient
                 if (sessionId == 0)
                 {
                     earlyBytes = checked(earlyBytes + message.Payload.Length);
-                    if (earlyBytes > 1024 * 1024) throw new InvalidDataException("Too much shell output arrived before the open response.");
+                    if (earlyBytes > 1024 * 1024)
+                        throw new InvalidDataException(
+                            "Too much shell output arrived before the open response.");
                     earlyMessages.Enqueue(message);
                     return;
                 }
-                await HandleShellMessageAsync(message, sessionId, output, exit, cancellationToken).ConfigureAwait(false);
+                await HandleShellMessageAsync(
+                    message, sessionId, output, exitCompletion, cancellationToken)
+                    .ConfigureAwait(false);
             }
             finally { sessionGate.Release(); }
         };
 
         var openPayload = JsonSerializer.SerializeToUtf8Bytes(new OpenRequest(columns, rows, elevated));
-        var openReply = await peer.RequestAsync("shell.open", openPayload, cancellationToken: cancellationToken).ConfigureAwait(false);
-        if (openReply.Payload.Length != sizeof(uint)) throw new InvalidDataException("Invalid shell.open response.");
+        var openReply = await peer.RequestAsync(
+            "shell.open", openPayload, cancellationToken: cancellationToken).ConfigureAwait(false);
+        if (openReply.Payload.Length != sizeof(uint))
+            throw new InvalidDataException("Invalid shell.open response.");
         await sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             sessionId = BinaryPrimitives.ReadUInt32BigEndian(openReply.Payload);
-            if (sessionId == 0) throw new InvalidDataException("Remote allocated an invalid shell session id.");
+            if (sessionId == 0)
+                throw new InvalidDataException("Remote allocated an invalid shell session id.");
             while (earlyMessages.TryDequeue(out var message))
-                await HandleShellMessageAsync(message, sessionId, output, exit, cancellationToken).ConfigureAwait(false);
+                await HandleShellMessageAsync(
+                    message, sessionId, output, exitCompletion, cancellationToken)
+                    .ConfigureAwait(false);
         }
         finally { sessionGate.Release(); }
 
-        using var inputCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var inputToken = inputCancellation.Token;
+        using var inputShutdown = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var inputToken = inputShutdown.Token;
         // A synchronous Unix terminal handle can block inside ReadAsync before its
         // first await. Keep that read off the protocol event loop.
         var inputTask = Task.Run(() => PumpInputAsync(input, peer, sessionId, inputToken), inputToken);
-        var resizeTask = currentSize is null ? Task.Delay(Timeout.Infinite, inputCancellation.Token)
-            : PumpResizeAsync(peer, sessionId, columns, rows, currentSize, inputCancellation.Token);
+        var resizeTask = currentSize is null ? Task.Delay(Timeout.Infinite, inputShutdown.Token)
+            : PumpResizeAsync(peer, sessionId, columns, rows, currentSize, inputShutdown.Token);
         try
         {
-            var completed = await Task.WhenAny(exit.Task, inputTask, peer.Completion, resizeTask).ConfigureAwait(false);
+            var completed = await Task.WhenAny(
+                exitCompletion.Task, inputTask, peer.Completion, resizeTask).ConfigureAwait(false);
             if (completed == peer.Completion)
-                throw new IOException("The interactive shell connection closed before the remote exit event.");
+                throw new IOException(
+                    "The interactive shell connection closed before the remote exit event.");
             if (completed == resizeTask)
             {
                 await resizeTask.ConfigureAwait(false);
@@ -109,18 +130,11 @@ public static class InteractiveShellClient
             {
                 await inputTask.ConfigureAwait(false);
                 // Input EOF is not shell completion; continue waiting for shell.exit.
-                completed = await Task.WhenAny(exit.Task, peer.Completion, resizeTask).ConfigureAwait(false);
-                if (completed == peer.Completion)
-                    throw new IOException("The interactive shell connection closed before the remote exit event.");
-                if (completed == resizeTask)
-                {
-                    await resizeTask.ConfigureAwait(false);
-                    throw new IOException("Terminal resize monitoring stopped unexpectedly.");
-                }
-                return await exit.Task.ConfigureAwait(false);
+                return await WaitForExitAsync(
+                    exitCompletion.Task, peer.Completion, resizeTask).ConfigureAwait(false);
             }
-            var code = await exit.Task.ConfigureAwait(false);
-            inputCancellation.Cancel();
+            var code = await exitCompletion.Task.ConfigureAwait(false);
+            inputShutdown.Cancel();
             // Console input reads may not observe cancellation until the user types again.
             // Do not hold up the remote exit or terminal-mode restoration for that read.
             _ = inputTask.ContinueWith(static task => _ = task.Exception,
@@ -129,10 +143,12 @@ public static class InteractiveShellClient
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            inputCancellation.Cancel();
+            inputShutdown.Cancel();
             try
             {
-                await peer.RequestAsync("shell.close", EncodeSessionId(sessionId), cancellationToken: CancellationToken.None)
+                await peer.RequestAsync(
+                    "shell.close", EncodeSessionId(sessionId),
+                    cancellationToken: CancellationToken.None)
                     .AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
             }
             catch (Exception) { /* Closing the TLS connection also reaps the session. */ }
@@ -140,17 +156,38 @@ public static class InteractiveShellClient
         }
         finally
         {
-            inputCancellation.Cancel();
-            if (sessionId != 0 && !cancellationToken.IsCancellationRequested && exit.Task.IsCompleted)
+            inputShutdown.Cancel();
+            if (sessionId != 0 &&
+                !cancellationToken.IsCancellationRequested &&
+                exitCompletion.Task.IsCompleted)
             {
                 try
                 {
-                    await peer.RequestAsync("shell.close", EncodeSessionId(sessionId), cancellationToken: CancellationToken.None)
+                    await peer.RequestAsync(
+                        "shell.close", EncodeSessionId(sessionId),
+                        cancellationToken: CancellationToken.None)
                     .AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
                 }
                 catch (Exception) { /* The server may reap on exit or disconnect. */ }
             }
         }
+    }
+
+    private static async Task<int> WaitForExitAsync(
+        Task<int> exitTask,
+        Task connectionTask,
+        Task resizeTask)
+    {
+        var completed = await Task.WhenAny(exitTask, connectionTask, resizeTask).ConfigureAwait(false);
+        if (completed == connectionTask)
+            throw new IOException(
+                "The interactive shell connection closed before the remote exit event.");
+        if (completed == resizeTask)
+        {
+            await resizeTask.ConfigureAwait(false);
+            throw new IOException("Terminal resize monitoring stopped unexpectedly.");
+        }
+        return await exitTask.ConfigureAwait(false);
     }
 
     private static async Task PumpResizeAsync(MultiplexedProtocolPeer peer, uint sessionId,
@@ -167,7 +204,8 @@ public static class InteractiveShellClient
             BinaryPrimitives.WriteUInt32BigEndian(payload.AsSpan(0, 4), sessionId);
             BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(4, 2), next.Columns);
             BinaryPrimitives.WriteUInt16BigEndian(payload.AsSpan(6, 2), next.Rows);
-            await peer.RequestAsync("shell.resize", payload, cancellationToken: cancellationToken).ConfigureAwait(false);
+            await peer.RequestAsync(
+                "shell.resize", payload, cancellationToken: cancellationToken).ConfigureAwait(false);
             previous = next;
         }
     }
@@ -181,28 +219,36 @@ public static class InteractiveShellClient
             var count = await input.ReadAsync(buffer.AsMemory(), cancellationToken).ConfigureAwait(false);
             if (count == 0) break;
             var payload = buffer.AsSpan(0, count).ToArray();
-            await peer.SendAsync(new ProtocolMessage(MessageKind.StreamData, 0, sessionId, "shell.input", payload), cancellationToken).ConfigureAwait(false);
+            var message = new ProtocolMessage(
+                MessageKind.StreamData, 0, sessionId, "shell.input", payload);
+            await peer.SendAsync(message, cancellationToken).ConfigureAwait(false);
         }
-        await peer.SendAsync(new ProtocolMessage(MessageKind.StreamEnd, 0, sessionId, "shell.input", Array.Empty<byte>()), cancellationToken).ConfigureAwait(false);
+        var endMessage = new ProtocolMessage(
+            MessageKind.StreamEnd, 0, sessionId, "shell.input", Array.Empty<byte>());
+        await peer.SendAsync(endMessage, cancellationToken).ConfigureAwait(false);
     }
 
     private static async ValueTask HandleShellMessageAsync(ProtocolMessage message, uint sessionId,
         Stream output, TaskCompletionSource<int> exit, CancellationToken cancellationToken)
     {
-        if (message.StreamId != sessionId) throw new InvalidDataException("Unexpected interactive shell session id.");
+        if (message.StreamId != sessionId)
+            throw new InvalidDataException("Unexpected interactive shell session id.");
         switch (message.Kind)
         {
             case MessageKind.StreamData when message.Method == "shell.output":
-                if (message.Payload.Length > MaxInputChunkBytes) throw new InvalidDataException("Shell output frame exceeds 64 KiB.");
+                if (message.Payload.Length > MaxInputChunkBytes)
+                    throw new InvalidDataException("Shell output frame exceeds 64 KiB.");
                 await output.WriteAsync(message.Payload, cancellationToken).ConfigureAwait(false);
                 await output.FlushAsync(cancellationToken).ConfigureAwait(false);
                 break;
             case MessageKind.Event when message.Method == "shell.exit":
-                if (message.Payload.Length != sizeof(int)) throw new InvalidDataException("Invalid shell exit payload.");
+                if (message.Payload.Length != sizeof(int))
+                    throw new InvalidDataException("Invalid shell exit payload.");
                 exit.TrySetResult(BinaryPrimitives.ReadInt32BigEndian(message.Payload));
                 break;
             default:
-                throw new InvalidDataException($"Unexpected interactive shell message '{message.Method}'.");
+                throw new InvalidDataException(
+                    $"Unexpected interactive shell message '{message.Method}'.");
         }
     }
 

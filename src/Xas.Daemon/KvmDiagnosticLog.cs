@@ -28,13 +28,12 @@ internal static class KvmDiagnosticLog
                 var root = AppPaths.Root;
                 Directory.CreateDirectory(root);
                 var path = Path.Combine(root, "daemon.log");
-                if (File.Exists(path) && new FileInfo(path).Length + bytes.Length > MaxFileBytes)
-                {
-                    var rotated = path + ".1";
-                    if (File.Exists(rotated)) File.Delete(rotated);
-                    File.Move(path, rotated);
-                }
-                using var stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read);
+                RotateLogIfNeeded(path, bytes.Length);
+                using var stream = new FileStream(
+                    path,
+                    FileMode.Append,
+                    FileAccess.Write,
+                    FileShare.Read);
                 stream.Write(bytes);
             }
         }
@@ -42,5 +41,26 @@ internal static class KvmDiagnosticLog
         {
             // Diagnostics must never change monitor or input handoff behavior.
         }
+    }
+
+    private static void RotateLogIfNeeded(string path, int incomingBytes)
+    {
+        if (!File.Exists(path))
+        {
+            return;
+        }
+
+        if (new FileInfo(path).Length + incomingBytes <= MaxFileBytes)
+        {
+            return;
+        }
+
+        var rotatedPath = path + ".1";
+        if (File.Exists(rotatedPath))
+        {
+            File.Delete(rotatedPath);
+        }
+
+        File.Move(path, rotatedPath);
     }
 }

@@ -3,7 +3,15 @@ using System.Buffers.Binary;
 namespace Xas.Core;
 
 /// <summary>Portable physical input events. Key codes use USB HID keyboard page 0x07 usages.</summary>
-public enum InputEventKind : byte { KeepAlive = 0, Move = 1, Button = 2, Scroll = 3, Key = 4, MoveAbsolute = 5 }
+public enum InputEventKind : byte
+{
+    KeepAlive = 0,
+    Move = 1,
+    Button = 2,
+    Scroll = 3,
+    Key = 4,
+    MoveAbsolute = 5
+}
 
 /// <summary>Move uses relative pixels; scroll uses units of 1/120 wheel detent.</summary>
 public readonly record struct InputEvent(InputEventKind Kind, ushort Code = 0,
@@ -13,7 +21,10 @@ public readonly record struct InputEvent(InputEventKind Kind, ushort Code = 0,
 public enum InputPipelineStage : byte { Capture = 0, Enqueue = 1, Send = 2, Receive = 3, Inject = 4 }
 
 /// <summary>A batch-level pipeline sample; consumers can derive durations between stages in the same process.</summary>
-public readonly record struct InputPipelineMetric(InputPipelineStage Stage, long Timestamp, int EventCount);
+public readonly record struct InputPipelineMetric(
+    InputPipelineStage Stage,
+    long Timestamp,
+    int EventCount);
 
 /// <summary>Optional observer. Keep Record nonblocking; a null observer avoids per-event timestamp work.</summary>
 public interface IInputPipelineMetrics
@@ -46,7 +57,12 @@ public static class InputWire
             var span = bytes.AsSpan(i * EventBytes, EventBytes);
             span[0] = (byte)value.Kind;
             BinaryPrimitives.WriteUInt16BigEndian(span[1..3], value.Code);
-            span[3] = (byte)((value.Down ? 1 : 0) | (value.Repeat ? 2 : 0));
+            var flags = 0;
+            if (value.Down)
+                flags |= 1;
+            if (value.Repeat)
+                flags |= 2;
+            span[3] = (byte)flags;
             BinaryPrimitives.WriteInt32BigEndian(span[4..8], value.X);
             BinaryPrimitives.WriteInt32BigEndian(span[8..12], value.Y);
         }
@@ -55,7 +71,9 @@ public static class InputWire
 
     public static InputEvent[] Decode(ReadOnlySpan<byte> bytes)
     {
-        if (bytes.Length == 0 || bytes.Length % EventBytes != 0 || bytes.Length / EventBytes > MaxEventsPerFrame)
+        if (bytes.Length == 0
+            || bytes.Length % EventBytes != 0
+            || bytes.Length / EventBytes > MaxEventsPerFrame)
             throw new InvalidDataException("Invalid input event batch size.");
         var events = new InputEvent[bytes.Length / EventBytes];
         for (var i = 0; i < events.Length; i++)
@@ -84,9 +102,14 @@ public static class InputWire
             InputEventKind.Move or InputEventKind.Scroll => noCodeOrFlags,
             InputEventKind.MoveAbsolute => noCodeOrFlags && value.X >= 0 && value.Y >= 0,
             InputEventKind.Button => value.Code is >= 1 and <= 8 && noPosition && !value.Repeat,
-            InputEventKind.Key => value.Code is >= 4 and <= 231 && noPosition && (!value.Repeat || value.Down),
+            InputEventKind.Key => value.Code is >= 4 and <= 231
+                && noPosition
+                && (!value.Repeat || value.Down),
             _ => false
         };
-        if (!valid) throw new ArgumentException("Input event has an invalid kind, code, or field combination.", nameof(value));
+        if (!valid)
+            throw new ArgumentException(
+                "Input event has an invalid kind, code, or field combination.",
+                nameof(value));
     }
 }

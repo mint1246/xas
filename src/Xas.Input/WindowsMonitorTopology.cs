@@ -24,9 +24,13 @@ public static class WindowsMonitorTopology
             var info = new MonitorInfoEx { Size = (uint)Marshal.SizeOf<MonitorInfoEx>() };
             if (!GetMonitorInfo(handle, ref info)) return true;
             var device = new DisplayDevice { Size = (uint)Marshal.SizeOf<DisplayDevice>() };
-            string name = string.Empty, id = string.Empty;
+            string name = string.Empty;
+            string id = string.Empty;
             if (EnumDisplayDevices(info.DeviceName, 0, ref device, 0))
-            { name = device.DeviceString ?? string.Empty; id = device.DeviceId ?? string.Empty; }
+            {
+                name = device.DeviceString ?? string.Empty;
+                id = device.DeviceId ?? string.Empty;
+            }
             adapters.TryGetValue(info.DeviceName, out var adapter);
             monitors.Add(new WindowsMonitor(info.DeviceName, name, id,
                 new(info.Monitor.Left, info.Monitor.Top, info.Monitor.Right, info.Monitor.Bottom), adapter));
@@ -135,7 +139,9 @@ public static class WindowsMonitorTopology
     {
         x = y = 0;
         if (!OperatingSystem.IsWindows() || !GetCursorPos(out var point)) return false;
-        x = point.X; y = point.Y;
+
+        x = point.X;
+        y = point.Y;
         return true;
     }
 

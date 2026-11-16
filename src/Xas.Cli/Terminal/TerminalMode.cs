@@ -58,7 +58,8 @@ public sealed class TerminalMode : IDisposable
 
         var input = GetStdHandle(StdInputHandle);
         var output = GetStdHandle(StdOutputHandle);
-        if (input == IntPtr.Zero || input == new IntPtr(-1) || output == IntPtr.Zero || output == new IntPtr(-1))
+        if (input == IntPtr.Zero || input == new IntPtr(-1) ||
+            output == IntPtr.Zero || output == new IntPtr(-1))
             throw new InvalidOperationException("The process does not have usable console handles.");
         if (!GetConsoleMode(input, out var inputMode) || !GetConsoleMode(output, out var outputMode))
             throw new InvalidOperationException("Raw terminal mode requires an attached Windows console.");
@@ -67,7 +68,8 @@ public sealed class TerminalMode : IDisposable
         if (inputCodePage == 0 || outputCodePage == 0)
             throw new InvalidOperationException("Could not read the Windows console code pages.");
 
-        var rawInput = (inputMode & ~(EnableProcessedInput | EnableLineInput | EnableEchoInput)) | EnableVirtualTerminalInput;
+        var disabledInputModes = EnableProcessedInput | EnableLineInput | EnableEchoInput;
+        var rawInput = (inputMode & ~disabledInputModes) | EnableVirtualTerminalInput;
         var vtOutput = outputMode | EnableVirtualTerminalProcessing;
         if (!SetConsoleMode(input, rawInput))
             throw new InvalidOperationException("Could not enable raw input mode.");
@@ -80,10 +82,8 @@ public sealed class TerminalMode : IDisposable
         // console interpret those bytes using its active code pages.
         if (!SetConsoleCP(Utf8CodePage) || !SetConsoleOutputCP(Utf8CodePage))
         {
-            SetConsoleOutputCP(outputCodePage);
-            SetConsoleCP(inputCodePage);
-            SetConsoleMode(output, outputMode);
-            SetConsoleMode(input, inputMode);
+            RestoreConsoleSettings(input, output, inputMode, outputMode,
+                inputCodePage, outputCodePage);
             throw new InvalidOperationException("Could not enable UTF-8 console input and output.");
         }
 
@@ -93,12 +93,24 @@ public sealed class TerminalMode : IDisposable
         }
         catch
         {
-            SetConsoleOutputCP(outputCodePage);
-            SetConsoleCP(inputCodePage);
-            SetConsoleMode(output, outputMode);
-            SetConsoleMode(input, inputMode);
+            RestoreConsoleSettings(input, output, inputMode, outputMode,
+                inputCodePage, outputCodePage);
             throw;
         }
+    }
+
+    private static void RestoreConsoleSettings(
+        IntPtr input,
+        IntPtr output,
+        uint inputMode,
+        uint outputMode,
+        uint inputCodePage,
+        uint outputCodePage)
+    {
+        SetConsoleOutputCP(outputCodePage);
+        SetConsoleCP(inputCodePage);
+        SetConsoleMode(output, outputMode);
+        SetConsoleMode(input, inputMode);
     }
 
     public void Dispose()
@@ -137,9 +149,10 @@ public sealed class TerminalMode : IDisposable
 
         var fileDescriptor = dup(0);
         if (fileDescriptor < 0)
-            throw new IOException($"Could not duplicate terminal input (errno {Marshal.GetLastPInvokeError()}).");
-        return new FileStream(new SafeFileHandle((IntPtr)fileDescriptor, ownsHandle: true), FileAccess.Read,
-            bufferSize: 4096, isAsync: false);
+            throw new IOException(
+                $"Could not duplicate terminal input (errno {Marshal.GetLastPInvokeError()}).");
+        var inputHandle = new SafeFileHandle((IntPtr)fileDescriptor, ownsHandle: true);
+        return new FileStream(inputHandle, FileAccess.Read, bufferSize: 4096, isAsync: false);
     }
 
     /// <summary>Use UTF-8 for raw command output written to an attached Windows console.</summary>
@@ -160,7 +173,8 @@ public sealed class TerminalMode : IDisposable
         public void Dispose()
         {
             if (!SetConsoleOutputCP(oldCodePage))
-                throw new InvalidOperationException("Could not restore the original console output code page.");
+                throw new InvalidOperationException(
+                    "Could not restore the original console output code page.");
         }
     }
 
@@ -173,7 +187,8 @@ public sealed class TerminalMode : IDisposable
     private static TerminalMode EnterLinux()
     {
         if (Console.IsInputRedirected || Console.IsOutputRedirected)
-            throw new InvalidOperationException("Interactive mode requires an attached terminal on stdin and stdout.");
+            throw new InvalidOperationException(
+                "Interactive mode requires an attached terminal on stdin and stdout.");
 
         var saved = RunStty("-g").Trim();
         if (saved.Length == 0 || saved.Any(c => !(char.IsAsciiLetterOrDigit(c) || c is ':' or '-')))
@@ -195,7 +210,8 @@ public sealed class TerminalMode : IDisposable
     private static (int Columns, int Rows) ReadLinuxSize()
     {
         if (ioctl(0, TioCGWinSize, out var size) != 0)
-            throw new InvalidOperationException($"Could not read terminal dimensions (errno {Marshal.GetLastPInvokeError()}).");
+            throw new InvalidOperationException(
+                $"Could not read terminal dimensions (errno {Marshal.GetLastPInvokeError()}).");
         if (size.Columns < 1 || size.Rows < 1)
             throw new InvalidOperationException("The terminal reported invalid dimensions.");
         return (size.Columns, size.Rows);
@@ -229,7 +245,8 @@ public sealed class TerminalMode : IDisposable
             CreateNoWindow = true
         };
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start stty.");
+        using var process = Process.Start(start)
+            ?? throw new InvalidOperationException("Could not start stty.");
         var output = process.StandardOutput.ReadToEnd();
         var error = process.StandardError.ReadToEnd();
         process.WaitForExit();

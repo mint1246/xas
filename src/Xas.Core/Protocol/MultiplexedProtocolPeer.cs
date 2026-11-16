@@ -16,7 +16,8 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
     private int _disposed;
     private Exception? _terminalException;
 
-    public MultiplexedProtocolPeer(IFrameConnection connection,
+    public MultiplexedProtocolPeer(
+        IFrameConnection connection,
         Func<ProtocolMessage, CancellationToken, ValueTask<ProtocolMessage>> requestHandler,
         bool startImmediately = true)
     {
@@ -44,40 +45,70 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
     public ValueTask SendAsync(ProtocolMessage message, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        if (Volatile.Read(ref _started) == 0) throw new InvalidOperationException("Protocol peer has not been started.");
+        if (Volatile.Read(ref _started) == 0)
+            throw new InvalidOperationException("Protocol peer has not been started.");
         return _connection.SendAsync(message, cancellationToken);
     }
 
-    public async ValueTask<ProtocolMessage> RequestAsync(string method, byte[] payload,
+    public async ValueTask<ProtocolMessage> RequestAsync(
+        string method,
+        byte[] payload,
         uint streamId = 0, CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
-        if (Volatile.Read(ref _started) == 0) throw new InvalidOperationException("Protocol peer has not been started.");
+        if (Volatile.Read(ref _started) == 0)
+            throw new InvalidOperationException("Protocol peer has not been started.");
         ArgumentNullException.ThrowIfNull(method);
         ArgumentNullException.ThrowIfNull(payload);
         cancellationToken.ThrowIfCancellationRequested();
         var id = NextRequestId();
-        var completion = new TaskCompletionSource<ProtocolMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (!_pending.TryAdd(id, completion)) throw new InvalidOperationException("Request id collision.");
+        var completion = new TaskCompletionSource<ProtocolMessage>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_pending.TryAdd(id, completion))
+            throw new InvalidOperationException("Request id collision.");
         using var registration = cancellationToken.Register(static state =>
         {
-            var tuple = ((MultiplexedProtocolPeer Peer, uint Id, TaskCompletionSource<ProtocolMessage> Completion))state!;
+            var tuple = ((
+                MultiplexedProtocolPeer Peer,
+                uint Id,
+                TaskCompletionSource<ProtocolMessage> Completion))state!;
             if (tuple.Peer._pending.TryRemove(tuple.Id, out _)) tuple.Completion.TrySetCanceled();
         }, (this, id, completion));
         try
         {
-            await _connection.SendAsync(new ProtocolMessage(MessageKind.Request, id, streamId, method, payload), cancellationToken).ConfigureAwait(false);
+            var request = new ProtocolMessage(
+                MessageKind.Request,
+                id,
+                streamId,
+                method,
+                payload);
+            await _connection.SendAsync(request, cancellationToken).ConfigureAwait(false);
             return await completion.Task.ConfigureAwait(false);
         }
         catch
         {
             _pending.TryRemove(id, out _);
             if (cancellationToken.IsCancellationRequested)
-            {
-                try { await _connection.SendAsync(new ProtocolMessage(MessageKind.Cancel, id, streamId, method, Array.Empty<byte>()), CancellationToken.None).ConfigureAwait(false); }
-                catch (Exception) { /* The transport may already be closed. */ }
-            }
+                await SendCancellationAsync(id, streamId, method).ConfigureAwait(false);
             throw;
+        }
+    }
+
+    private async Task SendCancellationAsync(uint requestId, uint streamId, string method)
+    {
+        try
+        {
+            var cancel = new ProtocolMessage(
+                MessageKind.Cancel,
+                requestId,
+                streamId,
+                method,
+                Array.Empty<byte>());
+            await _connection.SendAsync(cancel, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // The transport may already be closed.
         }
     }
 
@@ -99,37 +130,7 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
             {
                 var message = await _connection.ReceiveAsync(_shutdown.Token).ConfigureAwait(false);
                 if (message is null) throw new EndOfStreamException("Protocol connection closed.");
-                switch (message.Kind)
-                {
-                    case MessageKind.Response:
-                    case MessageKind.Error:
-                        if (message.RequestId != 0 && _pending.TryRemove(message.RequestId, out var pending))
-                        {
-                            if (message.Kind == MessageKind.Error)
-                                pending.TrySetException(RemoteProtocolException.Decode(message.Method, message.Payload));
-                            else pending.TrySetResult(message);
-                        }
-                        break;
-                    case MessageKind.Request:
-                        if (message.RequestId == 0) throw new InvalidDataException("Request must have a nonzero request id.");
-                        var cts = CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
-                        if (!_incoming.TryAdd(message.RequestId, cts))
-                        {
-                            cts.Dispose();
-                            await SendErrorAsync(message, new InvalidOperationException("Duplicate request id.")).ConfigureAwait(false);
-                        }
-                        else _ = HandleRequestAsync(message, cts);
-                        break;
-                    case MessageKind.Cancel:
-                        if (_incoming.TryGetValue(message.RequestId, out var requestCts)) CancelQuietly(requestCts);
-                        break;
-                    default:
-                        var handler = MessageReceived;
-                        if (handler is not null)
-                            foreach (Func<ProtocolMessage, ValueTask> subscriber in handler.GetInvocationList())
-                                await subscriber(message).ConfigureAwait(false);
-                        break;
-                }
+                await DispatchMessageAsync(message).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
@@ -144,13 +145,86 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
         }
     }
 
+    private async ValueTask DispatchMessageAsync(ProtocolMessage message)
+    {
+        switch (message.Kind)
+        {
+            case MessageKind.Response:
+            case MessageKind.Error:
+                CompletePendingRequest(message);
+                return;
+            case MessageKind.Request:
+                await StartIncomingRequestAsync(message).ConfigureAwait(false);
+                return;
+            case MessageKind.Cancel:
+                CancelIncomingRequest(message.RequestId);
+                return;
+            default:
+                await PublishMessageAsync(message).ConfigureAwait(false);
+                return;
+        }
+    }
+
+    private void CompletePendingRequest(ProtocolMessage message)
+    {
+        if (message.RequestId == 0
+            || !_pending.TryRemove(message.RequestId, out var pending))
+            return;
+
+        if (message.Kind == MessageKind.Error)
+        {
+            pending.TrySetException(
+                RemoteProtocolException.Decode(message.Method, message.Payload));
+            return;
+        }
+
+        pending.TrySetResult(message);
+    }
+
+    private async Task StartIncomingRequestAsync(ProtocolMessage message)
+    {
+        if (message.RequestId == 0)
+            throw new InvalidDataException("Request must have a nonzero request id.");
+
+        var requestCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(_shutdown.Token);
+        if (_incoming.TryAdd(message.RequestId, requestCancellation))
+        {
+            _ = HandleRequestAsync(message, requestCancellation);
+            return;
+        }
+
+        requestCancellation.Dispose();
+        await SendErrorAsync(
+            message,
+            new InvalidOperationException("Duplicate request id."))
+            .ConfigureAwait(false);
+    }
+
+    private void CancelIncomingRequest(uint requestId)
+    {
+        if (_incoming.TryGetValue(requestId, out var requestCancellation))
+            CancelQuietly(requestCancellation);
+    }
+
+    private async ValueTask PublishMessageAsync(ProtocolMessage message)
+    {
+        var handler = MessageReceived;
+        if (handler is null)
+            return;
+
+        foreach (Func<ProtocolMessage, ValueTask> subscriber in handler.GetInvocationList())
+            await subscriber(message).ConfigureAwait(false);
+    }
+
     private async Task HandleRequestAsync(ProtocolMessage request, CancellationTokenSource requestCts)
     {
         try
         {
             var response = await _requestHandler(request, requestCts.Token).ConfigureAwait(false);
             if (response.Kind is not (MessageKind.Response or MessageKind.Error))
-                throw new InvalidOperationException("Request handlers must return a Response or Error message.");
+                throw new InvalidOperationException(
+                    "Request handlers must return a Response or Error message.");
             response = response with { RequestId = request.RequestId, StreamId = request.StreamId };
             await _connection.SendAsync(response, _shutdown.Token).ConfigureAwait(false);
         }
@@ -172,8 +246,13 @@ public sealed class MultiplexedProtocolPeer : IAsyncDisposable
         var payload = request.Method.StartsWith("fs.", StringComparison.Ordinal)
             ? RemoteProtocolException.Encode(error)
             : System.Text.Encoding.UTF8.GetBytes(error.Message);
-        return _connection.SendAsync(new ProtocolMessage(MessageKind.Error, request.RequestId, request.StreamId,
-            request.Method, payload), _shutdown.Token);
+        var errorMessage = new ProtocolMessage(
+            MessageKind.Error,
+            request.RequestId,
+            request.StreamId,
+            request.Method,
+            payload);
+        return _connection.SendAsync(errorMessage, _shutdown.Token);
     }
 
     public async ValueTask DisposeAsync()
@@ -203,7 +282,10 @@ public sealed class RemoteProtocolException : Exception
 
     private RemoteProtocolException(string method, string message, string code)
         : base($"Remote protocol error for '{method}': {message}")
-    { Code = code; RemoteMessage = message; }
+    {
+        Code = code;
+        RemoteMessage = message;
+    }
 
     public string Code { get; }
     public string RemoteMessage { get; }
@@ -220,7 +302,8 @@ public sealed class RemoteProtocolException : Exception
             NotSupportedException => "not-supported",
             _ => "unknown"
         };
-        var envelope = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new ErrorEnvelope(code, exception.Message));
+        var errorEnvelope = new ErrorEnvelope(code, exception.Message);
+        var envelope = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(errorEnvelope);
         return System.Text.Encoding.UTF8.GetBytes(EnvelopePrefix).Concat(envelope).ToArray();
     }
 
@@ -230,7 +313,8 @@ public sealed class RemoteProtocolException : Exception
         if (!payload.AsSpan().StartsWith(prefix)) return new RemoteProtocolException(method, payload);
         try
         {
-            var envelope = System.Text.Json.JsonSerializer.Deserialize<ErrorEnvelope>(payload.AsSpan(prefix.Length));
+            var envelope = System.Text.Json.JsonSerializer.Deserialize<ErrorEnvelope>(
+                payload.AsSpan(prefix.Length));
             if (envelope is { Code: not null, Message: not null })
                 return new RemoteProtocolException(method, envelope.Message, envelope.Code);
         }

@@ -33,7 +33,8 @@ internal sealed class RemoteMountPaths(string root)
             var suffix = 0;
             do
             {
-                path = Path.Combine(parent, suffix == 0 ? $"{readable}-{digest}" : $"{readable}-{digest}-{suffix}");
+                var suffixText = suffix == 0 ? digest : $"{digest}-{suffix}";
+                path = Path.Combine(parent, $"{readable}-{suffixText}");
                 suffix++;
             } while (!_reserved.Add(path));
         }
@@ -46,7 +47,8 @@ internal sealed class RemoteMountPaths(string root)
         var invalid = Path.GetInvalidFileNameChars().ToHashSet();
         // Windows drive roots such as F:\ should appear as F: on Linux.
         var chars = name.Trim().TrimEnd('/', '\\')
-            .Select(ch => char.IsControl(ch) || invalid.Contains(ch) || ch is '/' or '\\' ? '_' : ch).ToArray();
+            .Select(ch => char.IsControl(ch) || invalid.Contains(ch) || ch is '/' or '\\' ? '_' : ch)
+            .ToArray();
         var readable = new string(chars).Trim(' ', '.');
         if (string.IsNullOrWhiteSpace(readable)) readable = "remote";
         return readable.Length > 48 ? readable[..48] : readable;

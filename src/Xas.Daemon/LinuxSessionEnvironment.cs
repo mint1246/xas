@@ -14,7 +14,10 @@ internal static class LinuxSessionEnvironment
 
         if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS")) &&
             File.Exists(Path.Combine(runtime, "bus")))
-            Environment.SetEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS", "unix:path=" + Path.Combine(runtime, "bus"));
+        {
+            var busAddress = "unix:path=" + Path.Combine(runtime, "bus");
+            Environment.SetEnvironmentVariable("DBUS_SESSION_BUS_ADDRESS", busAddress);
+        }
 
         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY"))) return;
         try
@@ -25,7 +28,10 @@ internal static class LinuxSessionEnvironment
                     name.AsSpan("wayland-".Length).IndexOfAnyExceptInRange('0', '9') < 0)
                 .OrderBy(name => name, StringComparer.Ordinal)
                 .FirstOrDefault();
-            if (!string.IsNullOrWhiteSpace(socket)) Environment.SetEnvironmentVariable("WAYLAND_DISPLAY", socket);
+            if (!string.IsNullOrWhiteSpace(socket))
+            {
+                Environment.SetEnvironmentVariable("WAYLAND_DISPLAY", socket);
+            }
         }
         catch (IOException) { }
         catch (UnauthorizedAccessException) { }

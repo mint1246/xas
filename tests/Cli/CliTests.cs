@@ -10,20 +10,20 @@ public static class CliTests
 {
     public static async Task RunAsync()
     {
-        await CommandPreservesOneExactArgumentAndTarget();
-        await ExecPassesExecutableArgumentsAndTarget();
-        await InfoAndPingUseExplicitTarget();
-        await InvalidTargetAndExtraCommandArgumentsAreRejected();
+        await CommandKeepsArgument();
+        await ExecPassesArguments();
+        await TargetsInfoAndPing();
+        await RejectsInvalidCommands();
         await InteractiveDefaultUsesClient();
         await CopyParsesFlagsAndOperands();
-        CopyDefaultDeviceShorthandResolves();
+        ResolvesDefaultCopyTarget();
         await ClipboardParsesDirectionAndTarget();
         await ClipboardSyncParsesTarget();
         await StorageCommandsParseTargetsAndVolumes();
         await InputParsesTarget();
     }
 
-    private static async Task CommandPreservesOneExactArgumentAndTarget()
+    private static async Task CommandKeepsArgument()
     {
         var client = new FakeClient();
         var cli = CreateCli(client);
@@ -34,18 +34,19 @@ public static class CliTests
         Equal(ShellMode.Command, client.ShellRequest?.Mode);
     }
 
-    private static async Task ExecPassesExecutableArgumentsAndTarget()
+    private static async Task ExecPassesArguments()
     {
         var client = new FakeClient();
         var cli = CreateCli(client);
-        var code = await cli.RunAsync(["-d", "linux-box", "exec", "--", "/usr/bin/printf", "%s", "hello world"]);
+        var code = await cli.RunAsync(
+            ["-d", "linux-box", "exec", "--", "/usr/bin/printf", "%s", "hello world"]);
         Equal(7, code);
         Equal("linux-box", client.ShellDeviceId);
         Equal("/usr/bin/printf", client.ShellRequest?.Executable);
         SequenceEqual(new[] { "%s", "hello world" }, client.ShellRequest?.Arguments);
     }
 
-    private static async Task InfoAndPingUseExplicitTarget()
+    private static async Task TargetsInfoAndPing()
     {
         var client = new FakeClient();
         var cli = CreateCli(client);
@@ -55,7 +56,7 @@ public static class CliTests
         Equal("device-b", client.PingDeviceId);
     }
 
-    private static async Task InvalidTargetAndExtraCommandArgumentsAreRejected()
+    private static async Task RejectsInvalidCommands()
     {
         var client = new FakeClient();
         var cli = CreateCli(client);
@@ -87,7 +88,7 @@ public static class CliTests
         Equal(2, await cli.RunAsync(["-d", "laptop", "cp", "a", "b"]));
     }
 
-    private static void CopyDefaultDeviceShorthandResolves()
+    private static void ResolvesDefaultCopyTarget()
     {
         var root = Path.Combine(Path.GetTempPath(), "xas-cli-copy-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -97,18 +98,27 @@ public static class CliTests
             var deviceId = "xas-0123456789abcdef0123456789abcdef";
             config.UpsertPeer(new ConfiguredPeer(deviceId, "laptop", "127.0.0.1", 47821));
             config.SetDefault(deviceId);
-            Equal(deviceId, FileCopyClient.ResolveTargetDeviceId("screenshot.png", ":/home/mint/", config));
-            Equal(deviceId, FileCopyClient.ResolveTargetDeviceId(":/home/mint/screenshot.png", ".", config));
+            Equal(deviceId, FileCopyClient.ResolveTargetDeviceId(
+                "screenshot.png", ":/home/mint/", config));
+            Equal(deviceId, FileCopyClient.ResolveTargetDeviceId(
+                ":/home/mint/screenshot.png", ".", config));
 
             var noDefault = new LocalConfiguration(Path.Combine(root, "no-default"));
             try
             {
                 _ = FileCopyClient.ResolveTargetDeviceId("screenshot.png", ":/home/mint/", noDefault);
-                throw new InvalidOperationException("Default-device shorthand unexpectedly worked without a default device.");
+                throw new InvalidOperationException(
+                    "Default-device shorthand unexpectedly worked without a default device.");
             }
-            catch (InvalidOperationException ex) when (ex.Message.Contains("No default device", StringComparison.Ordinal)) { }
+            catch (InvalidOperationException ex) when (
+                ex.Message.Contains("No default device", StringComparison.Ordinal))
+            {
+            }
         }
-        finally { Directory.Delete(root, true); }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
     }
 
     private static async Task ClipboardParsesDirectionAndTarget()
@@ -177,7 +187,8 @@ public static class CliTests
         Equal(2, await cli.RunAsync(["eject", "one", "two"]));
     }
 
-    private static XasCommandLine CreateCli(FakeClient client) => new(client, TextWriter.Null, TextWriter.Null);
+    private static XasCommandLine CreateCli(FakeClient client) =>
+        new(client, TextWriter.Null, TextWriter.Null);
 
     private static void Equal<T>(T expected, T actual)
     {
@@ -208,6 +219,7 @@ public static class CliTests
         public string? CopyDestination { get; private set; }
         public bool CopyRecursive { get; private set; }
         public bool CopyOverwrite { get; private set; }
+
         public bool? ClipboardPush { get; private set; }
         public string? ClipboardDeviceId { get; private set; }
         public string? InputDeviceId { get; private set; }
@@ -218,25 +230,32 @@ public static class CliTests
         public string? StorageVolume { get; private set; }
         public string? StorageOperation { get; private set; }
 
-        public Task<IReadOnlyList<KnownDeviceInfo>> ListDevicesAsync(CancellationToken cancellationToken) => Task.FromResult<IReadOnlyList<KnownDeviceInfo>>([]);
+        public Task<IReadOnlyList<KnownDeviceInfo>> ListDevicesAsync(
+            CancellationToken cancellationToken) =>
+            Task.FromResult<IReadOnlyList<KnownDeviceInfo>>([]);
         public Task<DeviceInfo?> GetDeviceInfoAsync(string? deviceId, CancellationToken cancellationToken)
         {
             InfoDeviceId = deviceId;
-            return Task.FromResult<DeviceInfo?>(new DeviceInfo(deviceId ?? "default", "Test device", "Linux", "x64", []));
+            return Task.FromResult<DeviceInfo?>(new DeviceInfo(
+                deviceId ?? "default", "Test device", "Linux", "x64", []));
         }
-        public Task SetDefaultDeviceAsync(string deviceId, CancellationToken cancellationToken) => Task.CompletedTask;
+
+        public Task SetDefaultDeviceAsync(string deviceId, CancellationToken cancellationToken) =>
+            Task.CompletedTask;
         public Task<bool> PingAsync(string? deviceId, CancellationToken cancellationToken)
         {
             PingDeviceId = deviceId;
             return Task.FromResult(true);
         }
-        public Task<int> RunShellAsync(ShellRequest request, string? deviceId, CancellationToken cancellationToken)
+        public Task<int> RunShellAsync(
+            ShellRequest request, string? deviceId, CancellationToken cancellationToken)
         {
             ShellRequest = request;
             ShellDeviceId = deviceId;
             return Task.FromResult(7);
         }
-        public Task<int> RunInteractiveAsync(string? deviceId, bool elevated, CancellationToken cancellationToken)
+        public Task<int> RunInteractiveAsync(
+            string? deviceId, bool elevated, CancellationToken cancellationToken)
         {
             InteractiveDeviceId = deviceId;
             return Task.FromResult(9);
@@ -250,18 +269,21 @@ public static class CliTests
             CopyOverwrite = overwrite;
             return Task.FromResult(11);
         }
-        public Task<int> SyncClipboardAsync(bool push, string? deviceId, CancellationToken cancellationToken)
+        public Task<int> SyncClipboardAsync(
+            bool push, string? deviceId, CancellationToken cancellationToken)
         {
             ClipboardPush = push;
             ClipboardDeviceId = deviceId;
             return Task.FromResult(13);
         }
-        public Task<int> RunInputAsync(string? deviceId, CancellationToken cancellationToken)
+        public Task<int> RunInputAsync(
+            string? deviceId, CancellationToken cancellationToken)
         {
             InputDeviceId = deviceId;
             return Task.FromResult(17);
         }
-        public Task<int> WatchClipboardAsync(string? deviceId, CancellationToken cancellationToken)
+        public Task<int> WatchClipboardAsync(
+            string? deviceId, CancellationToken cancellationToken)
         {
             WatchDeviceId = deviceId;
             return Task.FromResult(19);
@@ -284,8 +306,10 @@ public static class CliTests
             StorageDeviceId = deviceId;
             StorageVolume = volume;
             StorageOperation = "mount";
-            return Task.FromResult(new LocalRemoteVolumeInfo(deviceId ?? "default", "test", "volume-1", volume,
-                "removable", false, null, null, "exfat", "E:", false));
+            var volumeInfo = new LocalRemoteVolumeInfo(
+                deviceId ?? "default", "test", "volume-1", volume,
+                "removable", false, null, null, "exfat", "E:", false);
+            return Task.FromResult(volumeInfo);
         }
         public Task<bool> UnmountRemoteVolumeAsync(string? deviceId, string volume,
             CancellationToken cancellationToken)
@@ -295,7 +319,8 @@ public static class CliTests
             StorageOperation = "unmount";
             return Task.FromResult(true);
         }
-        public Task EjectRemoteVolumeAsync(string? deviceId, string volume, CancellationToken cancellationToken)
+        public Task EjectRemoteVolumeAsync(
+            string? deviceId, string volume, CancellationToken cancellationToken)
         {
             StorageDeviceId = deviceId;
             StorageVolume = volume;

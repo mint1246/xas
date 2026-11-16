@@ -9,12 +9,22 @@ public static class AppPaths
         get
         {
             var overridePath = Environment.GetEnvironmentVariable("XAS_CONFIG_DIR");
-            if (!string.IsNullOrWhiteSpace(overridePath)) return Path.GetFullPath(overridePath);
+            if (!string.IsNullOrWhiteSpace(overridePath))
+                return Path.GetFullPath(overridePath);
             if (OperatingSystem.IsWindows())
-                return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "xas");
+            {
+                var appData = Environment.GetFolderPath(
+                    Environment.SpecialFolder.ApplicationData);
+                return Path.Combine(appData, "xas");
+            }
+
             var xdg = Environment.GetEnvironmentVariable("XDG_CONFIG_HOME");
-            return Path.Combine(string.IsNullOrWhiteSpace(xdg)
-                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".config") : xdg, "xas");
+            var configDirectory = string.IsNullOrWhiteSpace(xdg)
+                ? Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                    ".config")
+                : xdg;
+            return Path.Combine(configDirectory, "xas");
         }
     }
 
@@ -28,6 +38,8 @@ public sealed record FileSystemExport(string Id, string Path, string Name, bool 
 /// <summary>Per-user nonsecret peer endpoints and default selection.</summary>
 public sealed class LocalConfiguration
 {
+    private const int MaxExportTextLength = 128;
+
     private readonly string _path;
     private readonly object _gate = new();
     private Settings _settings;
@@ -38,9 +50,15 @@ public sealed class LocalConfiguration
         var directory = root ?? AppPaths.Root;
         Directory.CreateDirectory(directory);
         _path = Path.Combine(directory, "settings.json");
-        _settings = File.Exists(_path)
-            ? JsonSerializer.Deserialize<Settings>(File.ReadAllBytes(_path)) ?? throw new InvalidDataException("Invalid settings file.")
-            : new Settings(null, []);
+        if (!File.Exists(_path))
+        {
+            _settings = new Settings(null, []);
+            return;
+        }
+
+        var settingsBytes = File.ReadAllBytes(_path);
+        _settings = JsonSerializer.Deserialize<Settings>(settingsBytes)
+            ?? throw new InvalidDataException("Invalid settings file.");
     }
 
     public string? DefaultDeviceId { get { lock (_gate) return _settings.DefaultDeviceId; } }
@@ -49,16 +67,29 @@ public sealed class LocalConfiguration
     public bool AutoMountRemoteRemovable { get { lock (_gate) return _settings.AutoMountRemoteRemovable; } }
     public bool AutoExposeMainDrive { get { lock (_gate) return _settings.AutoExposeMainDrive; } }
     public bool AutoMountRemoteMainDrive { get { lock (_gate) return _settings.AutoMountRemoteMainDrive; } }
-    public IReadOnlyList<FileSystemExport> FileSystemExports { get { lock (_gate) return _settings.FileSystemExports.ToArray(); } }
+    public IReadOnlyList<FileSystemExport> FileSystemExports
+    {
+        get
+        {
+            lock (_gate)
+                return _settings.FileSystemExports.ToArray();
+        }
+    }
 
     public ConfiguredPeer? Resolve(string? idPrefix)
     {
         lock (_gate)
         {
             var id = idPrefix ?? _settings.DefaultDeviceId;
-            if (string.IsNullOrWhiteSpace(id)) return null;
-            var matches = _settings.Peers.Where(p => p.DeviceId.StartsWith(id, StringComparison.OrdinalIgnoreCase)
-                || p.Name.Equals(id, StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (string.IsNullOrWhiteSpace(id))
+                return null;
+
+            var matches = _settings.Peers
+                .Where(peer => peer.DeviceId.StartsWith(
+                                   id,
+                                   StringComparison.OrdinalIgnoreCase)
+                    || peer.Name.Equals(id, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
             if (matches.Length > 1) throw new InvalidOperationException($"Ambiguous device ID: {id}");
             return matches.SingleOrDefault();
         }
@@ -126,11 +157,18 @@ public sealed class LocalConfiguration
     public void UpsertFileSystemExport(FileSystemExport export)
     {
         ArgumentNullException.ThrowIfNull(export);
-        if (string.IsNullOrWhiteSpace(export.Id) || export.Id.Length > 128 || export.Id.Any(char.IsControl))
+        if (string.IsNullOrWhiteSpace(export.Id)
+            || export.Id.Length > MaxExportTextLength
+            || export.Id.Any(char.IsControl))
             throw new ArgumentException("Filesystem export ID is invalid.", nameof(export));
-        if (string.IsNullOrWhiteSpace(export.Path) || !Path.IsPathRooted(export.Path))
-            throw new ArgumentException("Filesystem export path must be an absolute local path.", nameof(export));
-        if (string.IsNullOrWhiteSpace(export.Name) || export.Name.Length > 128 || export.Name.Any(char.IsControl))
+        if (string.IsNullOrWhiteSpace(export.Path)
+            || !Path.IsPathRooted(export.Path))
+            throw new ArgumentException(
+                "Filesystem export path must be an absolute local path.",
+                nameof(export));
+        if (string.IsNullOrWhiteSpace(export.Name)
+            || export.Name.Length > MaxExportTextLength
+            || export.Name.Any(char.IsControl))
             throw new ArgumentException("Filesystem export name is invalid.", nameof(export));
         var normalized = Path.GetFullPath(export.Path);
         lock (_gate)
@@ -148,7 +186,9 @@ public sealed class LocalConfiguration
         var removed = false;
         lock (_gate)
         {
-            var exports = _settings.FileSystemExports.Where(item => !string.Equals(item.Id, id, StringComparison.Ordinal)).ToArray();
+            var exports = _settings.FileSystemExports
+                .Where(item => !string.Equals(item.Id, id, StringComparison.Ordinal))
+                .ToArray();
             if (exports.Length == _settings.FileSystemExports.Length) return false;
             _settings.FileSystemExports = exports;
             Save();

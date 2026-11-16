@@ -16,7 +16,9 @@ public sealed class InputControlService : IAsyncDisposable
     private bool _releasing;
     private bool _disposed;
 
-    public InputControlService(PeerPermissionStore permissions, IInputInjectionBackend backend,
+    public InputControlService(
+        PeerPermissionStore permissions,
+        IInputInjectionBackend backend,
         IInputPipelineMetrics? metrics = null)
     {
         _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
@@ -25,12 +27,26 @@ public sealed class InputControlService : IAsyncDisposable
     }
 
     public bool IsAvailable => !_disposed && _backend.IsAvailable;
-    public ushort ProtocolVersion => IsAvailable ? (ushort)(_backend is IAbsoluteInputInjectionBackend ? 2 : 1) : (ushort)0;
+    public ushort ProtocolVersion
+    {
+        get
+        {
+            if (!IsAvailable)
+            {
+                return 0;
+            }
+
+            return _backend is IAbsoluteInputInjectionBackend ? (ushort)2 : (ushort)1;
+        }
+    }
 
     public ConnectionInputSession CreateSession(string peerId)
     {
         ArgumentNullException.ThrowIfNull(peerId);
-        lock (_gate) { ObjectDisposedException.ThrowIf(_disposed, this); }
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+        }
         return new ConnectionInputSession(this, peerId);
     }
 
@@ -39,18 +55,48 @@ public sealed class InputControlService : IAsyncDisposable
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (!IsAvailable) throw new PlatformNotSupportedException("A real input-injection backend is unavailable.");
-            if (_lease is not null || _releasing) throw new InvalidOperationException("Another peer currently holds the input lease or its release is still in progress.");
-            if (_nextId == uint.MaxValue) throw new InvalidOperationException("No input session IDs remain for this service lifetime.");
+            EnsureBackendAvailable();
+            EnsureLeaseIsAvailable();
+            EnsureSessionIdsRemain();
             var id = ++_nextId;
             _lease = session;
             return id;
         }
     }
 
+    private void EnsureBackendAvailable()
+    {
+        if (!IsAvailable)
+        {
+            throw new PlatformNotSupportedException(
+                "A real input-injection backend is unavailable.");
+        }
+    }
+
+    private void EnsureLeaseIsAvailable()
+    {
+        if (_lease is not null || _releasing)
+        {
+            throw new InvalidOperationException(
+                "Another peer currently holds the input lease or its release is still in progress.");
+        }
+    }
+
+    private void EnsureSessionIdsRemain()
+    {
+        if (_nextId == uint.MaxValue)
+        {
+            throw new InvalidOperationException(
+                "No input session IDs remain for this service lifetime.");
+        }
+    }
+
     internal bool IsCurrent(ConnectionInputSession session)
     {
-        lock (_gate) return !_disposed && ReferenceEquals(_lease, session);
+        lock (_gate)
+        {
+            return !_disposed && ReferenceEquals(_lease, session);
+        }
     }
 
     internal async ValueTask ReleaseAsync(ConnectionInputSession session)
@@ -59,11 +105,33 @@ public sealed class InputControlService : IAsyncDisposable
         lock (_gate)
         {
             held = ReferenceEquals(_lease, session);
-            if (held) { _lease = null; _releasing = true; }
+            if (held)
+            {
+                _lease = null;
+                _releasing = true;
+            }
         }
-        if (!held) return;
-        try { await _backend.ReleaseAllAsync(CancellationToken.None).ConfigureAwait(false); }
-        finally { lock (_gate) _releasing = false; }
+        if (!held)
+        {
+            return;
+        }
+
+        try
+        {
+            await _backend.ReleaseAllAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            CompleteRelease();
+        }
+    }
+
+    private void CompleteRelease()
+    {
+        lock (_gate)
+        {
+            _releasing = false;
+        }
     }
 
     internal PeerPermissionStore Permissions => _permissions;
@@ -71,7 +139,10 @@ public sealed class InputControlService : IAsyncDisposable
 
     internal void RecordMetric(InputPipelineStage stage, int eventCount)
     {
-        if (_metrics is not { } metrics) return;
+        if (_metrics is not { } metrics)
+        {
+            return;
+        }
         var sample = new InputPipelineMetric(stage, Stopwatch.GetTimestamp(), eventCount);
         metrics.Record(in sample);
     }
@@ -79,9 +150,28 @@ public sealed class InputControlService : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         ConnectionInputSession? lease;
-        lock (_gate) { if (_disposed) return; _disposed = true; lease = _lease; }
-        if (lease is not null) await lease.DisposeAsync().ConfigureAwait(false);
-        if (_backend is IAsyncDisposable asyncBackend) await asyncBackend.DisposeAsync().ConfigureAwait(false);
-        else if (_backend is IDisposable backend) backend.Dispose();
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            lease = _lease;
+        }
+        if (lease is not null)
+        {
+            await lease.DisposeAsync().ConfigureAwait(false);
+        }
+
+        if (_backend is IAsyncDisposable asyncBackend)
+        {
+            await asyncBackend.DisposeAsync().ConfigureAwait(false);
+        }
+        else if (_backend is IDisposable backend)
+        {
+            backend.Dispose();
+        }
     }
 }

@@ -28,16 +28,33 @@ public sealed class BinaryFrameConnection : IFrameConnection
     {
         ArgumentNullException.ThrowIfNull(message);
         ThrowIfDisposed();
-        if (!Enum.IsDefined(message.Kind)) throw new ArgumentOutOfRangeException(nameof(message), "Unknown message kind.");
+        if (!Enum.IsDefined(message.Kind))
+            throw new ArgumentOutOfRangeException(
+                nameof(message),
+                "Unknown message kind.");
         ArgumentNullException.ThrowIfNull(message.Method);
         ArgumentNullException.ThrowIfNull(message.Payload);
 
         byte[] method;
-        try { method = StrictUtf8.GetBytes(message.Method); }
-        catch (EncoderFallbackException ex) { throw new ArgumentException("Method is not valid UTF-8 text.", nameof(message), ex); }
-        if (method.Length > ushort.MaxValue) throw new ArgumentException("Method is too long.", nameof(message));
+        try
+        {
+            method = StrictUtf8.GetBytes(message.Method);
+        }
+        catch (EncoderFallbackException ex)
+        {
+            throw new ArgumentException(
+                "Method is not valid UTF-8 text.",
+                nameof(message),
+                ex);
+        }
+
+        if (method.Length > ushort.MaxValue)
+            throw new ArgumentException("Method is too long.", nameof(message));
         var frameLength = checked(HeaderBytes + method.Length + message.Payload.Length);
-        if (frameLength > XasProtocol.MaxFrameBytes) throw new ArgumentException("Frame exceeds the protocol limit.", nameof(message));
+        if (frameLength > XasProtocol.MaxFrameBytes)
+            throw new ArgumentException(
+                "Frame exceeds the protocol limit.",
+                nameof(message));
 
         var frameBytes = 4 + frameLength;
         var frame = ArrayPool<byte>.Shared.Rent(frameBytes);
@@ -55,7 +72,9 @@ public sealed class BinaryFrameConnection : IFrameConnection
         try
         {
             ThrowIfDisposed();
-            await _stream.WriteAsync(frame.AsMemory(0, frameBytes), cancellationToken).ConfigureAwait(false);
+            await _stream.WriteAsync(
+                frame.AsMemory(0, frameBytes),
+                cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -72,7 +91,10 @@ public sealed class BinaryFrameConnection : IFrameConnection
         {
             ThrowIfDisposed();
             var prefix = new byte[4];
-            var gotPrefix = await ReadExactlyOrEofAsync(prefix, allowInitialEof: true, cancellationToken).ConfigureAwait(false);
+            var gotPrefix = await ReadExactlyOrEofAsync(
+                prefix,
+                allowInitialEof: true,
+                cancellationToken).ConfigureAwait(false);
             if (!gotPrefix) return null;
             var length = BinaryPrimitives.ReadUInt32BigEndian(prefix);
             if (length < HeaderBytes || length > XasProtocol.MaxFrameBytes)
@@ -81,47 +103,73 @@ public sealed class BinaryFrameConnection : IFrameConnection
             // the entire frame body and then copied the payload into a second byte[], doubling allocation
             // and memory bandwidth for every large file-transfer frame.
             var header = new byte[HeaderBytes];
-            await ReadExactlyOrEofAsync(header, allowInitialEof: false, cancellationToken).ConfigureAwait(false);
+            await ReadExactlyOrEofAsync(
+                header,
+                allowInitialEof: false,
+                cancellationToken).ConfigureAwait(false);
             var version = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(0, 2));
-            if (version != XasProtocol.Version) throw new InvalidDataException($"Unsupported protocol version {version}.");
+            if (version != XasProtocol.Version)
+                throw new InvalidDataException(
+                    $"Unsupported protocol version {version}.");
             var kind = (MessageKind)header[2];
-            if (!Enum.IsDefined(kind)) throw new InvalidDataException("Unknown message kind.");
+            if (!Enum.IsDefined(kind))
+                throw new InvalidDataException("Unknown message kind.");
             var requestId = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(3, 4));
             var streamId = BinaryPrimitives.ReadUInt32BigEndian(header.AsSpan(7, 4));
             var methodLength = BinaryPrimitives.ReadUInt16BigEndian(header.AsSpan(11, 2));
-            if (methodLength > length - HeaderBytes) throw new InvalidDataException("Method length exceeds frame length.");
+            if (methodLength > length - HeaderBytes)
+                throw new InvalidDataException("Method length exceeds frame length.");
+
             var methodBytes = new byte[methodLength];
-            if (methodBytes.Length != 0)
-                await ReadExactlyOrEofAsync(methodBytes, allowInitialEof: false, cancellationToken).ConfigureAwait(false);
+            await ReadExactlyOrEofAsync(
+                methodBytes,
+                allowInitialEof: false,
+                cancellationToken).ConfigureAwait(false);
             string method;
-            try { method = StrictUtf8.GetString(methodBytes); }
-            catch (DecoderFallbackException ex) { throw new InvalidDataException("Method is not valid UTF-8.", ex); }
+            try
+            {
+                method = StrictUtf8.GetString(methodBytes);
+            }
+            catch (DecoderFallbackException ex)
+            {
+                throw new InvalidDataException("Method is not valid UTF-8.", ex);
+            }
+
             var payloadLength = checked((int)length - HeaderBytes - methodLength);
             var payload = new byte[payloadLength];
-            if (payload.Length != 0)
-                await ReadExactlyOrEofAsync(payload, allowInitialEof: false, cancellationToken).ConfigureAwait(false);
+            await ReadExactlyOrEofAsync(
+                payload,
+                allowInitialEof: false,
+                cancellationToken).ConfigureAwait(false);
             return new ProtocolMessage(kind, requestId, streamId, method, payload);
         }
         finally { _receiveLock.Release(); }
     }
 
-    private async ValueTask<bool> ReadExactlyOrEofAsync(Memory<byte> buffer, bool allowInitialEof, CancellationToken cancellationToken)
+    private async ValueTask<bool> ReadExactlyOrEofAsync(
+        Memory<byte> buffer,
+        bool allowInitialEof,
+        CancellationToken cancellationToken)
     {
         var offset = 0;
         while (offset < buffer.Length)
         {
             var read = await _stream.ReadAsync(buffer[offset..], cancellationToken).ConfigureAwait(false);
-            if (read == 0)
-            {
-                if (offset == 0 && allowInitialEof) return false;
+            if (read == 0 && (offset != 0 || !allowInitialEof))
                 throw new EndOfStreamException("Connection ended in the middle of a frame.");
-            }
+
+            if (read == 0)
+                return false;
+
             offset += read;
         }
         return true;
     }
 
-    private void ThrowIfDisposed() => ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+    }
 
     public async ValueTask DisposeAsync()
     {

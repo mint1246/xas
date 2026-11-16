@@ -1,0 +1,68 @@
+[
+  [
+    "R1",
+    "CLI stream isolation",
+    "Bound shell output is matched by protocol family and remote session ID. Buffered output keeps its order; failed local subscribers cannot terminate the shared peer.",
+    "LocalIpcShellForwardingTests; two concurrent bound commands in IntegrationTests."
+  ],
+  [
+    "R2",
+    "Peer shutdown",
+    "Shutdown closes established connections before joining dialers. Each connection also observes lifetime cancellation, including late registration.",
+    "PeerSessionManagerTests: idle outbound lane and already-cancelled connection."
+  ],
+  [
+    "R3",
+    "Filesystem error semantics",
+    "Filesystem errors carry structured codes. Native operations recover missing-path, access-denied, I/O and unsupported-operation exceptions; legacy text errors remain supported.",
+    "FileSystemTests: real protocol round trips and legacy decoding."
+  ],
+  [
+    "R4",
+    "Virtual monitor churn",
+    "Input acquisition failures retry while retaining the monitor. Transient topology failures preserve ownership. Driver identities use the device name when hardware IDs are empty; asynchronous removal is confirmed before replacement.",
+    "HandoffLifecycleTests, WindowsTopologyTests and VirtualDisplayTests use fake hardware."
+  ],
+  [
+    "R5",
+    "Administrator broker lifetime",
+    "Stdin EOF closes the child input while the broker keeps watching for disconnect. Service cancellation and stream failures terminate the owned child process tree.",
+    "BrokerServerTests: EOF with open pipe, disconnect after EOF, and service cancellation."
+  ],
+  [
+    "R6",
+    "Manual remote mounts",
+    "Explicit mount intent survives automatic-mount settings and reconnects. Missing volumes or revoked access clear that intent.",
+    "RemoteMountManagerTests use fake adapters and cover setting changes, reconnects and disappearance."
+  ],
+  [
+    "R7",
+    "Durable filesystem flush",
+    "Native flush/sync callbacks wait for fs.flush. Files flush to disk; Linux directories use fsync. Unsupported operations return errors instead of reporting success.",
+    "FileSystemTests and adapter tests; Linux directory flush exercised under WSL."
+  ],
+  [
+    "R8",
+    "Linux upgrades",
+    "Binaries are staged and atomically replaced. Active daemons restart; inactive units are enabled and started. Failed installation or service operations return failure.",
+    "LinuxInstallerTests run with mocked systemctl: active/inactive units, failed restart/start, and failed staging."
+  ],
+  [
+    "R9",
+    "Web sessions",
+    "Reloads reuse the browser session and CSRF token. Sessions expire and the store is bounded; opening another browser preserves existing sessions.",
+    "WebSessionTests cover reloads, independent browsers, expiry and eviction."
+  ],
+  [
+    "R10",
+    "Command close and cleanup",
+    "Bound close requests reach the remote command, local disconnect closes owned sessions, and completed commands release their session resources automatically.",
+    "ShellTests and IPC helper/integration coverage."
+  ],
+  [
+    "Linux",
+    "Interactive echo and xas -c",
+    "Terminal input bypasses .NET's line reader through a duplicated file descriptor. Client input pumps run on the thread pool so synchronous terminal reads cannot block protocol setup. Size polling uses ioctl. One-shot commands stop stdin forwarding when the child exits, then drain stdout/stderr.",
+    "Linux ShellTests, blocking-input IPC integration, and a real PTY probe: exact input delivery without newline, no local echo, repeated size polling, and terminal restoration."
+  ]
+]

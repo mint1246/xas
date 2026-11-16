@@ -11,19 +11,20 @@ public static class ShellTests
 {
     public static async Task RunAsync()
     {
-        await ExecPreservesArgumentsAsync();
-        await CommandUsesHostShellAndReturnsStreamsAndExitCodeAsync();
-        await ExecForwardsStandardInputAsync();
-        await ShortLivedCommandDoesNotWaitForOpenStandardInputAsync();
-        await CompletedCommandSessionsAreRemovedAndCloseIsIdempotentAsync();
-        await RejectsInteractiveAndElevatedRequestsAsync();
-        await CancellationStopsTheChildAsync();
+        await PreservesExecArguments();
+        await ReturnsCommandStreamsAndExitCode();
+        await ForwardsStandardInput();
+        await FinishesWithOpenStandardInput();
+        await RemovesCompletedSessions();
+        await RejectsUnsupportedRequests();
+        await StopsCancelledChild();
     }
 
-    private static async Task ExecPreservesArgumentsAsync()
+    private static async Task PreservesExecArguments()
     {
         var request = new ShellRequest(ShellMode.Exec, null, "dotnet",
-            [typeof(ShellTests).Assembly.Location, "--echo-args", "alpha", "two words", "quote'and\"double", ""]);
+            [typeof(ShellTests).Assembly.Location, "--echo-args", "alpha",
+                "two words", "quote'and\"double", ""]);
         const string expected = "alpha|two words|quote'and\"double|";
 
         var result = await Run(request);
@@ -32,7 +33,7 @@ public static class ShellTests
         Equal(string.Empty, result.Stderr, "Exec unexpectedly wrote to stderr.");
     }
 
-    private static async Task CommandUsesHostShellAndReturnsStreamsAndExitCodeAsync()
+    private static async Task ReturnsCommandStreamsAndExitCode()
     {
         var command = OperatingSystem.IsWindows()
             ? "echo shell-out & echo shell-err 1>&2 & exit /b 23"
@@ -43,7 +44,7 @@ public static class ShellTests
         Contains("shell-err", result.Stderr, "Command stderr was not captured.");
     }
 
-    private static async Task ExecForwardsStandardInputAsync()
+    private static async Task ForwardsStandardInput()
     {
         var request = new ShellRequest(ShellMode.Exec, null, "dotnet",
             [typeof(ShellTests).Assembly.Location, "--echo-stdin"]);
@@ -53,7 +54,7 @@ public static class ShellTests
         Equal(inputText, result.Stdout, "Standard input was not forwarded unchanged.");
     }
 
-    private static async Task ShortLivedCommandDoesNotWaitForOpenStandardInputAsync()
+    private static async Task FinishesWithOpenStandardInput()
     {
         var command = OperatingSystem.IsWindows() ? "echo finished" : "printf finished";
         using var stdin = new NeverEndingInputStream();
@@ -65,8 +66,10 @@ public static class ShellTests
         {
             var exitCode = await run.WaitAsync(TimeSpan.FromSeconds(5));
             Equal(0, exitCode, "Short-lived command should succeed with an open input stream.");
-            Equal(OperatingSystem.IsWindows() ? "finished\r\n" : "finished",
-                Encoding.UTF8.GetString(stdout.ToArray()), "Output was lost while stopping input forwarding.");
+            var expectedOutput = OperatingSystem.IsWindows() ? "finished\r\n" : "finished";
+            var actualOutput = Encoding.UTF8.GetString(stdout.ToArray());
+            Equal(expectedOutput, actualOutput,
+                "Output was lost while stopping input forwarding.");
         }
         catch (TimeoutException)
         {
@@ -76,36 +79,51 @@ public static class ShellTests
         }
     }
 
-    private static async Task CompletedCommandSessionsAreRemovedAndCloseIsIdempotentAsync()
+    private static async Task RemovesCompletedSessions()
     {
-        var directory = Path.Combine(Path.GetTempPath(), "xas-shell-manager-" + Guid.NewGuid().ToString("N"));
+        var directory = Path.Combine(
+            Path.GetTempPath(), "xas-shell-manager-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
         try
         {
             var permissions = new PeerPermissionStore(directory);
             permissions.SetAllowed("test-peer", Capability.Shell, true);
-            var exitSent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            await using var manager = new StreamingCommandManager("test-peer", permissions, (message, _) =>
+            const TaskCreationOptions continuationOptions =
+                TaskCreationOptions.RunContinuationsAsynchronously;
+            var commandExitCompleted = new TaskCompletionSource<bool>(continuationOptions);
+            await using StreamingCommandManager commandSessions = new(
+                "test-peer", permissions, (message, _) =>
             {
-                if (message.Method == ShellExecWire.Exit) exitSent.TrySetResult();
+                if (message.Method == ShellExecWire.Exit) commandExitCompleted.TrySetResult(true);
                 return ValueTask.CompletedTask;
             }, new ImmediateShellBackend());
 
             var open = new ProtocolMessage(MessageKind.Request, 1, 0, ShellExecWire.Open,
                 ShellWire.EncodeRequest(new ShellRequest(ShellMode.Command, "ignored", null, [])));
-            var response = await manager.HandleRequestAsync(open, default);
+            var response = await commandSessions.HandleRequestAsync(open, default);
             var id = ShellExecWire.DecodeSessionId(response.Payload);
-            await exitSent.Task.WaitAsync(TimeSpan.FromSeconds(5));
-            await WaitUntilAsync(() => manager.ActiveSessionCount == 0);
+            await commandExitCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitUntilAsync(() => commandSessions.ActiveSessionCount == 0);
 
             var close = new ProtocolMessage(MessageKind.Request, 2, 0, ShellExecWire.Close,
                 ShellExecWire.EncodeSessionId(id));
-            Equal(MessageKind.Response, (await manager.HandleRequestAsync(close, default)).Kind,
-                "Closing an already completed session should succeed.");
-            Equal(MessageKind.Response, (await manager.HandleRequestAsync(close with { RequestId = 3 }, default)).Kind,
-                "Closing the same session twice should be harmless.");
+            var repeatedClose = close with { RequestId = 3 };
+            var closeRequests = new[]
+            {
+                (Message: close, Reason: "Closing an already completed session should succeed."),
+                (Message: repeatedClose, Reason: "Closing the same session twice should be harmless.")
+            };
+            foreach (var closeRequest in closeRequests)
+            {
+                var closeResponse = await commandSessions.HandleRequestAsync(
+                    closeRequest.Message, default);
+                Equal(MessageKind.Response, closeResponse.Kind, closeRequest.Reason);
+            }
         }
-        finally { Directory.Delete(directory, recursive: true); }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 
     private static async Task WaitUntilAsync(Func<bool> predicate)
@@ -115,20 +133,26 @@ public static class ShellTests
         Assert(predicate(), "The completed command session remained registered.");
     }
 
-    private static async Task RejectsInteractiveAndElevatedRequestsAsync()
+    private static async Task RejectsUnsupportedRequests()
     {
         var backend = new ProcessShellBackend();
         Assert(!backend.SupportsInteractive, "The process backend must not advertise interactive support.");
-        await Throws<NotSupportedException>(() => backend.RunAsync(
-            new ShellRequest(ShellMode.Interactive, null, null, []), Stream.Null, Stream.Null, Stream.Null, default));
-        await Throws<NotSupportedException>(() => backend.RunAsync(
-            new ShellRequest(ShellMode.Interactive, null, null, [], Elevated: true), Stream.Null, Stream.Null, Stream.Null, default));
+        await RejectsRequestAsync(backend,
+            new ShellRequest(ShellMode.Interactive, null, null, []));
+        await RejectsRequestAsync(backend,
+            new ShellRequest(ShellMode.Interactive, null, null, [], Elevated: true));
         if (!OperatingSystem.IsLinux())
-            await Throws<NotSupportedException>(() => backend.RunAsync(
-                new ShellRequest(ShellMode.Exec, null, "echo", [], Elevated: true), Stream.Null, Stream.Null, Stream.Null, default));
+        {
+            await RejectsRequestAsync(backend,
+                new ShellRequest(ShellMode.Exec, null, "echo", [], Elevated: true));
+        }
     }
 
-    private static async Task CancellationStopsTheChildAsync()
+    private static Task RejectsRequestAsync(ProcessShellBackend backend, ShellRequest request) =>
+        Throws<NotSupportedException>(() => backend.RunAsync(
+            request, Stream.Null, Stream.Null, Stream.Null, default));
+
+    private static async Task StopsCancelledChild()
     {
         var request = OperatingSystem.IsWindows()
             ? new ShellRequest(ShellMode.Command, "ping -n 30 127.0.0.1 > nul", null, [])
@@ -148,8 +172,11 @@ public static class ShellTests
         using var stdin = new MemoryStream(input ?? []);
         using var stdout = new MemoryStream();
         using var stderr = new MemoryStream();
-        var exitCode = await new ProcessShellBackend().RunAsync(request, stdin, stdout, stderr, cancellationToken);
-        return (exitCode, Encoding.UTF8.GetString(stdout.ToArray()), Encoding.UTF8.GetString(stderr.ToArray()));
+        var exitCode = await new ProcessShellBackend().RunAsync(
+            request, stdin, stdout, stderr, cancellationToken);
+        var outputText = Encoding.UTF8.GetString(stdout.ToArray());
+        var errorText = Encoding.UTF8.GetString(stderr.ToArray());
+        return (exitCode, outputText, errorText);
     }
 
     private static async Task Throws<TException>(Func<Task> action) where TException : Exception
@@ -183,22 +210,38 @@ public static class ShellTests
         public override bool CanSeek => false;
         public override bool CanWrite => false;
         public override long Length => throw new NotSupportedException();
-        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
         public void Stop() => _stop.Cancel();
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
-            WaitAsync(cancellationToken);
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+                WaitAsync(cancellationToken);
         private async ValueTask<int> WaitAsync(CancellationToken cancellationToken)
         {
-            using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                cancellationToken, _stop.Token);
             await Task.Delay(Timeout.InfiniteTimeSpan, linked.Token);
             return 0;
         }
-        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override int Read(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
         public override void Flush() => throw new NotSupportedException();
-        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) =>
+            throw new NotSupportedException();
         public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
         public override void SetLength(long value) => throw new NotSupportedException();
-        protected override void Dispose(bool disposing) { if (disposing) _stop.Dispose(); base.Dispose(disposing); }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                _stop.Dispose();
+            }
+
+            base.Dispose(disposing);
+        }
     }
 
     private sealed class ImmediateShellBackend : IShellBackend

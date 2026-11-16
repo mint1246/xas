@@ -25,11 +25,19 @@ public static class PairingVerification
     /// <summary>Validates only certificate shape; trust is established by comparing the code locally.</summary>
     public static bool IsProvisionalCertificate(X509Certificate2? certificate)
     {
-        if (certificate is null) return false;
+        if (certificate is null)
+            return false;
+
         var now = DateTime.UtcNow;
-        if (now < certificate.NotBefore.ToUniversalTime() || now > certificate.NotAfter.ToUniversalTime()) return false;
+        var notBefore = certificate.NotBefore.ToUniversalTime();
+        var notAfter = certificate.NotAfter.ToUniversalTime();
+        if (now < notBefore || now > notAfter)
+            return false;
+
         using var rsa = certificate.GetRSAPublicKey();
-        if (rsa is not null) return rsa.KeySize >= 2048;
+        if (rsa is not null)
+            return rsa.KeySize >= 2048;
+
         using var ecdsa = certificate.GetECDsaPublicKey();
         return ecdsa is not null && ecdsa.KeySize >= 256;
     }
@@ -65,7 +73,10 @@ public static class PairingVerification
     {
         ArgumentNullException.ThrowIfNull(value);
         var normalized = new string(value.Where(Uri.IsHexDigit).Select(char.ToUpperInvariant).ToArray());
-        if (normalized.Length != 64) throw new ArgumentException("Expected a SHA-256 fingerprint.", nameof(value));
+        if (normalized.Length != 64)
+            throw new ArgumentException(
+                "Expected a SHA-256 fingerprint.",
+                nameof(value));
         return normalized;
     }
 }

@@ -18,8 +18,8 @@ public static class HotInputRouter
         if (display.WidthPixels is < 1 or > 16384 || display.HeightPixels is < 1 or > 16384)
             throw new InvalidDataException("The peer display dimensions are invalid.");
 
-        await using var capture = await WindowsInputCapture.StartHotAsync(region,
-            display.WidthPixels, display.HeightPixels, cancellationToken, metrics).ConfigureAwait(false);
+        await using var capture = await WindowsInputCapture.StartHotAsync(
+            region, display.WidthPixels, display.HeightPixels, cancellationToken, metrics).ConfigureAwait(false);
         var wake = Channel.CreateBounded<byte>(new BoundedChannelOptions(1)
         { FullMode = BoundedChannelFullMode.DropWrite, SingleReader = true, SingleWriter = false });
         var disconnected = false;
@@ -28,9 +28,23 @@ public static class HotInputRouter
         void SignalPointer(bool _) => Signal();
         void SignalRouting(bool _) => Signal();
         void Changed() => Signal();
-        void Disconnected() { disconnected = true; Signal(); }
-        void Emergency() { emergencyRequested = true; Signal(); }
-        void TopologyChanged() { displayTopologyChanged?.Invoke(); Signal(); }
+        void Disconnected()
+        {
+            disconnected = true;
+            Signal();
+        }
+
+        void Emergency()
+        {
+            emergencyRequested = true;
+            Signal();
+        }
+
+        void TopologyChanged()
+        {
+            displayTopologyChanged?.Invoke();
+            Signal();
+        }
         capture.PointerRegionChanged += SignalPointer;
         capture.RoutingChanged += SignalRouting;
         capture.EmergencyReturnRequested += Emergency;
@@ -41,16 +55,13 @@ public static class HotInputRouter
         {
             while (!cancellationToken.IsCancellationRequested && !disconnected)
             {
+                await RunLeaseIfReadyAsync(
+                    peer, capture, wake.Reader, Signal,
+                    () => disconnected, () => emergencyRequested, metrics, cancellationToken)
+                    .ConfigureAwait(false);
                 if (emergencyRequested) return;
-                if (peer.RealtimeReady)
-                {
-                    await RunLeaseAsync(peer, capture, wake.Reader, Signal, () => disconnected,
-                        () => emergencyRequested, metrics, cancellationToken).ConfigureAwait(false);
-                    if (emergencyRequested) return;
-                }
                 if (capture.Completion.IsCompleted) await capture.Completion.ConfigureAwait(false);
-                await wake.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false);
-                while (wake.Reader.TryRead(out _)) { }
+                await WaitForWakeAsync(wake.Reader, cancellationToken).ConfigureAwait(false);
             }
         }
         finally
@@ -65,11 +76,30 @@ public static class HotInputRouter
         }
     }
 
+    private static async Task WaitForWakeAsync(
+        ChannelReader<byte> wake, CancellationToken cancellationToken)
+    {
+        await wake.WaitToReadAsync(cancellationToken).ConfigureAwait(false);
+        while (wake.TryRead(out _)) { }
+    }
+
+    private static async Task RunLeaseIfReadyAsync(
+        IHotInputPeer peer, WindowsInputCapture capture, ChannelReader<byte> wake,
+        Action signal, Func<bool> isDisconnected, Func<bool> isEmergency,
+        IInputPipelineMetrics? metrics, CancellationToken cancellationToken)
+    {
+        if (!peer.RealtimeReady) return;
+
+        await RunLeaseAsync(peer, capture, wake, signal, isDisconnected, isEmergency,
+            metrics, cancellationToken).ConfigureAwait(false);
+    }
+
     private static async Task RunLeaseAsync(IHotInputPeer peer, WindowsInputCapture capture,
         ChannelReader<byte> wake, Action signalWake, Func<bool> isDisconnected, Func<bool> isEmergency,
         IInputPipelineMetrics? metrics, CancellationToken cancellationToken)
     {
-        var opened = await peer.RequestRealtimeAsync("input.open", [], cancellationToken).ConfigureAwait(false);
+        var opened = await peer.RequestRealtimeAsync("input.open", [], cancellationToken)
+            .ConfigureAwait(false);
         if (opened.Payload.Length != 4) throw new InvalidDataException("Invalid input.open response.");
         var sessionId = BinaryPrimitives.ReadUInt32BigEndian(opened.Payload);
         if (sessionId == 0) throw new InvalidDataException("The remote input session ID was zero.");
@@ -96,8 +126,8 @@ public static class HotInputRouter
                 while (wake.TryRead(out _)) { }
 
                 var routing = capture.IsRoutingRemote;
-                if (routeChanged && !routing && peer.RealtimeReady)
-                    await SendReleaseAsync(peer, sessionId, sendGate, active.Token).ConfigureAwait(false);
+                await ReleaseIfLeavingRemoteAsync(
+                    peer, sessionId, sendGate, active.Token, routeChanged, routing).ConfigureAwait(false);
                 routeChanged = routing;
                 if (isDisconnected() || !peer.RealtimeReady || isEmergency()) return;
             }
@@ -105,33 +135,63 @@ public static class HotInputRouter
         finally
         {
             capture.RoutingChanged -= OnRoutingChanged;
-            if (capture.IsRoutingRemote && peer.RealtimeReady)
-            {
-                try { await SendReleaseAsync(peer, sessionId, sendGate, CancellationToken.None).ConfigureAwait(false); }
-                catch (Exception) { }
-            }
+            await ReleaseOnLeaseEndAsync(peer, capture, sessionId, sendGate).ConfigureAwait(false);
             capture.SetRoutingEnabled(false);
             active.Cancel();
             await ObserveAsync(send).ConfigureAwait(false);
             await ObserveAsync(heartbeat).ConfigureAwait(false);
             if (!isDisconnected() && peer.RealtimeReady)
-            {
-                var payload = SessionPayload(sessionId);
-                try
-                {
-                    await sendGate.WaitAsync().ConfigureAwait(false);
-                    try
-                    {
-                        await peer.RequestRealtimeAsync("input.close", payload, CancellationToken.None)
-                            .AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-                    }
-                    finally { sendGate.Release(); }
-                }
-                catch (Exception) { /* Disconnect and timeout both release the server-side lease. */ }
-            }
+                await CloseSessionAsync(peer, sessionId, sendGate).ConfigureAwait(false);
         }
 
         void OnRoutingChanged(bool _) => signalWake();
+    }
+
+    private static async Task CloseSessionAsync(
+        IHotInputPeer peer, uint sessionId, SemaphoreSlim sendGate)
+    {
+        var payload = SessionPayload(sessionId);
+        try
+        {
+            await sendGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                await peer.RequestRealtimeAsync("input.close", payload, CancellationToken.None)
+                    .AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            }
+            finally
+            {
+                sendGate.Release();
+            }
+        }
+        catch (Exception)
+        {
+            // Disconnect and timeout both release the server-side lease.
+        }
+    }
+
+    private static async Task ReleaseIfLeavingRemoteAsync(
+        IHotInputPeer peer, uint sessionId, SemaphoreSlim sendGate, CancellationToken token,
+        bool wasRoutingRemote, bool isRoutingRemote)
+    {
+        if (!wasRoutingRemote || isRoutingRemote || !peer.RealtimeReady) return;
+
+        await SendReleaseAsync(peer, sessionId, sendGate, token).ConfigureAwait(false);
+    }
+
+    private static async Task ReleaseOnLeaseEndAsync(
+        IHotInputPeer peer, WindowsInputCapture capture, uint sessionId, SemaphoreSlim sendGate)
+    {
+        if (!capture.IsRoutingRemote || !peer.RealtimeReady) return;
+
+        try
+        {
+            await SendReleaseAsync(peer, sessionId, sendGate, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Disconnect and timeout both release the server-side lease.
+        }
     }
 
     private static async Task SendReleaseAsync(IHotInputPeer peer, uint sessionId, SemaphoreSlim sendGate,
@@ -167,18 +227,24 @@ public static class HotInputRouter
             await sendGate.WaitAsync(token).ConfigureAwait(false);
             try
             {
-                if (capture.IsRoutingRemote)
-                {
-                    var events = batch.Select(item => item.Event).ToArray();
-                    await peer.SendRealtimeAsync(new ProtocolMessage(MessageKind.StreamData, 0, sessionId,
-                        "input.event", InputWire.Encode(events)), token).ConfigureAwait(false);
-                    if (metrics is not null)
-                        metrics.Record(new(InputPipelineStage.Send, Stopwatch.GetTimestamp(), batch.Count));
-                }
+                await SendBatchIfRoutingRemoteAsync(
+                    peer, capture, sessionId, batch, metrics, token).ConfigureAwait(false);
             }
             finally { sendGate.Release(); }
             batch.Clear();
         }
+    }
+
+    private static async Task SendBatchIfRoutingRemoteAsync(
+        IHotInputPeer peer, WindowsInputCapture capture, uint sessionId,
+        List<CapturedInput> batch, IInputPipelineMetrics? metrics, CancellationToken token)
+    {
+        if (!capture.IsRoutingRemote) return;
+
+        var events = batch.Select(item => item.Event).ToArray();
+        await peer.SendRealtimeAsync(new ProtocolMessage(MessageKind.StreamData, 0, sessionId,
+            "input.event", InputWire.Encode(events)), token).ConfigureAwait(false);
+        metrics?.Record(new(InputPipelineStage.Send, Stopwatch.GetTimestamp(), batch.Count));
     }
 
     private static async Task SendHeartbeatAsync(IHotInputPeer peer, uint sessionId,

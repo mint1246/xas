@@ -24,16 +24,20 @@ public static class PeerSessionManagerTests
             var trust = new PeerTrustStore(Path.Combine(root, "trust"));
             var permissions = new PeerPermissionStore(Path.Combine(root, "trust"));
             var configuration = new LocalConfiguration(Path.Combine(root, "config"));
-            await using var input = new InputControlService(permissions, new UnavailableInputBackend());
+            await using var inputHarness = new InputControlService(
+                permissions, new UnavailableInputBackend());
             var dispatcher = new RequestDispatcher(identity, permissions, configuration: configuration);
-            var manager = new PeerSessionManager(identity, trust, permissions, input, dispatcher, configuration);
+            var manager = new PeerSessionManager(
+                identity, trust, permissions, inputHarness, dispatcher, configuration);
             var stream = new IdleAfterHandshakeStream();
-            var runConnection = typeof(PeerSessionManager).GetMethod("RunConnectionAsync",
+            var runConnection = typeof(PeerSessionManager).GetMethod(
+                "RunConnectionAsync",
                 BindingFlags.NonPublic | BindingFlags.Instance)!;
-            var laneTask = (Task)runConnection.Invoke(manager,
+            var laneTask = (Task)runConnection.Invoke(
+                manager,
                 ["xas-test-peer", "test peer", stream, true, (PeerLane?)PeerLane.Realtime,
                     CancellationToken.None])!;
-            await stream.Handshake.Task.WaitAsync(TimeSpan.FromSeconds(2));
+            await stream.HandshakeCompleted.Task.WaitAsync(TimeSpan.FromSeconds(2));
 
             var dialers = (ConcurrentDictionary<string, Task>)typeof(PeerSessionManager)
                 .GetField("_dialers", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(manager)!;
@@ -44,7 +48,8 @@ public static class PeerSessionManagerTests
             using var alreadyStopped = new CancellationTokenSource();
             alreadyStopped.Cancel();
             var lateStream = new IdleAfterHandshakeStream();
-            var lateLaneTask = (Task)runConnection.Invoke(manager,
+            var lateLaneTask = (Task)runConnection.Invoke(
+                manager,
                 ["xas-test-peer-late", "late test peer", lateStream, true, (PeerLane?)PeerLane.Realtime,
                     alreadyStopped.Token])!;
             await lateLaneTask.WaitAsync(TimeSpan.FromSeconds(2));
@@ -64,18 +69,27 @@ public static class PeerSessionManagerTests
         private byte[]? _current;
         private int _position;
 
-        public TaskCompletionSource Handshake { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource HandshakeCompleted { get; } = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         public override bool CanRead => true;
         public override bool CanWrite => true;
         public override bool CanSeek => false;
         public override long Length => throw new NotSupportedException();
-        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override long Position
+        {
+            get => throw new NotSupportedException();
+            set => throw new NotSupportedException();
+        }
 
-        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer, CancellationToken cancellationToken = default)
         {
             while (_current is null || _position == _current.Length)
             {
-                if (!await _inbound.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false)) return 0;
+                if (!await _inbound.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+                {
+                    return 0;
+                }
                 if (!_inbound.Reader.TryRead(out _current)) continue;
                 _position = 0;
             }
@@ -85,7 +99,8 @@ public static class PeerSessionManagerTests
             return count;
         }
 
-        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        public override ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
         {
             var bytes = buffer.ToArray();
             var methodLength = BinaryPrimitives.ReadUInt16BigEndian(bytes.AsSpan(15, 2));
@@ -96,7 +111,7 @@ public static class PeerSessionManagerTests
                 BinaryPrimitives.WriteUInt32BigEndian(response, (uint)(response.Length - 4));
                 response[6] = (byte)Xas.Core.MessageKind.Response;
                 _inbound.Writer.TryWrite(response);
-                if (method == "session.lane.open") Handshake.TrySetResult();
+                if (method == "session.lane.open") HandshakeCompleted.TrySetResult();
             }
             return ValueTask.CompletedTask;
         }

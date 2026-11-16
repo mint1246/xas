@@ -26,8 +26,15 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
             message.Method != "clipboard.changed")
             throw new InvalidDataException("Invalid clipboard change event.");
         if (!permissions.IsAllowed(peerId, Capability.Clipboard))
-            throw new UnauthorizedAccessException("Clipboard access is not granted on this device for this peer.");
-        if (!backend.IsAvailable) throw new PlatformNotSupportedException("A user-session text clipboard is unavailable.");
+        {
+            throw new UnauthorizedAccessException(
+                "Clipboard access is not granted on this device for this peer.");
+        }
+        if (!backend.IsAvailable)
+        {
+            throw new PlatformNotSupportedException(
+                "A user-session text clipboard is unavailable.");
+        }
 
         ClipboardPayload payload;
         try
@@ -45,8 +52,12 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_importedOrigin == payload.Origin && _importedVersion == payload.Version && _importedText == payload.Text)
+            if (_importedOrigin == payload.Origin
+                && _importedVersion == payload.Version
+                && _importedText == payload.Text)
+            {
                 return;
+            }
             await backend.SetTextAsync(payload.Text, cancellationToken).ConfigureAwait(false);
             var after = await backend.GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
             _importedChangeId = after.ChangeId;
@@ -54,40 +65,70 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
             _importedVersion = payload.Version;
             _importedText = after.Text;
         }
-        finally { _gate.Release(); }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     /// <summary>Publishes clipboard changes as events for the lifetime of an authenticated peer session.</summary>
     public async Task RunChangeNotificationsAsync(string peerId,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, CancellationToken cancellationToken)
     {
-        if (!permissions.IsAllowed(peerId, Capability.Clipboard) || !backend.IsAvailable || backend is not IClipboardChangeSource source)
+        if (!permissions.IsAllowed(peerId, Capability.Clipboard)
+            || !backend.IsAvailable
+            || backend is not IClipboardChangeSource source)
+        {
             return;
+        }
 
         ClipboardTextSnapshot? lastPublished = null;
         await foreach (var snapshot in source.WatchChangesAsync(cancellationToken).ConfigureAwait(false))
         {
-            if (!permissions.IsAllowed(peerId, Capability.Clipboard)) return;
-            if (Encoding.UTF8.GetByteCount(snapshot.Text) > MaxTextBytes) continue;
+            if (!permissions.IsAllowed(peerId, Capability.Clipboard))
+            {
+                return;
+            }
+            if (Encoding.UTF8.GetByteCount(snapshot.Text) > MaxTextBytes)
+            {
+                continue;
+            }
             ClipboardPayload? payload = null;
             await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                if (lastPublished is { } last && last.ChangeId == snapshot.ChangeId && last.Text == snapshot.Text)
+                if (lastPublished is { } last
+                    && last.ChangeId == snapshot.ChangeId
+                    && last.Text == snapshot.Text)
+                {
                     continue;
+                }
                 lastPublished = snapshot;
 
                 // A set operation is reflected back by native change notifications. Suppress the
                 // echo to its sender, while preserving that sender's origin for other peers.
-                var imported = _importedChangeId == snapshot.ChangeId && _importedText == snapshot.Text && _importedOrigin is not null;
-                if (imported && _importedOrigin == peerId) continue;
-                payload = new ClipboardPayload(imported ? _importedOrigin! : localDeviceId,
-                    imported ? _importedVersion : snapshot.ChangeId, snapshot.Text);
+                var imported = _importedChangeId == snapshot.ChangeId
+                    && _importedText == snapshot.Text
+                    && _importedOrigin is not null;
+                if (imported && _importedOrigin == peerId)
+                {
+                    continue;
+                }
+
+                var origin = imported ? _importedOrigin! : localDeviceId;
+                var version = imported ? _importedVersion : snapshot.ChangeId;
+                payload = new ClipboardPayload(origin,
+                    version,
+                    snapshot.Text);
             }
-            finally { _gate.Release(); }
+            finally
+            {
+                _gate.Release();
+            }
 
             var bytes = JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions);
-            await send(new ProtocolMessage(MessageKind.Event, 0, 0, "clipboard.changed", bytes), cancellationToken)
+            var message = new ProtocolMessage(MessageKind.Event, 0, 0, "clipboard.changed", bytes);
+            await send(message, cancellationToken)
                 .ConfigureAwait(false);
         }
     }
@@ -96,8 +137,15 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
         CancellationToken cancellationToken)
     {
         if (!permissions.IsAllowed(peerId, Capability.Clipboard))
-            throw new UnauthorizedAccessException("Clipboard access is not granted on this device for this peer.");
-        if (!backend.IsAvailable) throw new PlatformNotSupportedException("A user-session text clipboard is unavailable.");
+        {
+            throw new UnauthorizedAccessException(
+                "Clipboard access is not granted on this device for this peer.");
+        }
+        if (!backend.IsAvailable)
+        {
+            throw new PlatformNotSupportedException(
+                "A user-session text clipboard is unavailable.");
+        }
         return request.Method switch
         {
             "clipboard.get" => await GetAsync(request, cancellationToken).ConfigureAwait(false),
@@ -108,7 +156,10 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
 
     private async ValueTask<ProtocolMessage> GetAsync(ProtocolMessage request, CancellationToken token)
     {
-        if (request.Payload.Length != 0) throw new InvalidDataException("clipboard.get has no request payload.");
+        if (request.Payload.Length != 0)
+        {
+            throw new InvalidDataException("clipboard.get has no request payload.");
+        }
         await _gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
@@ -116,11 +167,15 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
             if (Encoding.UTF8.GetByteCount(snapshot.Text) > MaxTextBytes)
                 throw new InvalidDataException("Clipboard text exceeds 256 KiB.");
             var imported = _importedChangeId == snapshot.ChangeId && _importedText == snapshot.Text;
-            var payload = new ClipboardPayload(imported ? _importedOrigin! : localDeviceId,
-                imported ? _importedVersion : snapshot.ChangeId, snapshot.Text);
+            var origin = imported ? _importedOrigin! : localDeviceId;
+            var version = imported ? _importedVersion : snapshot.ChangeId;
+            var payload = new ClipboardPayload(origin, version, snapshot.Text);
             return Reply(request, JsonSerializer.SerializeToUtf8Bytes(payload, JsonOptions));
         }
-        finally { _gate.Release(); }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     private async ValueTask<ProtocolMessage> SetAsync(string peerId, ProtocolMessage request,
@@ -134,7 +189,10 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
         }
         catch (JsonException ex) { throw new InvalidDataException("Invalid clipboard.set JSON.", ex); }
         if (payload.Origin != peerId || payload.Text is null)
-            throw new InvalidDataException("clipboard.set origin must match the authenticated peer and text must be present.");
+        {
+            throw new InvalidDataException(
+                "clipboard.set origin must match the authenticated peer and text must be present.");
+        }
         if (Encoding.UTF8.GetByteCount(payload.Text) > MaxTextBytes)
             throw new InvalidDataException("Clipboard text exceeds 256 KiB.");
         await _gate.WaitAsync(token).ConfigureAwait(false);
@@ -148,7 +206,10 @@ public sealed class ClipboardService(string localDeviceId, PeerPermissionStore p
             _importedText = after.Text;
             return Reply(request, []);
         }
-        finally { _gate.Release(); }
+        finally
+        {
+            _gate.Release();
+        }
     }
 
     private static ProtocolMessage Reply(ProtocolMessage request, byte[] payload) =>

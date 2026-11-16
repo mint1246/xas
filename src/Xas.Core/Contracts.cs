@@ -1,7 +1,15 @@
 namespace Xas.Core;
 
 /// <summary>Features are advertised by implementations, then separately authorized per peer.</summary>
-public enum Capability { Shell = 1, FileSystem = 2, Input = 3, Clipboard = 4, PrivilegedShell = 5, Display = 6 }
+public enum Capability
+{
+    Shell = 1,
+    FileSystem = 2,
+    Input = 3,
+    Clipboard = 4,
+    PrivilegedShell = 5,
+    Display = 6
+}
 
 public sealed record CapabilityVersion(Capability Capability, ushort Version);
 
@@ -72,7 +80,9 @@ public interface IVirtualDisplayController : IAsyncDisposable
     /// returned <see cref="VirtualDisplayAttachment.DeviceName"/> is the GDI device name that
     /// <c>EnumDisplayMonitors</c> reports for the new monitor, such as <c>\\.\DISPLAY2</c>.
     /// </summary>
-    ValueTask<VirtualDisplayAttachment> AttachAsync(DisplayMetadata display, CancellationToken cancellationToken);
+    ValueTask<VirtualDisplayAttachment> AttachAsync(
+        DisplayMetadata display,
+        CancellationToken cancellationToken);
 
     /// <summary>Removes the attached monitor. Safe to call when nothing is attached.</summary>
     ValueTask DetachAsync(CancellationToken cancellationToken);

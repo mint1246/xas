@@ -14,13 +14,16 @@ internal sealed class LocalIpcConnection : IAsyncDisposable
     private LocalIpcConnection(Stream stream)
     {
         _stream = stream;
-        Peer = new MultiplexedProtocolPeer(new BinaryFrameConnection(stream, leaveOpen: true), (_, _) =>
-            ValueTask.FromException<ProtocolMessage>(new NotSupportedException("The local CLI does not accept requests.")));
+        var frameConnection = new BinaryFrameConnection(stream, leaveOpen: true);
+        Peer = new MultiplexedProtocolPeer(frameConnection, (_, _) =>
+            ValueTask.FromException<ProtocolMessage>(
+                new NotSupportedException("The local CLI does not accept requests.")));
     }
 
     public static async Task<LocalIpcConnection> ConnectAsync(string? deviceId, CancellationToken token)
     {
-        var connection = new LocalIpcConnection(await LocalIpcEndpoint.ConnectAsync(token).ConfigureAwait(false));
+        var stream = await LocalIpcEndpoint.ConnectAsync(token).ConfigureAwait(false);
+        var connection = new LocalIpcConnection(stream);
         try
         {
             _ = await connection.Peer.RequestAsync(LocalIpcProtocol.Bind,
@@ -28,7 +31,11 @@ internal sealed class LocalIpcConnection : IAsyncDisposable
                 cancellationToken: token).ConfigureAwait(false);
             return connection;
         }
-        catch { await connection.DisposeAsync().ConfigureAwait(false); throw; }
+        catch
+        {
+            await connection.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     public async ValueTask DisposeAsync()

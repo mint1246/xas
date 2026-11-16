@@ -1,8 +1,9 @@
 using System.Net;
 using System.Net.Sockets;
+
 using Xas.Core;
-using Xas.Core.Discovery;
 using Xas.Core.Configuration;
+using Xas.Core.Discovery;
 using Xas.Core.Protocol;
 using Xas.Core.Security;
 using Xas.Core.Transport;
@@ -31,10 +32,17 @@ public sealed class DaemonHost
     private readonly RequestDispatcher _dispatcher;
     public PeerSessionManager PeerSessions { get; }
 
-    public DaemonHost(DeviceIdentity identity, PeerTrustStore trust, PeerPermissionStore permissions,
-        int port = XasProtocol.DefaultPort, IInputInjectionBackend? inputBackend = null,
-        ITextClipboardBackend? clipboardBackend = null, IInputPipelineMetrics? inputMetrics = null,
-        LocalConfiguration? configuration = null, int webPort = 47832, bool enableNativeOrchestration = true)
+    public DaemonHost(
+        DeviceIdentity identity,
+        PeerTrustStore trust,
+        PeerPermissionStore permissions,
+        int port = XasProtocol.DefaultPort,
+        IInputInjectionBackend? inputBackend = null,
+        ITextClipboardBackend? clipboardBackend = null,
+        IInputPipelineMetrics? inputMetrics = null,
+        LocalConfiguration? configuration = null,
+        int webPort = 47832,
+        bool enableNativeOrchestration = true)
     {
         _identity = identity ?? throw new ArgumentNullException(nameof(identity));
         _trust = trust ?? throw new ArgumentNullException(nameof(trust));
@@ -43,11 +51,36 @@ public sealed class DaemonHost
         _webPort = webPort;
         _enableNativeOrchestration = enableNativeOrchestration;
         _configuration = configuration ?? new LocalConfiguration();
-        _input = new InputControlService(permissions,
-            inputBackend ?? (OperatingSystem.IsWindows() ? new WindowsSendInputBackend() :
-                OperatingSystem.IsLinux() ? CreateLinuxInputBackend() : new UnavailableInputBackend()), inputMetrics);
-        _dispatcher = new RequestDispatcher(identity, permissions, () => _input.ProtocolVersion, clipboardBackend, _configuration);
-        PeerSessions = new PeerSessionManager(identity, trust, permissions, _input, _dispatcher, _configuration, port);
+        var resolvedInputBackend = inputBackend ?? CreateInputBackend();
+        _input = new InputControlService(permissions, resolvedInputBackend, inputMetrics);
+        _dispatcher = new RequestDispatcher(
+            identity,
+            permissions,
+            () => _input.ProtocolVersion,
+            clipboardBackend,
+            _configuration);
+        PeerSessions = new PeerSessionManager(
+            identity,
+            trust,
+            permissions,
+            _input,
+            _dispatcher,
+            _configuration,
+            port);
+    }
+
+    private static IInputInjectionBackend CreateInputBackend()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return new WindowsSendInputBackend();
+        }
+        if (OperatingSystem.IsLinux())
+        {
+            return CreateLinuxInputBackend();
+        }
+
+        return new UnavailableInputBackend();
     }
 
     /// <summary>
@@ -60,11 +93,20 @@ public sealed class DaemonHost
         var display = new Display.LinuxDisplayMetadataService();
         IInputInjectionBackend? uinput = new LinuxUinputInputBackend(() =>
             display.GetPrimaryDisplayAsync().GetAwaiter().GetResult());
-        if (uinput.IsAvailable) return uinput;
+        if (uinput.IsAvailable)
+        {
+            return uinput;
+        }
+
         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("WAYLAND_DISPLAY")))
+        {
             return new LinuxWaylandInputBackend();
+        }
         if (Environment.GetEnvironmentVariable("XAS_ENABLE_X11_INPUT") == "1")
+        {
             return new LinuxX11InputBackend();
+        }
+
         return new UnavailableInputBackend();
     }
 
@@ -72,17 +114,44 @@ public sealed class DaemonHost
     {
         var listener = new TcpListener(IPAddress.Any, _port);
         await using var sessions = PeerSessions;
-        await using var pairing = new PairingService(_identity, _trust, checked(_port + 1), Environment.MachineName);
+        await using var pairing = new PairingService(
+            _identity,
+            _trust,
+            checked(_port + 1),
+            Environment.MachineName);
         var configuration = _configuration;
-        var peerAdministration = new PeerAdministrationService(configuration, _trust, _permissions, PeerSessions);
+
+        var peerAdministration = new PeerAdministrationService(
+            configuration,
+            _trust,
+            _permissions,
+            PeerSessions);
         RemoteMountManager? remoteMounts = OperatingSystem.IsWindows() || OperatingSystem.IsLinux()
-            ? new RemoteMountManager(configuration, PeerSessions, log: message => Console.Error.WriteLine(message))
+            ? new RemoteMountManager(
+                configuration,
+                PeerSessions,
+                log: message => Console.Error.WriteLine(message))
             : null;
-        await using var web = new DaemonWebHost(PeerSessions, _trust, _permissions, configuration,
-            peerAdministration, pairing, remoteMounts, _webPort);
-        var localIpc = new LocalIpcServer(PeerSessions, pairing, configuration, _trust, _permissions,
-            _dispatcher.Clipboard, peerAdministration, remoteMounts, () => $"http://127.0.0.1:{web.Port}/");
-        using var daemonStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        await using var web = new DaemonWebHost(
+            PeerSessions,
+            _trust,
+            _permissions,
+            configuration,
+            peerAdministration,
+            pairing,
+            remoteMounts,
+            _webPort);
+        var localIpc = new LocalIpcServer(
+            PeerSessions,
+            pairing,
+            configuration,
+            _trust,
+            _permissions,
+            _dispatcher.Clipboard,
+            peerAdministration,
+            remoteMounts,
+            () => $"http://127.0.0.1:{web.Port}/");
+        using var daemonShutdown = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         listener.Start();
         Task kvmCoordinator = Task.CompletedTask;
         Task remoteMountTask = Task.CompletedTask;
@@ -93,21 +162,32 @@ public sealed class DaemonHost
             try { await PeerSessions.StartAsync(cancellationToken); }
             catch (SocketException ex) { Console.Error.WriteLine($"LAN discovery unavailable: {ex.Message}"); }
             await web.StartAsync(cancellationToken);
-            localIpcTask = localIpc.RunAsync(daemonStop.Token);
+            localIpcTask = localIpc.RunAsync(daemonShutdown.Token);
             if (OperatingSystem.IsWindows() && _enableNativeOrchestration)
             {
-                kvmCoordinator = WindowsKvmCoordinator.RunAsync(configuration, PeerSessions, daemonStop.Token,
+                kvmCoordinator = WindowsKvmCoordinator.RunAsync(
+                    configuration,
+                    PeerSessions,
+                    daemonShutdown.Token,
                     KvmDiagnosticLog.Write);
             }
             if (remoteMounts is not null && _enableNativeOrchestration)
-                remoteMountTask = remoteMounts.RunAsync(daemonStop.Token);
+            {
+                remoteMountTask = remoteMounts.RunAsync(daemonShutdown.Token);
+            }
             Console.WriteLine($"xas daemon listening on TCP {_port}; device {_identity.DeviceId}");
             var clients = new HashSet<Task>();
             while (!cancellationToken.IsCancellationRequested)
             {
                 TcpClient socket;
-                try { socket = await listener.AcceptTcpClientAsync(cancellationToken); }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { break; }
+                try
+                {
+                    socket = await listener.AcceptTcpClientAsync(cancellationToken);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    break;
+                }
                 var task = PeerSessions.HandleClientAsync(socket, cancellationToken);
                 clients.Add(task);
                 clients.RemoveWhere(t => t.IsCompleted);
@@ -117,15 +197,26 @@ public sealed class DaemonHost
         finally
         {
             listener.Stop();
-            daemonStop.Cancel();
-            try { await kvmCoordinator.ConfigureAwait(false); }
-            catch (OperationCanceledException) when (daemonStop.IsCancellationRequested) { }
-            try { await remoteMountTask.ConfigureAwait(false); }
-            catch (OperationCanceledException) when (daemonStop.IsCancellationRequested) { }
-            if (remoteMounts is not null) await remoteMounts.DisposeAsync().ConfigureAwait(false);
-            try { await localIpcTask.ConfigureAwait(false); }
-            catch (OperationCanceledException) when (daemonStop.IsCancellationRequested) { }
+            daemonShutdown.Cancel();
+            await AwaitShutdownTaskAsync(kvmCoordinator, daemonShutdown.Token).ConfigureAwait(false);
+            await AwaitShutdownTaskAsync(remoteMountTask, daemonShutdown.Token).ConfigureAwait(false);
+            if (remoteMounts is not null)
+            {
+                await remoteMounts.DisposeAsync().ConfigureAwait(false);
+            }
+            await AwaitShutdownTaskAsync(localIpcTask, daemonShutdown.Token).ConfigureAwait(false);
             await _input.DisposeAsync();
+        }
+    }
+
+    private static async Task AwaitShutdownTaskAsync(Task task, CancellationToken shutdownToken)
+    {
+        try
+        {
+            await task.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (shutdownToken.IsCancellationRequested)
+        {
         }
     }
 

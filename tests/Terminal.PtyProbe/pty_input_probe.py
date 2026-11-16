@@ -85,13 +85,20 @@ print(f"asynchronous read stayed pending without blocking setup: {'READ_PENDING 
 print(f"received input bytes: {len(remote)} / {len(sent)}")
 print(f"unframed locally echoed x bytes: {outside.count('x')}")
 print(f"size polls while raw: {len(size_polls)}")
-print(f"restored original echo/canonical flags: {restored.groups() if restored else 'missing'}")
+restored_flags = restored.groups() if restored else "missing"
+print(f"restored original echo/canonical flags: {restored_flags}")
 print(f"transcript: {text[:1000]!r}")
+
 if remote != sent.decode("ascii"):
     raise SystemExit("raw input stream did not deliver the exact input bytes")
+
 if outside.count("x"):
     raise SystemExit("terminal locally echoed input while resize polling was active")
+
 if len(size_polls) < 3:
     raise SystemExit("probe did not exercise repeated terminal-size polling")
-if restored is None or (restored.group(1) == "True") != initial_echo or (restored.group(2) == "True") != initial_canon:
+
+echo_restored = restored is not None and (restored.group(1) == "True") == initial_echo
+canon_restored = restored is not None and (restored.group(2) == "True") == initial_canon
+if not echo_restored or not canon_restored:
     raise SystemExit("terminal mode was not restored after the interactive session")

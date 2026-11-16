@@ -8,28 +8,49 @@ public static class PtyTests
     public static async Task RunAsync()
     {
         var backend = new LinuxPtyBackend("definitely-missing-xas-pty-helper");
-        if (backend.IsAvailable) throw new Exception("A missing Linux PTY helper was advertised as available.");
-        if (OperatingSystem.IsLinux())
+        if (backend.IsAvailable)
         {
-            try { await backend.StartAsync(true, 80, 24, CancellationToken.None); throw new Exception("A missing helper was accepted for elevated PTY startup."); }
-            catch (FileNotFoundException) { }
-            try { await backend.StartAsync(false, 80, 24, CancellationToken.None); throw new Exception("Missing helper was accepted."); }
-            catch (FileNotFoundException) { }
-
-            var installed = new LinuxPtyBackend();
-            if (installed.IsAvailable)
-            {
-                await using var session = await installed.StartAsync(false, 80, 24, CancellationToken.None);
-                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                await session.ResizeAsync(100, 30, timeout.Token);
-                using var output = new MemoryStream();
-                var read = session.Output.CopyToAsync(output, timeout.Token);
-                await session.Input.WriteAsync(Encoding.UTF8.GetBytes("echo XAS_LINUX_PTY_OK\nexit\n"), timeout.Token);
-                var exit = await session.WaitForExitAsync(timeout.Token);
-                await read;
-                if (exit != 0 || !Encoding.UTF8.GetString(output.ToArray()).Contains("XAS_LINUX_PTY_OK", StringComparison.Ordinal))
-                    throw new Exception("Linux PTY shell did not return the expected output and exit code.");
-            }
+            throw new Exception(
+                "A missing Linux PTY helper was advertised as available.");
         }
+
+        if (!OperatingSystem.IsLinux()) return;
+
+        try
+        {
+            await backend.StartAsync(true, 80, 24, CancellationToken.None);
+            throw new Exception(
+                "A missing helper was accepted for elevated PTY startup.");
+        }
+        catch (FileNotFoundException) { }
+
+        try
+        {
+            await backend.StartAsync(false, 80, 24, CancellationToken.None);
+            throw new Exception("Missing helper was accepted.");
+        }
+        catch (FileNotFoundException) { }
+
+        var installed = new LinuxPtyBackend();
+        if (!installed.IsAvailable) return;
+
+        await using var session = await installed.StartAsync(
+            false, 80, 24, CancellationToken.None);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        await session.ResizeAsync(100, 30, timeout.Token);
+        using var output = new MemoryStream();
+        var read = session.Output.CopyToAsync(output, timeout.Token);
+        await session.Input.WriteAsync(
+            Encoding.UTF8.GetBytes("echo XAS_LINUX_PTY_OK\nexit\n"), timeout.Token);
+        var exit = await session.WaitForExitAsync(timeout.Token);
+        await read;
+        var outputText = Encoding.UTF8.GetString(output.ToArray());
+        if (exit == 0 && outputText.Contains("XAS_LINUX_PTY_OK", StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        throw new Exception(
+            "Linux PTY shell did not return the expected output and exit code.");
     }
 }

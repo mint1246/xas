@@ -85,21 +85,7 @@ internal static class BrokerServer
                 await RunInteractiveAsync(pipe, token, request, serviceToken).ConfigureAwait(false);
                 return;
             }
-            var child = StartAsUser(request, token);
-            using var process = child.Process;
-            using var input = new FileStream(child.Input, FileAccess.Write, 32 * 1024, true);
-            using var output = new FileStream(child.Output, FileAccess.Read, 32 * 1024, true);
-            using var error = new FileStream(child.Error, FileAccess.Read, 32 * 1024, true);
-            using var inputCts = CancellationTokenSource.CreateLinkedTokenSource(serviceToken);
-            var stdoutTask = SendOutputAsync(output, pipe, AdminFrameKind.Stdout, inputCts.Token);
-            var stderrTask = SendOutputAsync(error, pipe, AdminFrameKind.Stderr, inputCts.Token);
-            var inputTask = ReceiveInputAsync(pipe, input, inputCts.Token);
-            await SuperviseChildAsync(process, inputTask, stdoutTask, stderrTask, inputCts).ConfigureAwait(false);
-            inputCts.Cancel();
-            await IgnoreCleanupFailure(inputTask).ConfigureAwait(false);
-            var exit = new byte[4];
-            BinaryPrimitives.WriteInt32LittleEndian(exit, process.ExitCode);
-            await AdminBrokerWire.WriteFrameAsync(pipe, AdminFrameKind.Exit, exit, serviceToken).ConfigureAwait(false);
+            await RunCommandAsync(pipe, request, token, serviceToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -114,6 +100,30 @@ internal static class BrokerServer
             catch (IOException) { }
             catch (OperationCanceledException) { }
         }
+    }
+
+    private static async Task RunCommandAsync(
+        NamedPipeServerStream pipe, AdminBrokerRequest request,
+        SafeAccessTokenHandle token, CancellationToken serviceToken)
+    {
+        var child = StartAsUser(request, token);
+        using var process = child.Process;
+        using var input = new FileStream(child.Input, FileAccess.Write, 32 * 1024, true);
+        using var output = new FileStream(child.Output, FileAccess.Read, 32 * 1024, true);
+        using var error = new FileStream(child.Error, FileAccess.Read, 32 * 1024, true);
+        using var inputCancellation = CancellationTokenSource.CreateLinkedTokenSource(serviceToken);
+        var stdoutTask = SendOutputAsync(output, pipe, AdminFrameKind.Stdout, inputCancellation.Token);
+        var stderrTask = SendOutputAsync(error, pipe, AdminFrameKind.Stderr, inputCancellation.Token);
+        var inputTask = ReceiveInputAsync(pipe, input, inputCancellation.Token);
+        await SuperviseChildAsync(process, inputTask, stdoutTask, stderrTask, inputCancellation)
+            .ConfigureAwait(false);
+        inputCancellation.Cancel();
+        await IgnoreCleanupFailure(inputTask).ConfigureAwait(false);
+
+        var exitCode = new byte[4];
+        BinaryPrimitives.WriteInt32LittleEndian(exitCode, process.ExitCode);
+        await AdminBrokerWire.WriteFrameAsync(
+            pipe, AdminFrameKind.Exit, exitCode, serviceToken).ConfigureAwait(false);
     }
 
     private static void VerifyXasDaemonClient(NamedPipeServerStream pipe)
@@ -181,25 +191,34 @@ internal static class BrokerServer
         while (true)
         {
             var (kind, data) = await AdminBrokerWire.ReadFrameAsync(pipe, cancellationToken).ConfigureAwait(false);
-            switch (kind)
-            {
-                case AdminFrameKind.Stdin:
-                    if (data.Length == 0) throw new InvalidDataException("Empty ConPTY input frame.");
-                    await session.Input.WriteAsync(data, cancellationToken).ConfigureAwait(false);
-                    await session.Input.FlushAsync(cancellationToken).ConfigureAwait(false);
-                    break;
-                case AdminFrameKind.Resize when data.Length == 4:
-                    var columns = BinaryPrimitives.ReadInt16LittleEndian(data);
-                    var rows = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(2));
-                    if (columns < 1 || rows < 1) throw new InvalidDataException("Invalid ConPTY resize dimensions.");
-                    await session.ResizeAsync(columns, rows, cancellationToken).ConfigureAwait(false);
-                    break;
-                case AdminFrameKind.EndStdin when data.Length == 0:
-                    // Keep watching the pipe after input closes so disconnect is observed.
-                    break;
-                default:
-                    throw new InvalidDataException("Unexpected elevated ConPTY input frame.");
-            }
+            await HandleConPtyInputFrameAsync(kind, data, session, cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static async Task HandleConPtyInputFrameAsync(
+        AdminFrameKind kind, byte[] data, ElevatedConPtySession session,
+        CancellationToken cancellationToken)
+    {
+        switch (kind)
+        {
+            case AdminFrameKind.Stdin:
+                if (data.Length == 0) throw new InvalidDataException("Empty ConPTY input frame.");
+                await session.Input.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+                await session.Input.FlushAsync(cancellationToken).ConfigureAwait(false);
+                return;
+            case AdminFrameKind.Resize when data.Length == 4:
+                var columns = BinaryPrimitives.ReadInt16LittleEndian(data);
+                var rows = BinaryPrimitives.ReadInt16LittleEndian(data.AsSpan(2));
+                if (columns < 1 || rows < 1)
+                    throw new InvalidDataException("Invalid ConPTY resize dimensions.");
+                await session.ResizeAsync(columns, rows, cancellationToken).ConfigureAwait(false);
+                return;
+            case AdminFrameKind.EndStdin when data.Length == 0:
+                // Keep watching the pipe after input closes so disconnect is observed.
+                return;
+            default:
+                throw new InvalidDataException("Unexpected elevated ConPTY input frame.");
         }
     }
 
@@ -217,42 +236,50 @@ internal static class BrokerServer
 
     private static SafeAccessTokenHandle GetElevatedUserToken(WindowsIdentity caller, uint session)
     {
-        if (!WTSQueryUserToken(session, out var sessionToken)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if (!WTSQueryUserToken(session, out var sessionToken))
+            throw new Win32Exception(Marshal.GetLastWin32Error());
         using (sessionToken)
         {
             using var user = new WindowsIdentity(sessionToken.DangerousGetHandle());
             if (!StringComparer.OrdinalIgnoreCase.Equals(user.User?.Value, caller.User?.Value))
                 throw new UnauthorizedAccessException("The broker caller is not the active desktop user.");
 
-            if (!GetTokenInformation(sessionToken, TokenElevationTypeInfoClass, out var elevationType, sizeof(int), out _))
+            if (!GetTokenInformation(
+                    sessionToken, TokenElevationTypeInfoClass, out var elevationType, sizeof(int), out _))
                 throw new Win32Exception(Marshal.GetLastWin32Error());
 
-            switch (elevationType)
-            {
-                case TokenElevationTypeLimited:
-                    if (!GetLinkedToken(sessionToken, TokenLinkedTokenInfoClass, out var linkedToken, IntPtr.Size, out _))
-                        throw new UnauthorizedAccessException("The active user does not have a linked administrator token.",
-                            new Win32Exception(Marshal.GetLastWin32Error()));
-                    using (linkedToken)
-                    {
-                        EnsureElevatedAdministrator(linkedToken, requireElevationFlag: true);
-                        return DuplicatePrimaryToken(linkedToken);
-                    }
-
-                case TokenElevationTypeFull:
-                    EnsureElevatedAdministrator(sessionToken, requireElevationFlag: true);
-                    return DuplicatePrimaryToken(sessionToken);
-
-                case TokenElevationTypeDefault:
-                    // With UAC disabled, an administrator can legitimately have no linked token.
-                    // Enabled Administrators membership is sufficient here; standard-user tokens fail.
-                    EnsureElevatedAdministrator(sessionToken, requireElevationFlag: false);
-                    return DuplicatePrimaryToken(sessionToken);
-
-                default:
-                    throw new InvalidDataException($"Unexpected Windows token elevation type: {elevationType}.");
-            }
+            return SelectElevatedToken(sessionToken, elevationType);
         }
+    }
+
+    private static SafeAccessTokenHandle SelectElevatedToken(
+        SafeAccessTokenHandle sessionToken, int elevationType) => elevationType switch
+    {
+        TokenElevationTypeLimited => GetLinkedElevatedToken(sessionToken),
+        TokenElevationTypeFull => DuplicateVerifiedToken(sessionToken, requireElevationFlag: true),
+        // With UAC disabled, enabled Administrators membership is sufficient.
+        TokenElevationTypeDefault => DuplicateVerifiedToken(sessionToken, requireElevationFlag: false),
+        _ => throw new InvalidDataException(
+            $"Unexpected Windows token elevation type: {elevationType}.")
+    };
+
+    private static SafeAccessTokenHandle GetLinkedElevatedToken(SafeAccessTokenHandle sessionToken)
+    {
+        if (!GetLinkedToken(
+                sessionToken, TokenLinkedTokenInfoClass, out var linkedToken, IntPtr.Size, out _))
+            throw new UnauthorizedAccessException(
+                "The active user does not have a linked administrator token.",
+                new Win32Exception(Marshal.GetLastWin32Error()));
+
+        using (linkedToken)
+            return DuplicateVerifiedToken(linkedToken, requireElevationFlag: true);
+    }
+
+    private static SafeAccessTokenHandle DuplicateVerifiedToken(
+        SafeAccessTokenHandle token, bool requireElevationFlag)
+    {
+        EnsureElevatedAdministrator(token, requireElevationFlag);
+        return DuplicatePrimaryToken(token);
     }
 
     private static void EnsureElevatedAdministrator(SafeAccessTokenHandle token, bool requireElevationFlag)
@@ -260,30 +287,42 @@ internal static class BrokerServer
         var adminSid = CreateAdminSid();
         try
         {
-            // CheckTokenMembership requires an impersonation token when an explicit token handle is supplied.
-            // WTSQueryUserToken and TOKEN_LINKED_TOKEN both give us primary tokens, so passing either directly
-            // fails with ERROR_BAD_TOKEN_TYPE instead of answering the membership question.
-            const uint TokenQuery = 0x0008;
-            const int SecurityImpersonation = 2;
-            const int TokenImpersonation = 2;
-            if (!DuplicateTokenEx(token, TokenQuery, IntPtr.Zero, SecurityImpersonation, TokenImpersonation,
-                    out var membershipToken))
-                throw new Win32Exception(Marshal.GetLastWin32Error(),
-                    "Could not create an administrator membership token.");
-            using (membershipToken)
-            {
-                if (!CheckTokenMembership(membershipToken, adminSid, out var isAdmin))
-                    throw new Win32Exception(Marshal.GetLastWin32Error(),
-                        "Could not verify administrator token membership.");
-                if (!isAdmin)
-                    throw new UnauthorizedAccessException("Administrator privileges are required for brokered commands.");
-            }
+            VerifyAdministratorMembership(token, adminSid);
         }
         finally { LocalFree(adminSid); }
 
         if (!requireElevationFlag) return;
+        VerifyTokenIsElevated(token);
+    }
+
+    private static void VerifyAdministratorMembership(SafeAccessTokenHandle token, IntPtr adminSid)
+    {
+        // CheckTokenMembership needs an impersonation token; WTS and linked tokens are primary tokens.
+        const uint TokenQuery = 0x0008;
+        const int SecurityImpersonation = 2;
+        const int TokenImpersonation = 2;
+        if (!DuplicateTokenEx(token, TokenQuery, IntPtr.Zero, SecurityImpersonation,
+                TokenImpersonation, out var membershipToken))
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "Could not create an administrator membership token.");
+
+        using (membershipToken)
+        {
+            if (!CheckTokenMembership(membershipToken, adminSid, out var isAdmin))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "Could not verify administrator token membership.");
+            if (isAdmin) return;
+
+            throw new UnauthorizedAccessException(
+                "Administrator privileges are required for brokered commands.");
+        }
+    }
+
+    private static void VerifyTokenIsElevated(SafeAccessTokenHandle token)
+    {
         if (!GetTokenInformation(token, TokenElevationInfoClass, out var elevated, sizeof(int), out _))
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "Could not inspect token elevation state.");
+            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                "Could not inspect token elevation state.");
         if (elevated == 0)
             throw new UnauthorizedAccessException("The selected administrator token is not elevated.");
     }

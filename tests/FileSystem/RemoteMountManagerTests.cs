@@ -14,7 +14,8 @@ public static class RemoteMountManagerTests
 {
     public static async Task RunAsync()
     {
-        var root = Path.Combine(Path.GetTempPath(), "xas-remote-mount-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(
+            Path.GetTempPath(), "xas-remote-mount-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         try
         {
@@ -25,11 +26,15 @@ public static class RemoteMountManagerTests
             const string peerId = "xas-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
             configuration.UpsertPeer(new ConfiguredPeer(peerId, "laptop", "127.0.0.1", 47821));
 
-            await using var input = new InputControlService(permissions, new UnavailableInputBackend());
+            await using var inputControl = new InputControlService(
+                permissions, new UnavailableInputBackend());
             var dispatcher = new RequestDispatcher(identity, permissions, configuration: configuration);
-            await using var sessions = new PeerSessionManager(identity, trust, permissions, input, dispatcher, configuration);
+            await using var sessions = new PeerSessionManager(
+                identity, trust, permissions, inputControl, dispatcher, configuration);
             sessions.UpdateConfiguredPeers(configuration.Peers);
-            var session = sessions.GetSession(peerId) ?? throw new InvalidOperationException("Configured peer session was not created.");
+            var session = sessions.GetSession(peerId) ??
+                throw new InvalidOperationException(
+                    "Configured peer session was not created.");
 
             await using var control = CreateIdlePeer();
             await using var bulk = CreateIdlePeer();
@@ -45,38 +50,54 @@ public static class RemoteMountManagerTests
             var adapters = new List<FakeMountAdapter>();
             var ejectCount = 0;
             var failEject = false;
-            await using var manager = new RemoteMountManager(configuration, sessions,
+
+            ValueTask<RemoteVolume[]> GetVolumesAsync(CancellationToken cancellationToken)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return ValueTask.FromResult(current.ToArray());
+            }
+
+            ValueTask EjectVolumeAsync(
+                string volumeId,
+                CancellationToken cancellationToken)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Equal("sd-1", volumeId, "Eject targeted the wrong remote volume.");
+                ejectCount++;
+                if (failEject)
+                {
+                    return ValueTask.FromException(
+                        new IOException("remote media is busy"));
+                }
+
+                current = [];
+                return ValueTask.CompletedTask;
+            }
+
+            await using var manager = new RemoteMountManager(
+                configuration, sessions,
                 adapterFactory: () =>
                 {
                     var adapter = new FakeMountAdapter($"{(char)('Z' - adapters.Count)}:");
                     adapters.Add(adapter);
                     return adapter;
                 },
-                volumeProvider: (_, ct) =>
-                {
-                    ct.ThrowIfCancellationRequested();
-                    return ValueTask.FromResult(current.ToArray());
-                },
-                ejectVolume: (_, volumeId, ct) =>
-                {
-                    ct.ThrowIfCancellationRequested();
-                    Equal("sd-1", volumeId, "Eject targeted the wrong remote volume.");
-                    ejectCount++;
-                    if (failEject) return ValueTask.FromException(new IOException("remote media is busy"));
-                    current = [];
-                    return ValueTask.CompletedTask;
-                },
+                volumeProvider: (_, token) => GetVolumesAsync(token),
+                ejectVolume: (_, volumeId, token) => EjectVolumeAsync(volumeId, token),
                 mountPointFactory: (_, _, volume) => $"mount/{volume.Id}",
                 availabilityProbe: () => true);
             var run = manager.RunAsync(CancellationToken.None);
 
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 1);
-            Assert(manager.NativeMountsAvailable, "Injected native mount availability probe was ignored.");
+            Assert(manager.NativeMountsAvailable,
+                "Injected native mount availability probe was ignored.");
             Equal(1, adapters.Count, "Initial removable volume mounted more than once.");
             Equal("mount/sd-1", adapters[0].RequestedMountPoint,
                 "Remote mount manager did not pass the platform mount point to the native adapter.");
-            Equal("Z:", manager.GetSnapshots()[0].MountPoint, "Mounted drive letter was not surfaced.");
-            Equal("CAMERA_SD", manager.GetSnapshots()[0].VolumeName, "Original remote volume name was not retained in state.");
+            Equal("Z:", manager.GetSnapshots()[0].MountPoint,
+                "Mounted drive letter was not surfaced.");
+            Equal("CAMERA_SD", manager.GetSnapshots()[0].VolumeName,
+                "Original remote volume name was not retained in state.");
 
             session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(2));
             await Task.Delay(100);
@@ -88,53 +109,76 @@ public static class RemoteMountManagerTests
             Equal(1, adapters[0].UnmountCount, "Manual unmount did not close the native mount.");
             session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(3));
             await Task.Delay(150);
-            Equal(0, manager.GetSnapshots().Count, "Manual unmount was immediately undone by automatic remounting.");
+            Equal(0, manager.GetSnapshots().Count,
+                "Manual unmount was immediately undone by automatic remounting.");
             Equal(1, adapters.Count, "Suppressed volume unexpectedly created another mount adapter.");
 
-            var manuallyMounted = await manager.MountVolumeAsync(peerId, "CAMERA_SD", CancellationToken.None);
-            Equal("Y:", manuallyMounted.MountPoint, "Manual mount did not create the expected native mount.");
+            var manuallyMounted = await manager.MountVolumeAsync(
+                peerId, "CAMERA_SD", CancellationToken.None);
+            Equal("Y:", manuallyMounted.MountPoint,
+                "Manual mount did not create the expected native mount.");
             Equal(2, adapters.Count, "Manual mount did not create exactly one new mount adapter.");
 
             await manager.EjectVolumeAsync(peerId, "CAMERA_SD", CancellationToken.None);
             Equal(1, ejectCount, "Remote eject callback was not invoked.");
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
-            Equal(1, adapters[1].UnmountCount, "Successful remote eject did not first remove the local native mount.");
+            Equal(1, adapters[1].UnmountCount,
+                "Successful remote eject did not first remove the local native mount.");
 
             // Let the post-eject reconciliation observe that the remote volume is genuinely gone;
             // this clears suppression so a later physical reinsertion of the same volume ID can auto-mount.
             session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(3.5));
             await Task.Delay(150);
 
-            current = [new RemoteVolume("sd-1", "CAMERA_SD", "removable", false, 64_000_000, 31_000_000, "exfat")];
+            current =
+            [
+                new RemoteVolume(
+                    "sd-1", "CAMERA_SD", "removable", false,
+                    64_000_000, 31_000_000, "exfat")
+            ];
             session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(4));
-            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1 && adapters.Count == 3);
+            await WaitUntilAsync(
+                () => manager.GetSnapshots().Count == 1 && adapters.Count == 3);
 
             failEject = true;
             try
             {
                 await manager.EjectVolumeAsync(peerId, "CAMERA_SD", CancellationToken.None);
-                throw new InvalidOperationException("Failed remote eject unexpectedly succeeded.");
+                throw new InvalidOperationException(
+                    "Failed remote eject unexpectedly succeeded.");
             }
-            catch (IOException ex) when (ex.Message.Contains("busy", StringComparison.OrdinalIgnoreCase)) { }
-            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1 && adapters.Count == 4);
-            Equal(1, adapters[2].UnmountCount, "Failed eject did not remove the original local mount first.");
+            catch (IOException ex) when (
+                ex.Message.Contains("busy", StringComparison.OrdinalIgnoreCase))
+            {
+            }
+            await WaitUntilAsync(
+                () => manager.GetSnapshots().Count == 1 && adapters.Count == 4);
+            Equal(1, adapters[2].UnmountCount,
+                "Failed eject did not remove the original local mount first.");
             Equal("W:", manager.GetSnapshots()[0].MountPoint,
                 "Failed remote eject did not clear suppression and restore the still-present remote volume.");
             failEject = false;
 
             configuration.SetAutoMountRemoteRemovable(false);
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
-            Equal(1, adapters[3].UnmountCount, "Disabling automatic remote mounts left the drive mounted.");
+            Equal(1, adapters[3].UnmountCount,
+                "Disabling automatic remote mounts left the drive mounted.");
 
             configuration.SetAutoMountRemoteRemovable(true);
-            await WaitUntilAsync(() => manager.GetSnapshots().Count == 1 && adapters.Count == 5);
+            await WaitUntilAsync(
+                () => manager.GetSnapshots().Count == 1 && adapters.Count == 5);
 
             current =
             [
-                new RemoteVolume("sd-1", "CAMERA_SD", "removable", false, 64_000_000, 31_000_000, "exfat"),
-                new RemoteVolume("export-projects", "PROJECTS", "export", false, 128_000_000, 96_000_000, "ext4")
+                new RemoteVolume(
+                    "sd-1", "CAMERA_SD", "removable", false,
+                    64_000_000, 31_000_000, "exfat"),
+                new RemoteVolume(
+                    "export-projects", "PROJECTS", "export", false,
+                    128_000_000, 96_000_000, "ext4")
             ];
-            var exportMount = await manager.MountVolumeAsync(peerId, "PROJECTS", CancellationToken.None);
+            var exportMount = await manager.MountVolumeAsync(
+                peerId, "PROJECTS", CancellationToken.None);
             Equal("export", exportMount.Kind, "Manual export mount lost its remote volume kind.");
             Equal(6, adapters.Count, "Manual export mount did not create exactly one native mount.");
 
@@ -146,26 +190,32 @@ public static class RemoteMountManagerTests
                 "Disabling automatic removable mounts did not remove the automatic removable mount.");
 
             configuration.SetAutoMountRemoteRemovable(true);
-            await WaitUntilAsync(() => manager.GetSnapshots().Count == 2 && adapters.Count == 7);
+            await WaitUntilAsync(
+                () => manager.GetSnapshots().Count == 2 && adapters.Count == 7);
             Assert(manager.GetSnapshots().Any(m => m.VolumeId == "export-projects"),
                 "Re-enabling automatic mounts removed the explicit export mount.");
 
             session.Detach(PeerLane.Bulk, bulk);
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
             Equal(1, adapters[5].UnmountCount, "Disconnect did not close the explicit export mount.");
-            Assert(await session.AttachAsync(PeerLane.Bulk, bulk), "Could not restore the test bulk lane.");
-            await WaitUntilAsync(() => manager.GetSnapshots().Count == 2 && adapters.Count == 9);
+            Assert(await session.AttachAsync(PeerLane.Bulk, bulk),
+                "Could not restore the test bulk lane.");
+            await WaitUntilAsync(
+                () => manager.GetSnapshots().Count == 2 && adapters.Count == 9);
             Assert(manager.GetSnapshots().Any(m => m.VolumeId == "export-projects"),
                 "Reconnect did not restore the explicit export mount.");
 
             current = [current[0]];
             session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(5));
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 1);
-            Equal(1, adapters[7].UnmountCount, "Removing the remote export did not clear its manual mount.");
+            Equal(1, adapters[7].UnmountCount,
+                "Removing the remote export did not clear its manual mount.");
             current =
             [
                 current[0],
-                new RemoteVolume("export-projects", "PROJECTS", "export", false, 128_000_000, 96_000_000, "ext4")
+                new RemoteVolume(
+                    "export-projects", "PROJECTS", "export", false,
+                    128_000_000, 96_000_000, "ext4")
             ];
             session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(6));
             await Task.Delay(150);
@@ -176,7 +226,9 @@ public static class RemoteMountManagerTests
             Assert(await manager.UnmountVolumeAsync(peerId, "PROJECTS", CancellationToken.None),
                 "Manual export unmount did not report an existing native mount.");
 
-            var main = new RemoteVolume("main-root", "root", "fixed", false, 128_000_000, 96_000_000, "ext4");
+            var main = new RemoteVolume(
+                "main-root", "root", "fixed", false,
+                128_000_000, 96_000_000, "ext4");
             current = [current[0], main];
             session.UpdateMetadata(roundTripTime: TimeSpan.FromMilliseconds(7));
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 2);
@@ -204,7 +256,8 @@ public static class RemoteMountManagerTests
 
             session.Detach(PeerLane.Bulk, bulk);
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 0);
-            Assert(await session.AttachAsync(PeerLane.Bulk, bulk), "Could not restore the bulk lane for main-drive reconnect.");
+            Assert(await session.AttachAsync(PeerLane.Bulk, bulk),
+                "Could not restore the bulk lane for main-drive reconnect.");
             await WaitUntilAsync(() => manager.GetSnapshots().Count == 2);
             Assert(manager.GetSnapshots().Any(m => m.VolumeId == main.Id),
                 "Reconnect did not restore the explicit main-drive mount.");

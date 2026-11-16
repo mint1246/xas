@@ -117,16 +117,7 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
             monitorId = created.MonitorId;
             _ownedMonitorDeviceName = created.DeviceName;
             _ownedMonitorHardwareId = created.MonitorHardwareId;
-            if (_preferredPosition is { } position)
-            {
-                if (WindowsMonitorTopology.TryMove(created.DeviceName, position.Left, position.Top))
-                {
-                    log?.Invoke($"Restored virtual display position to ({position.Left},{position.Top}).");
-                    await WaitForPositionAsync(created.DeviceName, position.Left, position.Top, cancellationToken)
-                        .ConfigureAwait(false);
-                }
-                else log?.Invoke($"Could not restore virtual display position to ({position.Left},{position.Top}).");
-            }
+            await RestorePreferredPositionAsync(created, cancellationToken).ConfigureAwait(false);
             Remember(created);
             log?.Invoke($"Virtual display {created.DeviceName} active at " +
                 $"{modeWidth}x{modeHeight}@{refreshHertz}.");
@@ -173,6 +164,22 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
             WriteRecords([.. kept, .. records.Where(r => removed.Contains(MonitorKey(r.DeviceName, r.HardwareId)))]);
             throw;
         }
+    }
+
+    private async Task RestorePreferredPositionAsync(
+        VirtualDisplayAttachment attachment, CancellationToken cancellationToken)
+    {
+        if (_preferredPosition is not { } position) return;
+        if (!WindowsMonitorTopology.TryMove(attachment.DeviceName, position.Left, position.Top))
+        {
+            log?.Invoke(
+                $"Could not restore virtual display position to ({position.Left},{position.Top}).");
+            return;
+        }
+
+        log?.Invoke($"Restored virtual display position to ({position.Left},{position.Top}).");
+        await WaitForPositionAsync(
+            attachment.DeviceName, position.Left, position.Top, cancellationToken).ConfigureAwait(false);
     }
 
     private static List<AttachmentRecord> ReadRecords()
@@ -259,28 +266,36 @@ public sealed class SudoVdaDisplayController(Action<string>? log = null) : IVirt
             _watchdog = null;
         }
         if (_device is { } device && _ownedMonitorId is { } monitorId)
-        {
-            var removeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
-            try
-            {
-                SudoVdaDriver.Remove(device, monitorId);
-                log?.Invoke($"Removed SudoVDA monitor {monitorId} in " +
-                    $"{System.Diagnostics.Stopwatch.GetElapsedTime(removeStarted).TotalMilliseconds:F0} ms.");
-                if (_ownedMonitorDeviceName is { } deviceName)
-                {
-                    var departing = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-                    {
-                        MonitorKey(deviceName, _ownedMonitorHardwareId)
-                    };
-                    await WaitForRemovalAsync(departing, CancellationToken.None).ConfigureAwait(false);
-                }
-                Forget(monitorId);
-            }
-            catch (Win32Exception ex) { log?.Invoke($"Virtual display removal failed: {ex.Message}"); }
-        }
+            await RemoveOwnedMonitorAsync(device, monitorId).ConfigureAwait(false);
+
         _ownedMonitorId = null;
         _ownedMonitorDeviceName = null;
         _ownedMonitorHardwareId = null;
+    }
+
+    private async Task RemoveOwnedMonitorAsync(SafeFileHandle device, Guid monitorId)
+    {
+        var removeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            SudoVdaDriver.Remove(device, monitorId);
+            log?.Invoke($"Removed SudoVDA monitor {monitorId} in " +
+                $"{System.Diagnostics.Stopwatch.GetElapsedTime(removeStarted).TotalMilliseconds:F0} ms.");
+            if (_ownedMonitorDeviceName is { } deviceName)
+            {
+                var departing = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    MonitorKey(deviceName, _ownedMonitorHardwareId)
+                };
+                await WaitForRemovalAsync(departing, CancellationToken.None).ConfigureAwait(false);
+            }
+
+            Forget(monitorId);
+        }
+        catch (Win32Exception ex)
+        {
+            log?.Invoke($"Virtual display removal failed: {ex.Message}");
+        }
     }
 
     private void StartKeepAlive()

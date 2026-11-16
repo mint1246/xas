@@ -40,7 +40,8 @@ public static class PairingTests
 
             var leftApproval = left.ApproveAsync(outgoing.PairingId, true);
             var rightApproval = right.ApproveAsync(incoming.PairingId, true);
-            var results = await Task.WhenAll(leftApproval, rightApproval).WaitAsync(TimeSpan.FromSeconds(10));
+            var approvals = Task.WhenAll(leftApproval, rightApproval);
+            var results = await approvals.WaitAsync(TimeSpan.FromSeconds(10));
             Assert(results.All(v => v), "Mutual pairing approval did not report success to both devices.");
             Assert(leftTrust.List().Any(p => p.DeviceId == rightIdentity.DeviceId), "Left device did not pin right identity.");
             Assert(rightTrust.List().Any(p => p.DeviceId == leftIdentity.DeviceId), "Right device did not pin left identity.");

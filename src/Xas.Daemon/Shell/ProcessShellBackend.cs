@@ -18,29 +18,8 @@ public sealed class ProcessShellBackend : IShellBackend
 
         if (request.Elevated)
         {
-            if (!OperatingSystem.IsLinux())
-                throw new NotSupportedException("Elevated shell execution is supported only on Linux, where sudo can authenticate through a PTY.");
-            await using var pty = await new LinuxPtyBackend().StartCommandAsync(request, cancellationToken).ConfigureAwait(false);
-            using var inputStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var ptyInputTask = CopyPtyInputAsync(stdin, pty, inputStop.Token);
-            var outputTask = pty.Output.CopyToAsync(stdout, cancellationToken);
-            try
-            {
-                var exitCode = await pty.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-                inputStop.Cancel();
-                try { await ptyInputTask.ConfigureAwait(false); }
-                catch (OperationCanceledException) when (inputStop.IsCancellationRequested) { }
-                await outputTask.ConfigureAwait(false);
-                return exitCode;
-            }
-            catch
-            {
-                inputStop.Cancel();
-                try { await ptyInputTask.ConfigureAwait(false); } catch (Exception) { }
-                try { await outputTask.ConfigureAwait(false); } catch (Exception) { }
-                throw;
-            }
-            finally { inputStop.Cancel(); }
+            return await RunElevatedAsync(request, stdin, stdout, cancellationToken)
+                .ConfigureAwait(false);
         }
 
         var startInfo = CreateStartInfo(request);
@@ -66,8 +45,12 @@ public sealed class ProcessShellBackend : IShellBackend
             catch (System.ComponentModel.Win32Exception) { }
         }, process);
 
-        using var inputCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var inputTask = CopyInputAndCloseAsync(stdin, process.StandardInput.BaseStream, inputCancellation.Token);
+        using var inputForwardingCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var inputTask = CopyInputAndCloseAsync(
+            stdin,
+            process.StandardInput.BaseStream,
+            inputForwardingCancellation.Token);
         var stdoutTask = process.StandardOutput.BaseStream.CopyToAsync(stdout);
         var stderrTask = process.StandardError.BaseStream.CopyToAsync(stderr);
 
@@ -75,11 +58,75 @@ public sealed class ProcessShellBackend : IShellBackend
         // The caller's input stream may remain open after a one-shot child exits (for
         // example, the streaming RPC channel). Stop only input forwarding here; stdout
         // and stderr still need to drain to preserve all output produced by the child.
-        inputCancellation.Cancel();
+        inputForwardingCancellation.Cancel();
         await inputTask.ConfigureAwait(false);
         await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         return process.ExitCode;
+    }
+
+    private static async Task<int> RunElevatedAsync(
+        ShellRequest request,
+        Stream stdin,
+        Stream stdout,
+        CancellationToken cancellationToken)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            throw new NotSupportedException(
+                "Elevated shell execution is supported only on Linux, where sudo can authenticate through a PTY.");
+        }
+
+        await using var pty = await new LinuxPtyBackend()
+            .StartCommandAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+        using var inputForwardingCancellation =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var ptyInputTask = CopyPtyInputAsync(
+            stdin,
+            pty,
+            inputForwardingCancellation.Token);
+        var outputTask = pty.Output.CopyToAsync(stdout, cancellationToken);
+        try
+        {
+            var exitCode = await pty.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+            inputForwardingCancellation.Cancel();
+            try
+            {
+                await ptyInputTask.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (inputForwardingCancellation.IsCancellationRequested)
+            {
+            }
+
+            await outputTask.ConfigureAwait(false);
+            return exitCode;
+        }
+        catch
+        {
+            inputForwardingCancellation.Cancel();
+            try
+            {
+                await ptyInputTask.ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+            }
+
+            try
+            {
+                await outputTask.ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+            }
+
+            throw;
+        }
+        finally
+        {
+            inputForwardingCancellation.Cancel();
+        }
     }
 
     private static ProcessStartInfo CreateStartInfo(ShellRequest request)
@@ -95,37 +142,61 @@ public sealed class ProcessShellBackend : IShellBackend
         switch (request.Mode)
         {
             case ShellMode.Interactive:
-                throw new NotSupportedException("Interactive shell sessions require a PTY or ConPTY backend.");
+                throw new NotSupportedException(
+                    "Interactive shell sessions require a PTY or ConPTY backend.");
             case ShellMode.Command:
-                if (string.IsNullOrWhiteSpace(request.Command))
-                    throw new ArgumentException("A command string is required for Command mode.", nameof(request));
-                if (OperatingSystem.IsWindows())
-                {
-                    info.FileName = Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe";
-                    info.ArgumentList.Add("/d");
-                    info.ArgumentList.Add("/s");
-                    info.ArgumentList.Add("/c");
-                    info.ArgumentList.Add(request.Command);
-                }
-                else
-                {
-                    info.FileName = "/bin/sh";
-                    info.ArgumentList.Add("-c");
-                    info.ArgumentList.Add(request.Command);
-                }
+                ConfigureCommandStartInfo(info, request);
                 break;
             case ShellMode.Exec:
-                if (string.IsNullOrWhiteSpace(request.Executable))
-                    throw new ArgumentException("An executable is required for Exec mode.", nameof(request));
-                info.FileName = request.Executable;
-                foreach (var argument in request.Arguments ?? Array.Empty<string>())
-                    info.ArgumentList.Add(argument);
+                ConfigureExecutableStartInfo(info, request);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(request), "Unknown shell mode.");
         }
 
         return info;
+    }
+
+    private static void ConfigureCommandStartInfo(ProcessStartInfo startInfo, ShellRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Command))
+        {
+            throw new ArgumentException(
+                "A command string is required for Command mode.",
+                nameof(request));
+        }
+
+        if (OperatingSystem.IsWindows())
+        {
+            startInfo.FileName = Environment.GetEnvironmentVariable("COMSPEC") ?? "cmd.exe";
+            startInfo.ArgumentList.Add("/d");
+            startInfo.ArgumentList.Add("/s");
+            startInfo.ArgumentList.Add("/c");
+            startInfo.ArgumentList.Add(request.Command);
+            return;
+        }
+
+        startInfo.FileName = "/bin/sh";
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add(request.Command);
+    }
+
+    private static void ConfigureExecutableStartInfo(
+        ProcessStartInfo startInfo,
+        ShellRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.Executable))
+        {
+            throw new ArgumentException(
+                "An executable is required for Exec mode.",
+                nameof(request));
+        }
+
+        startInfo.FileName = request.Executable;
+        foreach (var argument in request.Arguments ?? Array.Empty<string>())
+        {
+            startInfo.ArgumentList.Add(argument);
+        }
     }
 
     private static async Task CopyInputAndCloseAsync(Stream source, Stream destination,
