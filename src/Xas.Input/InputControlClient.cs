@@ -73,16 +73,8 @@ public static class InputControlClient
         var sent = 0;
         try
         {
-            if (region is { } bounds && display is not null)
-            {
-                if (!WindowsMonitorTopology.TryGetPointer(out var x, out var y) || !bounds.Contains(x, y))
-                    throw new InvalidOperationException("Pointer left the virtual monitor during remote setup.");
-                var (targetX, targetY) = bounds.MapToRemote(x, y,
-                    display.WidthPixels, display.HeightPixels);
-                await SendWithTimeoutAsync(peer, sessionId,
-                    [new CapturedInput(new InputEvent(InputEventKind.MoveAbsolute, X: targetX, Y: targetY), 0, 0)],
-                    setup.Token).ConfigureAwait(false);
-            }
+            await SendInitialPointerAsync(peer, sessionId, region, display, setup.Token)
+                .ConfigureAwait(false);
             if (region is null) Console.Error.WriteLine("Remote input is active. Press Ctrl+Alt+Esc to return control locally.");
             await using var capture = await WindowsInputCapture.StartAsync(cancellationToken, region,
                 display?.WidthPixels ?? 0, display?.HeightPixels ?? 0, metrics).ConfigureAwait(false);
@@ -101,13 +93,9 @@ public static class InputControlClient
             if (first == peer.Completion) throw new IOException("The remote input connection closed.");
             // Name the task that ended the session: the boundary watcher, the event pump, and the heartbeat
             // all race here, and which one wins is the whole diagnosis when a session will not stay open.
-            trace?.Invoke($"input session ended by {Name(first)} after {sent} event(s)");
-
-            string Name(Task task) => ReferenceEquals(task, capture.Completion) ? "capture"
-                : ReferenceEquals(task, sendTask) ? "event-pump"
-                : ReferenceEquals(task, heartbeatTask) ? "heartbeat"
-                : ReferenceEquals(task, boundaryTask) ? "boundary-watch"
-                : ReferenceEquals(task, peer.Completion) ? "peer" : "cancelled";
+            trace?.Invoke($"input session ended by {NameSessionEndingTask(
+                first, capture.Completion, sendTask, heartbeatTask, boundaryTask, peer.Completion)} " +
+                $"after {sent} event(s)");
             if (first == sendTask) await sendTask.ConfigureAwait(false);
             if (first == heartbeatTask) await heartbeatTask.ConfigureAwait(false);
             await capture.Completion.ConfigureAwait(false);
@@ -126,6 +114,32 @@ public static class InputControlClient
             }
             catch (Exception) { /* Closing the connection also releases the server lease. */ }
         }
+    }
+
+    private static async Task SendInitialPointerAsync(
+        MultiplexedProtocolPeer peer, uint sessionId, WindowsCaptureRegion? region,
+        DisplayMetadata? display, CancellationToken cancellationToken)
+    {
+        if (region is not { } bounds || display is null) return;
+        if (!WindowsMonitorTopology.TryGetPointer(out var x, out var y) || !bounds.Contains(x, y))
+            throw new InvalidOperationException("Pointer left the virtual monitor during remote setup.");
+
+        var (targetX, targetY) = bounds.MapToRemote(x, y,
+            display.WidthPixels, display.HeightPixels);
+        var initialMove = new CapturedInput(
+            new InputEvent(InputEventKind.MoveAbsolute, X: targetX, Y: targetY), 0, 0);
+        await SendWithTimeoutAsync(peer, sessionId, [initialMove], cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static string NameSessionEndingTask(
+        Task completed, Task capture, Task send, Task heartbeat, Task boundary, Task peer)
+    {
+        if (ReferenceEquals(completed, capture)) return "capture";
+        if (ReferenceEquals(completed, send)) return "event-pump";
+        if (ReferenceEquals(completed, heartbeat)) return "heartbeat";
+        if (ReferenceEquals(completed, boundary)) return "boundary-watch";
+        return ReferenceEquals(completed, peer) ? "peer" : "cancelled";
     }
 
     private static void EnsureWindowsCaptureAvailable()

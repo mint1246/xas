@@ -1,5 +1,4 @@
 using System.Buffers.Binary;
-using System.Collections.Concurrent;
 using System.Text.Json;
 using Xas.Core;
 using Xas.Core.Configuration;
@@ -64,8 +63,7 @@ public static class InteractiveShellClient
         var exitCompletion = new TaskCompletionSource<int>(
             TaskCreationOptions.RunContinuationsAsynchronously);
         uint sessionId = 0;
-        var earlyMessages = new ConcurrentQueue<ProtocolMessage>();
-        var earlyBytes = 0;
+        var earlyMessages = new EarlyShellMessages();
         using var sessionGate = new SemaphoreSlim(1, 1);
         peer.MessageReceived += async message =>
         {
@@ -73,17 +71,8 @@ public static class InteractiveShellClient
             await sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
             try
             {
-                if (sessionId == 0)
-                {
-                    earlyBytes = checked(earlyBytes + message.Payload.Length);
-                    if (earlyBytes > 1024 * 1024)
-                        throw new InvalidDataException(
-                            "Too much shell output arrived before the open response.");
-                    earlyMessages.Enqueue(message);
-                    return;
-                }
-                await HandleShellMessageAsync(
-                    message, sessionId, output, exitCompletion, cancellationToken)
+                await RouteShellMessageAsync(
+                    message, sessionId, earlyMessages, output, exitCompletion, cancellationToken)
                     .ConfigureAwait(false);
             }
             finally { sessionGate.Release(); }
@@ -190,6 +179,41 @@ public static class InteractiveShellClient
         return await exitTask.ConfigureAwait(false);
     }
 
+    private static async Task RouteShellMessageAsync(
+        ProtocolMessage message,
+        uint sessionId,
+        EarlyShellMessages earlyMessages,
+        Stream output,
+        TaskCompletionSource<int> exitCompletion,
+        CancellationToken cancellationToken)
+    {
+        if (sessionId == 0)
+        {
+            earlyMessages.Enqueue(message);
+            return;
+        }
+        await HandleShellMessageAsync(
+            message, sessionId, output, exitCompletion, cancellationToken).ConfigureAwait(false);
+    }
+
+    private sealed class EarlyShellMessages
+    {
+        private const int MaxBufferedBytes = 1024 * 1024;
+        private readonly Queue<ProtocolMessage> _messages = new();
+        private int _bufferedBytes;
+
+        public void Enqueue(ProtocolMessage message)
+        {
+            _bufferedBytes = checked(_bufferedBytes + message.Payload.Length);
+            if (_bufferedBytes > MaxBufferedBytes)
+                throw new InvalidDataException(
+                    "Too much shell output arrived before the open response.");
+            _messages.Enqueue(message);
+        }
+
+        public bool TryDequeue(out ProtocolMessage message) => _messages.TryDequeue(out message!);
+    }
+
     private static async Task PumpResizeAsync(MultiplexedProtocolPeer peer, uint sessionId,
         ushort originalColumns, ushort originalRows, Func<(ushort Columns, ushort Rows)> currentSize,
         CancellationToken cancellationToken)
@@ -242,14 +266,19 @@ public static class InteractiveShellClient
                 await output.FlushAsync(cancellationToken).ConfigureAwait(false);
                 break;
             case MessageKind.Event when message.Method == "shell.exit":
-                if (message.Payload.Length != sizeof(int))
-                    throw new InvalidDataException("Invalid shell exit payload.");
-                exit.TrySetResult(BinaryPrimitives.ReadInt32BigEndian(message.Payload));
+                exit.TrySetResult(ReadShellExitCode(message.Payload));
                 break;
             default:
                 throw new InvalidDataException(
                     $"Unexpected interactive shell message '{message.Method}'.");
         }
+    }
+
+    private static int ReadShellExitCode(byte[] payload)
+    {
+        if (payload.Length != sizeof(int))
+            throw new InvalidDataException("Invalid shell exit payload.");
+        return BinaryPrimitives.ReadInt32BigEndian(payload);
     }
 
     private static byte[] EncodeSessionId(uint id)

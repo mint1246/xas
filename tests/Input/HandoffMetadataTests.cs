@@ -56,14 +56,15 @@ public static class HandoffMetadataTests
     {
         using var stop = new CancellationTokenSource();
         var peer = new MutableFakePeer(Initial);
-        var controller = new FakeController();
-        var routerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var controller = new DisplayRecorder();
+        var routerStarted = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         var routerStarts = 0;
         var run = WindowsMonitorHandoff.RunCoreAsync(peer, controller,
             (_, _, token, _) =>
             {
                 Interlocked.Increment(ref routerStarts);
-                routerStarted.TrySetResult();
+                routerStarted.TrySetResult(true);
                 return Task.Delay(Timeout.Infinite, token);
             }, _ => new WindowsMonitor(
                 Attachment.DeviceName, "Test virtual monitor", Attachment.MonitorHardwareId,
@@ -78,17 +79,27 @@ public static class HandoffMetadataTests
             foreach (var update in updates)
             {
                 var previous = routerStarted;
-                routerStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                routerStarted = new TaskCompletionSource<bool>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
                 peer.SetDisplay(update);
                 expectedRouterStarts++;
                 await routerStarted.Task.WaitAsync(TimeSpan.FromSeconds(2));
-                if (previous.Task.IsFaulted) throw new InvalidOperationException("A prior router start failed.");
+                if (previous.Task.IsFaulted)
+                {
+                    throw new InvalidOperationException("A prior router start failed.");
+                }
             }
 
             if (routerStarts != expectedRouterStarts)
-                throw new InvalidOperationException($"Expected {expectedRouterStarts} router bindings, got {routerStarts}.");
+            {
+                throw new InvalidOperationException(
+                    $"Expected {expectedRouterStarts} router bindings, got {routerStarts}.");
+            }
             if (controller.AttachCalls != expectedAttachCalls)
-                throw new InvalidOperationException($"Expected {expectedAttachCalls} monitor attachments, got {controller.AttachCalls}.");
+            {
+                throw new InvalidOperationException(
+                    $"Expected {expectedAttachCalls} monitor attachments, got {controller.AttachCalls}.");
+            }
         }
         finally
         {
@@ -97,11 +108,12 @@ public static class HandoffMetadataTests
         }
     }
 
-    private sealed class FakeController : IVirtualDisplayController
+    private sealed class DisplayRecorder : IVirtualDisplayController
     {
         public bool IsAvailable => true;
         public int AttachCalls { get; private set; }
-        public ValueTask<VirtualDisplayAttachment> AttachAsync(DisplayMetadata display, CancellationToken token)
+        public ValueTask<VirtualDisplayAttachment> AttachAsync(
+            DisplayMetadata display, CancellationToken token)
         {
             AttachCalls++;
             return ValueTask.FromResult(Attachment);

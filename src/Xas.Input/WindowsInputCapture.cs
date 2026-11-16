@@ -152,55 +152,12 @@ public sealed class WindowsInputCapture : IAsyncDisposable
         try
         {
             if (_stop.IsCancellationRequested) return;
-            var instance = GetModuleHandle(null);
-            var klass = new WndClass { WindowProc = WindowCallback, ClassName = "XasInputCaptureMessageWindow", Instance = instance };
-            RegisterClass(ref klass);
-            // This invisible top-level window receives Windows display/device broadcasts, which lets the
-            // handoff refresh an owned monitor after a hotplug without polling the topology.
-            _window = CreateWindowEx(0, klass.ClassName, string.Empty, 0, 0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
-            if (_window == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            if (_region is null)
-            {
-                var devices = new[]
-                {
-                    new RawInputDevice { UsagePage = RidevPage, Usage = RidevUsageMouse, Flags = RidevInputSink, Target = _window },
-                    new RawInputDevice { UsagePage = RidevPage, Usage = RidevUsageKeyboard, Flags = RidevInputSink, Target = _window }
-                };
-                if (!RegisterRawInputDevices(devices, (uint)devices.Length, (uint)Marshal.SizeOf<RawInputDevice>()))
-                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            }
-            _keyboardProc = KeyboardHook;
-            _mouseProc = MouseHook;
-            _keyboardHook = SetWindowsHookEx(WhKeyboardLl, _keyboardProc, instance, 0);
-            _mouseHook = SetWindowsHookEx(WhMouseLl, _mouseProc, instance, 0);
-            if (_keyboardHook == IntPtr.Zero || _mouseHook == IntPtr.Zero)
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-            if (_region is null)
-            {
-                if (!GetClipCursor(out _previousClip) || !GetCursorPos(out var pointer))
-                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-                var onePixel = new Rect
-                {
-                    Left = pointer.X,
-                    Top = pointer.Y,
-                    Right = checked(pointer.X + 1),
-                    Bottom = checked(pointer.Y + 1)
-                };
-                if (!ClipCursor(ref onePixel)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-                _cursorClipped = true;
-            }
-            else if (!_hotMode)
-            {
-                if (!GetCursorPos(out var pointer) || !_region.Value.Contains(pointer.X, pointer.Y))
-                    throw new InvalidOperationException("Pointer left the virtual monitor before input capture started.");
-            }
+            InitializeCaptureWindow();
+            RegisterRawInputDevicesIfNeeded();
+            InstallHooks();
+            ConfigureCursorConfinement();
             _started.TrySetResult();
-            while (GetMessage(out var message, IntPtr.Zero, 0, 0) > 0)
-            {
-                if (message.Id == WmAppStop) break;
-                TranslateMessage(ref message);
-                DispatchMessage(ref message);
-            }
+            PumpMessages();
         }
         catch (Exception ex) { _failure = ex; _started.TrySetException(ex); }
         finally
@@ -216,20 +173,123 @@ public sealed class WindowsInputCapture : IAsyncDisposable
         }
     }
 
+    private void InitializeCaptureWindow()
+    {
+        var instance = GetModuleHandle(null);
+        var windowClass = new WndClass
+        {
+            WindowProc = WindowCallback,
+            ClassName = "XasInputCaptureMessageWindow",
+            Instance = instance
+        };
+        RegisterClass(ref windowClass);
+
+        // This window receives display/device broadcasts for monitor hotplug changes.
+        _window = CreateWindowEx(0, windowClass.ClassName, string.Empty, 0,
+            0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, instance, IntPtr.Zero);
+        if (_window == IntPtr.Zero)
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    private void RegisterRawInputDevicesIfNeeded()
+    {
+        if (_region is not null) return;
+
+        var devices = new[]
+        {
+            new RawInputDevice
+            {
+                UsagePage = RidevPage,
+                Usage = RidevUsageMouse,
+                Flags = RidevInputSink,
+                Target = _window
+            },
+            new RawInputDevice
+            {
+                UsagePage = RidevPage,
+                Usage = RidevUsageKeyboard,
+                Flags = RidevInputSink,
+                Target = _window
+            }
+        };
+        if (!RegisterRawInputDevices(devices, (uint)devices.Length,
+                (uint)Marshal.SizeOf<RawInputDevice>()))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    private void InstallHooks()
+    {
+        _keyboardProc = KeyboardHook;
+        _mouseProc = MouseHook;
+        var instance = GetModuleHandle(null);
+        _keyboardHook = SetWindowsHookEx(WhKeyboardLl, _keyboardProc, instance, 0);
+        _mouseHook = SetWindowsHookEx(WhMouseLl, _mouseProc, instance, 0);
+        if (_keyboardHook == IntPtr.Zero || _mouseHook == IntPtr.Zero)
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    }
+
+    private void ConfigureCursorConfinement()
+    {
+        if (_region is null)
+        {
+            ClipCursorToCurrentPointer();
+            return;
+        }
+
+        if (_hotMode) return;
+        if (!GetCursorPos(out var pointer) || !_region.Value.Contains(pointer.X, pointer.Y))
+            throw new InvalidOperationException(
+                "Pointer left the virtual monitor before input capture started.");
+    }
+
+    private void ClipCursorToCurrentPointer()
+    {
+        if (!GetClipCursor(out _previousClip) || !GetCursorPos(out var pointer))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+
+        var onePixel = new Rect
+        {
+            Left = pointer.X,
+            Top = pointer.Y,
+            Right = checked(pointer.X + 1),
+            Bottom = checked(pointer.Y + 1)
+        };
+        if (!ClipCursor(ref onePixel))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        _cursorClipped = true;
+    }
+
+    private static void PumpMessages()
+    {
+        while (GetMessage(out var message, IntPtr.Zero, 0, 0) > 0)
+        {
+            if (message.Id == WmAppStop) break;
+            TranslateMessage(ref message);
+            DispatchMessage(ref message);
+        }
+    }
+
     private IntPtr OnKeyboard(int code, IntPtr wParam, IntPtr lParam)
     {
-        if (code < 0 || _stop.IsCancellationRequested) return CallNextHookEx(_keyboardHook, code, wParam, lParam);
+        if (code < 0 || _stop.IsCancellationRequested) return NextKeyboardHook(code, wParam, lParam);
         if (Interlocked.Exchange(ref _resetHeldKeys, 0) != 0) _heldKeys.Clear();
-        if (_hotMode && !IsRoutingRemote) return CallNextHookEx(_keyboardHook, code, wParam, lParam);
-        if (!_hotMode && _region is { } region && GetCursorPos(out var pointer) && !region.Contains(pointer.X, pointer.Y))
-        { Stop(); return CallNextHookEx(_keyboardHook, code, wParam, lParam); }
+        if (_hotMode && !IsRoutingRemote) return NextKeyboardHook(code, wParam, lParam);
+        if (PointerLeftCapturedRegion())
+        {
+            Stop();
+            return NextKeyboardHook(code, wParam, lParam);
+        }
         var data = Marshal.PtrToStructure<KeyboardData>(lParam);
-        if ((data.Flags & 0x10) != 0) return CallNextHookEx(_keyboardHook, code, wParam, lParam);
+        if ((data.Flags & 0x10) != 0) return NextKeyboardHook(code, wParam, lParam);
         var down = wParam.ToInt64() is WmKeyDown or WmSysKeyDown;
         var up = wParam.ToInt64() is WmKeyUp or WmSysKeyUp;
-        if (!down && !up) return CallNextHookEx(_keyboardHook, code, wParam, lParam);
+        if (!down && !up) return NextKeyboardHook(code, wParam, lParam);
         var usage = ScanToHid((ushort)data.ScanCode, (data.Flags & 1) != 0);
-        if (usage == 0) { Stop(); return CallNextHookEx(_keyboardHook, code, wParam, lParam); }
+        if (usage == 0)
+        {
+            Stop();
+            return NextKeyboardHook(code, wParam, lParam);
+        }
         var wasDown = _heldKeys.Contains(usage);
         if (down) _heldKeys.Add(usage); else _heldKeys.Remove(usage);
         if (down && usage == 0x29 && HasCtrl() && HasAlt())
@@ -242,61 +302,103 @@ public sealed class WindowsInputCapture : IAsyncDisposable
                 SetRoutingEnabled(false);
             }
             else Stop();
-            return CallNextHookEx(_keyboardHook, code, wParam, lParam);
+            return NextKeyboardHook(code, wParam, lParam);
         }
         var repeat = down && wasDown;
-        if (!Publish(new InputEvent(InputEventKind.Key, usage, down, repeat))) return new IntPtr(1);
+        Publish(new InputEvent(InputEventKind.Key, usage, down, repeat));
         return new IntPtr(1); // Suppress local keys while capture is active.
     }
+
+    private bool PointerLeftCapturedRegion() =>
+        !_hotMode && _region is { } region &&
+        GetCursorPos(out var pointer) && !region.Contains(pointer.X, pointer.Y);
+
+    private IntPtr NextKeyboardHook(int code, IntPtr wParam, IntPtr lParam) =>
+        CallNextHookEx(_keyboardHook, code, wParam, lParam);
 
     private bool HasCtrl() => _heldKeys.Contains(0xE0) || _heldKeys.Contains(0xE4);
     private bool HasAlt() => _heldKeys.Contains(0xE2) || _heldKeys.Contains(0xE6);
 
     private IntPtr OnMouse(int code, IntPtr wParam, IntPtr lParam)
     {
-        if (code < 0 || _stop.IsCancellationRequested) return CallNextHookEx(_mouseHook, code, wParam, lParam);
+        if (code < 0 || _stop.IsCancellationRequested) return NextMouseHook(code, wParam, lParam);
         var msg = unchecked((uint)wParam.ToInt64());
         var data = Marshal.PtrToStructure<MouseHookData>(lParam);
-        if (_hotMode && msg == WmMouseMove && _region is { } hotRegion)
+        UpdateHotPointerRegion(msg, data.Point);
+        if (_hotMode && !IsRoutingRemote) return NextMouseHook(code, wParam, lParam);
+        if (PointerLeftMonitor(data.Point))
         {
-            var inside = hotRegion.Contains(data.Point.X, data.Point.Y);
-            var wasInside = Interlocked.Exchange(ref _pointerInsideRegion, inside ? 1 : 0) != 0;
-            if (inside != wasInside)
-            {
-                try { PointerRegionChanged?.Invoke(inside); }
-                catch (Exception ex) { _failure = ex; Stop(); }
-            }
-            SetRoutingRemote(Volatile.Read(ref _routingEnabled) != 0 && inside);
+            Stop();
+            return NextMouseHook(code, wParam, lParam);
         }
-        if (_hotMode && !IsRoutingRemote) return CallNextHookEx(_mouseHook, code, wParam, lParam);
-        if (!_hotMode && _region is { } region && !region.Contains(data.Point.X, data.Point.Y))
-        { Stop(); return CallNextHookEx(_mouseHook, code, wParam, lParam); }
-        if ((data.Flags & 0x0001) != 0) return CallNextHookEx(_mouseHook, code, wParam, lParam);
-        var eventHandled = true;
-        switch (msg)
+        if ((data.Flags & 0x0001) != 0) return NextMouseHook(code, wParam, lParam);
+        var eventHandled = HandleMouseEvent(msg, data);
+        // In native monitor mode, Windows moves the logical cursor and we forward its mapped position.
+        // Manual capture remains confined and uses Raw Input deltas instead.
+        return eventHandled ? new IntPtr(1) : NextMouseHook(code, wParam, lParam);
+    }
+
+    private void UpdateHotPointerRegion(uint message, Point pointer)
+    {
+        if (!_hotMode || message != WmMouseMove || _region is not { } region) return;
+
+        var inside = region.Contains(pointer.X, pointer.Y);
+        var wasInside = Interlocked.Exchange(ref _pointerInsideRegion, inside ? 1 : 0) != 0;
+        if (inside != wasInside)
+        {
+            try { PointerRegionChanged?.Invoke(inside); }
+            catch (Exception ex) { _failure = ex; Stop(); }
+        }
+
+        SetRoutingRemote(Volatile.Read(ref _routingEnabled) != 0 && inside);
+    }
+
+    private bool HandleMouseEvent(uint message, MouseHookData data)
+    {
+        switch (message)
         {
             case WmMouseMove when _region is not null:
                 var (x, y) = _region.Value.MapToRemote(data.Point.X, data.Point.Y,
                     _remoteWidth, _remoteHeight);
                 Publish(new(InputEventKind.MoveAbsolute, X: x, Y: y));
-                eventHandled = false; break;
-            case WmLButtonDown: case WmLButtonUp: Publish(new(InputEventKind.Button, 1, msg == WmLButtonDown)); break;
-            case WmRButtonDown: case WmRButtonUp: Publish(new(InputEventKind.Button, 2, msg == WmRButtonDown)); break;
-            case WmMButtonDown: case WmMButtonUp: Publish(new(InputEventKind.Button, 3, msg == WmMButtonDown)); break;
+                return false;
+            case WmLButtonDown:
+            case WmLButtonUp:
+                Publish(new(InputEventKind.Button, 1, message == WmLButtonDown));
+                return true;
+            case WmRButtonDown:
+            case WmRButtonUp:
+                Publish(new(InputEventKind.Button, 2, message == WmRButtonDown));
+                return true;
+            case WmMButtonDown:
+            case WmMButtonUp:
+                Publish(new(InputEventKind.Button, 3, message == WmMButtonDown));
+                return true;
             case WmXButtonDown:
             case WmXButtonUp:
-                var button = unchecked((ushort)((data.MouseData >> 16) & 0xffff)) == 1 ? (ushort)4 : (ushort)5;
-                Publish(new(InputEventKind.Button, button, msg == WmXButtonDown)); break;
+                var button = unchecked((ushort)((data.MouseData >> 16) & 0xffff)) == 1
+                    ? (ushort)4
+                    : (ushort)5;
+                Publish(new(InputEventKind.Button, button, message == WmXButtonDown));
+                return true;
             case WmMouseWheel:
-                Publish(new(InputEventKind.Scroll, X: 0, Y: unchecked((short)(data.MouseData >> 16)))); break;
+                Publish(new(InputEventKind.Scroll, X: 0,
+                    Y: unchecked((short)(data.MouseData >> 16))));
+                return true;
             case WmMouseHWheel:
-                Publish(new(InputEventKind.Scroll, X: unchecked((short)(data.MouseData >> 16)), Y: 0)); break;
-            default: eventHandled = false; break;
+                Publish(new(InputEventKind.Scroll,
+                    X: unchecked((short)(data.MouseData >> 16)), Y: 0));
+                return true;
+            default:
+                return false;
         }
-        // In native monitor mode, Windows moves the logical cursor and we forward its mapped position.
-        // Manual capture remains confined and uses Raw Input deltas instead.
-        return eventHandled ? new IntPtr(1) : CallNextHookEx(_mouseHook, code, wParam, lParam);
     }
+
+    private bool PointerLeftMonitor(Point pointer) =>
+        !_hotMode && _region is { } region && !region.Contains(pointer.X, pointer.Y);
+
+    private IntPtr NextMouseHook(int code, IntPtr wParam, IntPtr lParam) =>
+        CallNextHookEx(_mouseHook, code, wParam, lParam);
 
     private bool Publish(InputEvent item)
     {
@@ -331,100 +433,131 @@ public sealed class WindowsInputCapture : IAsyncDisposable
 
     private static ushort ScanToHid(ushort scan, bool extended)
     {
-        if (extended) return scan switch
-        {
-            0x1C => 0x58,
-            0x1D => 0xE4,
-            0x35 => 0x54,
-            0x38 => 0xE6,
-            0x47 => 0x4A,
-            0x48 => 0x52,
-            0x49 => 0x4B,
-            0x4B => 0x50,
-            0x4D => 0x4F,
-            0x4F => 0x4D,
-            0x50 => 0x51,
-            0x51 => 0x4E,
-            0x52 => 0x49,
-            0x53 => 0x4C,
-            0x5B => 0xE3,
-            0x5C => 0xE7,
-            0x5D => 0x65,
-            _ => 0
-        };
-        if (scan is >= 0x02 and <= 0x0A) return (ushort)(0x1E + scan - 0x02); // 1..9
-        return scan switch
-        {
-            0x0B => 0x27, // 0
-            0x1E => 4,
-            0x30 => 5,
-            0x2E => 6,
-            0x20 => 7,
-            0x12 => 8,
-            0x21 => 9,
-            0x22 => 10,
-            0x23 => 11,
-            0x17 => 12,
-            0x24 => 13,
-            0x25 => 14,
-            0x26 => 15,
-            0x32 => 16,
-            0x31 => 17,
-            0x18 => 18,
-            0x19 => 19,
-            0x10 => 20,
-            0x13 => 21,
-            0x1F => 22,
-            0x14 => 23,
-            0x16 => 24,
-            0x2F => 25,
-            0x11 => 26,
-            0x2D => 27,
-            0x15 => 28,
-            0x2C => 29,
-            0x01 => 0x29,
-            0x0C => 0x2D,
-            0x0D => 0x2E,
-            0x0E => 0x2A,
-            0x0F => 0x2B,
-            0x1A => 0x2F,
-            0x1B => 0x30,
-            0x1C => 0x28,
-            0x1D => 0xE0,
-            0x27 => 0x33,
-            0x28 => 0x34,
-            0x29 => 0x35,
-            0x2A => 0xE1,
-            0x2B => 0x31,
-            0x33 => 0x36,
-            0x34 => 0x37,
-            0x35 => 0x38,
-            0x36 => 0xE5,
-            0x37 => 0x55,
-            0x38 => 0xE2,
-            0x39 => 0x2C,
-            0x3A => 0x39,
-            >= 0x3B and <= 0x44 => (ushort)(0x3A + scan - 0x3B),
-            0x57 => 0x44,
-            0x58 => 0x45,
-            0x45 => 0x53,
-            0x52 => 0x62,
-            0x4F => 0x59,
-            0x50 => 0x5A,
-            0x51 => 0x5B,
-            0x4B => 0x5C,
-            0x4C => 0x5D,
-            0x4D => 0x5E,
-            0x47 => 0x5F,
-            0x48 => 0x60,
-            0x49 => 0x61,
-            0x4A => 0x56,
-            0x4E => 0x57,
-            0x53 => 0x63,
-            0x46 => 0x48,
-            _ => 0
-        };
+        if (extended) return ExtendedScanToHid(scan);
+        if (scan is >= 0x02 and <= 0x0A) return (ushort)(0x1E + scan - 0x02);
+        return scan is >= 0x10 and <= 0x19 or >= 0x1E and <= 0x26 or >= 0x2C and <= 0x32
+            ? LetterScanToHid(scan)
+            : SpecialScanToHid(scan);
     }
+
+    private static ushort ExtendedScanToHid(ushort scan) => scan switch
+    {
+        0x1C => 0x58,
+        0x1D => 0xE4,
+        0x35 => 0x54,
+        0x38 => 0xE6,
+        _ => ExtendedNavigationScanToHid(scan)
+    };
+
+    private static ushort ExtendedNavigationScanToHid(ushort scan) => scan switch
+    {
+        0x47 => 0x4A,
+        0x48 => 0x52,
+        0x49 => 0x4B,
+        0x4B => 0x50,
+        0x4D => 0x4F,
+        0x4F => 0x4D,
+        0x50 => 0x51,
+        0x51 => 0x4E,
+        0x52 => 0x49,
+        0x53 => 0x4C,
+        0x5B => 0xE3,
+        0x5C => 0xE7,
+        0x5D => 0x65,
+        _ => 0
+    };
+
+    private static ushort LetterScanToHid(ushort scan) => scan switch
+    {
+        0x10 => 20,
+        0x11 => 26,
+        0x12 => 8,
+        0x13 => 21,
+        0x14 => 23,
+        0x15 => 28,
+        0x16 => 24,
+        0x17 => 12,
+        0x18 => 18,
+        0x19 => 19,
+
+        0x1E => 4,
+        0x1F => 22,
+        0x20 => 7,
+        0x21 => 9,
+        0x22 => 10,
+        0x23 => 11,
+        0x24 => 13,
+        0x25 => 14,
+        0x26 => 15,
+
+        0x2C => 29,
+        0x2D => 27,
+        0x2E => 6,
+        0x2F => 25,
+        0x30 => 5,
+        0x31 => 17,
+        0x32 => 16,
+        _ => 0
+    };
+
+    private static ushort SpecialScanToHid(ushort scan) => scan switch
+    {
+        0x0B => 0x27,
+        0x01 => 0x29,
+        0x0C => 0x2D,
+        0x0D => 0x2E,
+        0x0E => 0x2A,
+        0x0F => 0x2B,
+
+        0x1A => 0x2F,
+        0x1B => 0x30,
+        0x1C => 0x28,
+        0x1D => 0xE0,
+
+        0x27 => 0x33,
+        0x28 => 0x34,
+        0x29 => 0x35,
+        0x2A => 0xE1,
+        0x2B => 0x31,
+
+        0x33 => 0x36,
+        0x34 => 0x37,
+        0x35 => 0x38,
+        0x36 => 0xE5,
+        0x37 => 0x55,
+        0x38 => 0xE2,
+        0x39 => 0x2C,
+        0x3A => 0x39,
+        _ => FunctionOrKeypadScanToHid(scan)
+    };
+
+    private static ushort FunctionOrKeypadScanToHid(ushort scan) => scan switch
+    {
+        >= 0x3B and <= 0x44 => (ushort)(0x3A + scan - 0x3B),
+        0x57 => 0x44,
+        0x58 => 0x45,
+        _ => KeypadScanToHid(scan)
+    };
+
+    private static ushort KeypadScanToHid(ushort scan) => scan switch
+    {
+        0x45 => 0x53,
+        0x52 => 0x62,
+        0x4F => 0x59,
+        0x50 => 0x5A,
+        0x51 => 0x5B,
+        0x4B => 0x5C,
+        0x4C => 0x5D,
+        0x4D => 0x5E,
+        0x47 => 0x5F,
+        0x48 => 0x60,
+        0x49 => 0x61,
+        0x4A => 0x56,
+        0x4E => 0x57,
+        0x53 => 0x63,
+        0x46 => 0x48,
+        _ => 0
+    };
 
     private static IntPtr WindowProcedure(IntPtr hwnd, uint message, IntPtr wParam, IntPtr lParam)
     {

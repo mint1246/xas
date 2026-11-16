@@ -28,15 +28,15 @@ enum {
 
 /* The portal may report one device carrying several roles, so roles are a
  * bitmask. */
-static int roles_of(struct ei_device *d) {
+static int roles_of(struct ei_device *device) {
   int roles = 0;
-  if (ei_device_has_capability(d, EI_DEVICE_CAP_POINTER) ||
-      ei_device_has_capability(d, EI_DEVICE_CAP_BUTTON) ||
-      ei_device_has_capability(d, EI_DEVICE_CAP_SCROLL))
+  if (ei_device_has_capability(device, EI_DEVICE_CAP_POINTER) ||
+      ei_device_has_capability(device, EI_DEVICE_CAP_BUTTON) ||
+      ei_device_has_capability(device, EI_DEVICE_CAP_SCROLL))
     roles |= ROLE_POINTER;
-  if (ei_device_has_capability(d, EI_DEVICE_CAP_POINTER_ABSOLUTE))
+  if (ei_device_has_capability(device, EI_DEVICE_CAP_POINTER_ABSOLUTE))
     roles |= ROLE_ABSOLUTE;
-  if (ei_device_has_capability(d, EI_DEVICE_CAP_KEYBOARD))
+  if (ei_device_has_capability(device, EI_DEVICE_CAP_KEYBOARD))
     roles |= ROLE_KEYBOARD;
   return roles;
 }

@@ -11,7 +11,11 @@ try
     await clipboard.SetTextAsync(marker, CancellationToken.None);
     var actual = await clipboard.GetSnapshotAsync(CancellationToken.None);
     if (actual.Text != marker || actual.ChangeId == original.ChangeId)
-        throw new InvalidOperationException($"Clipboard round-trip failed. Text matched: {actual.Text == marker}; sequence advanced: {actual.ChangeId != original.ChangeId}.");
+    {
+        throw new InvalidOperationException(
+            $"Clipboard round-trip failed. Text matched: {actual.Text == marker}; " +
+            $"sequence advanced: {actual.ChangeId != original.ChangeId}.");
+    }
     Console.WriteLine("Clipboard round-trip passed; sequence number advanced.");
 }
 finally

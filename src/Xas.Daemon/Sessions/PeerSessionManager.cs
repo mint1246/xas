@@ -431,16 +431,15 @@ public sealed class PeerSessionManager : IAsyncDisposable
                     return new ProtocolMessage(MessageKind.Response, message.RequestId, message.StreamId,
                         message.Method, []);
                 }
-                return message.Method is ShellExecWire.Open or ShellExecWire.Close
-                    ? await streamingShell.HandleRequestAsync(message, ct).ConfigureAwait(false)
-                    : message.Method.StartsWith("shell.", StringComparison.Ordinal) &&
-                        message.Method is "shell.open" or "shell.resize" or "shell.close"
-                    ? await interactive.HandleRequestAsync(message, ct).ConfigureAwait(false)
-                    : message.Method.StartsWith("file.", StringComparison.Ordinal)
-                        ? await files.HandleRequestAsync(message, ct).ConfigureAwait(false)
-                        : message.Method is "input.open" or "input.close" or "input.release"
-                            ? await input.HandleRequestAsync(message, ct).ConfigureAwait(false)
-                            : await _dispatcher.HandleAsync(deviceId, message, frames.SendAsync, ct).ConfigureAwait(false);
+                return await DispatchIncomingRequestAsync(
+                    deviceId,
+                    message,
+                    ct,
+                    frames,
+                    interactive,
+                    streamingShell,
+                    files,
+                    input).ConfigureAwait(false);
             }
             catch (Exception ex) when (message.Method == "session.lane.open")
             {
@@ -541,6 +540,36 @@ public sealed class PeerSessionManager : IAsyncDisposable
             lock (lifetimeDisposalGate) pendingLifetimeDisposal = lifetimeDisposal?.Task;
             if (pendingLifetimeDisposal is not null) await pendingLifetimeDisposal.ConfigureAwait(false);
         }
+    }
+
+    private ValueTask<ProtocolMessage> DispatchIncomingRequestAsync(
+        string deviceId,
+        ProtocolMessage message,
+        CancellationToken token,
+        BinaryFrameConnection frames,
+        InteractiveShellManager interactive,
+        StreamingCommandManager streamingShell,
+        FileTransferServer files,
+        ConnectionInputSession input)
+    {
+        if (message.Method is ShellExecWire.Open or ShellExecWire.Close)
+        {
+            return streamingShell.HandleRequestAsync(message, token);
+        }
+        if (message.Method is "shell.open" or "shell.resize" or "shell.close")
+        {
+            return interactive.HandleRequestAsync(message, token);
+        }
+        if (message.Method.StartsWith("file.", StringComparison.Ordinal))
+        {
+            return files.HandleRequestAsync(message, token);
+        }
+        if (message.Method is "input.open" or "input.close" or "input.release")
+        {
+            return input.HandleRequestAsync(message, token);
+        }
+
+        return _dispatcher.HandleAsync(deviceId, message, frames.SendAsync, token);
     }
 
     private static PeerLane ClassifyLane(string method) => method.StartsWith("input.", StringComparison.Ordinal)

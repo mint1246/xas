@@ -31,20 +31,39 @@ internal static class BrokerServer
         {
             while (!stop.WaitOne(0))
             {
-                using var pipe = CreatePipe();
-                var connected = pipe.WaitForConnectionAsync();
-                if (await Task.WhenAny(connected, stopped).ConfigureAwait(false) != connected) return;
-                await connected.ConfigureAwait(false);
-                try { await HandleAsync(pipe, stopSource.Token).ConfigureAwait(false); }
-                catch (Exception ex)
-                {
-                    try { await AdminBrokerWire.WriteHeaderAsync(pipe, new AdminBrokerStatus(false, ex.Message), stopSource.Token); }
-                    catch (IOException) { }
-                    catch (OperationCanceledException) { }
-                }
+                await AcceptAndHandleClientAsync(stopped, stopSource.Token).ConfigureAwait(false);
             }
         }
         finally { stopRegistration.Unregister(null); }
+    }
+
+    private static async Task AcceptAndHandleClientAsync(Task stopped, CancellationToken serviceToken)
+    {
+        using var pipe = CreatePipe();
+        var connection = pipe.WaitForConnectionAsync();
+        if (await Task.WhenAny(connection, stopped).ConfigureAwait(false) != connection) return;
+        await connection.ConfigureAwait(false);
+        await HandleClientSafelyAsync(pipe, serviceToken).ConfigureAwait(false);
+    }
+
+    private static async Task HandleClientSafelyAsync(
+        NamedPipeServerStream pipe, CancellationToken serviceToken)
+    {
+        try
+        {
+            await HandleAsync(pipe, serviceToken).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            try
+            {
+                await AdminBrokerWire.WriteHeaderAsync(
+                    pipe, new AdminBrokerStatus(false, exception.Message), serviceToken)
+                    .ConfigureAwait(false);
+            }
+            catch (IOException) { }
+            catch (OperationCanceledException) { }
+        }
     }
 
     private static NamedPipeServerStream CreatePipe()
@@ -350,23 +369,10 @@ internal static class BrokerServer
         return sid;
     }
 
-    private static (Process Process, SafeFileHandle Input, SafeFileHandle Output, SafeFileHandle Error) StartAsUser(AdminBrokerRequest request, SafeAccessTokenHandle token)
+    private static (Process Process, SafeFileHandle Input, SafeFileHandle Output, SafeFileHandle Error)
+        StartAsUser(AdminBrokerRequest request, SafeAccessTokenHandle token)
     {
-        if (request.Mode is not (ShellMode.Command or ShellMode.Exec)) throw new InvalidDataException("Only non-interactive command and exec requests are supported.");
-        string file;
-        var args = new List<string>();
-        if (request.Mode == ShellMode.Command)
-        {
-            if (string.IsNullOrWhiteSpace(request.Command)) throw new InvalidDataException("Command text is required.");
-            file = Environment.GetEnvironmentVariable("WINDIR") is { Length: > 0 } windir ? Path.Combine(windir, "System32", "cmd.exe") : @"C:\Windows\System32\cmd.exe";
-            args.AddRange(["/d", "/s", "/c", request.Command]);
-        }
-        else
-        {
-            if (string.IsNullOrWhiteSpace(request.Executable)) throw new InvalidDataException("Executable path is required.");
-            file = request.Executable;
-            args.AddRange(request.Arguments ?? []);
-        }
+        var (file, args) = ResolveCommand(request);
         var sa = new SecurityAttributes { Length = Marshal.SizeOf<SecurityAttributes>(), InheritHandle = true };
         if (!CreatePipe(out var childStdout, out var parentStdout, ref sa, 0) ||
             !CreatePipe(out var childStdin, out var parentStdin, ref sa, 0) ||
@@ -391,43 +397,83 @@ internal static class BrokerServer
         return (Process.GetProcessById((int)info.ProcessId), parentStdin, parentStdout, parentStderr);
     }
 
+    private static (string File, IReadOnlyList<string> Arguments) ResolveCommand(
+        AdminBrokerRequest request)
+    {
+        if (request.Mode == ShellMode.Command)
+        {
+            if (string.IsNullOrWhiteSpace(request.Command))
+                throw new InvalidDataException("Command text is required.");
+
+            var windowsDirectory = Environment.GetEnvironmentVariable("WINDIR");
+            var commandProcessor = string.IsNullOrEmpty(windowsDirectory)
+                ? @"C:\Windows\System32\cmd.exe"
+                : Path.Combine(windowsDirectory, "System32", "cmd.exe");
+            return (commandProcessor, ["/d", "/s", "/c", request.Command]);
+        }
+
+        if (request.Mode != ShellMode.Exec)
+            throw new InvalidDataException(
+                "Only non-interactive command and exec requests are supported.");
+        if (string.IsNullOrWhiteSpace(request.Executable))
+            throw new InvalidDataException("Executable path is required.");
+
+        return (request.Executable, request.Arguments ?? []);
+    }
+
     internal static async Task SuperviseChildAsync(Process process, Task inputTask, Task stdoutTask,
         Task stderrTask, CancellationTokenSource workCancellation)
     {
         var exitTask = process.WaitForExitAsync(workCancellation.Token);
-        var pending = new List<Task> { exitTask, inputTask, stdoutTask, stderrTask };
         try
         {
-            while (true)
-            {
-                var completed = await Task.WhenAny(pending).ConfigureAwait(false);
-                if (completed == exitTask)
-                {
-                    await exitTask.ConfigureAwait(false);
-                    await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
-                    return;
-                }
-                pending.Remove(completed);
-                if (completed.IsFaulted || completed.IsCanceled)
-                {
-                    await completed.ConfigureAwait(false);
-                }
-            }
+            await WaitForChildWorkAsync(exitTask, inputTask, stdoutTask, stderrTask)
+                .ConfigureAwait(false);
         }
         catch
         {
-            workCancellation.Cancel();
-            if (!process.HasExited)
-            {
-                try { process.Kill(entireProcessTree: true); }
-                catch (InvalidOperationException) { }
-            }
-            try { await process.WaitForExitAsync().ConfigureAwait(false); } catch (InvalidOperationException) { }
-            await IgnoreCleanupFailure(inputTask).ConfigureAwait(false);
-            await IgnoreCleanupFailure(stdoutTask).ConfigureAwait(false);
-            await IgnoreCleanupFailure(stderrTask).ConfigureAwait(false);
+            await StopChildAfterFailureAsync(
+                process, inputTask, stdoutTask, stderrTask, workCancellation).ConfigureAwait(false);
             throw;
         }
+    }
+
+    private static async Task WaitForChildWorkAsync(
+        Task exitTask, Task inputTask, Task stdoutTask, Task stderrTask)
+    {
+        var pending = new List<Task> { exitTask, inputTask, stdoutTask, stderrTask };
+        while (true)
+        {
+            var completed = await Task.WhenAny(pending).ConfigureAwait(false);
+            if (completed == exitTask)
+            {
+                await exitTask.ConfigureAwait(false);
+                await Task.WhenAll(stdoutTask, stderrTask).ConfigureAwait(false);
+                return;
+            }
+
+            pending.Remove(completed);
+            if (completed.IsFaulted || completed.IsCanceled)
+                await completed.ConfigureAwait(false);
+        }
+    }
+
+    private static async Task StopChildAfterFailureAsync(
+        Process process, Task inputTask, Task stdoutTask, Task stderrTask,
+        CancellationTokenSource workCancellation)
+    {
+        workCancellation.Cancel();
+        if (!process.HasExited)
+        {
+            try { process.Kill(entireProcessTree: true); }
+            catch (InvalidOperationException) { }
+        }
+
+        try { await process.WaitForExitAsync().ConfigureAwait(false); }
+        catch (InvalidOperationException) { }
+        await IgnoreCleanupFailure(inputTask).ConfigureAwait(false);
+        await IgnoreCleanupFailure(stdoutTask).ConfigureAwait(false);
+        await IgnoreCleanupFailure(stderrTask).ConfigureAwait(false);
     }
 
     private static async Task IgnoreCleanupFailure(Task task)
@@ -457,19 +503,31 @@ internal static class BrokerServer
             while (true)
             {
                 var (kind, data) = await AdminBrokerWire.ReadFrameAsync(pipe, cancellationToken).ConfigureAwait(false);
-                if (kind == AdminFrameKind.EndStdin && data.Length == 0 && !stdinClosed)
-                {
-                    stdinClosed = true;
-                    await input.DisposeAsync().ConfigureAwait(false);
-                    continue;
-                }
-                if (stdinClosed) throw new InvalidDataException("Input data followed the end-of-stdin frame.");
-                if (kind != AdminFrameKind.Stdin) throw new InvalidDataException("Unexpected input frame.");
-                await input.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+                stdinClosed |= await ProcessInputFrameAsync(
+                    kind, data, input, stdinClosed, cancellationToken).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
         finally { if (!stdinClosed) await input.DisposeAsync().ConfigureAwait(false); }
+    }
+
+    private static async Task<bool> ProcessInputFrameAsync(
+        AdminFrameKind kind, byte[] data, Stream input, bool stdinClosed,
+        CancellationToken cancellationToken)
+    {
+        if (kind == AdminFrameKind.EndStdin && data.Length == 0 && !stdinClosed)
+        {
+            await input.DisposeAsync().ConfigureAwait(false);
+            return true;
+        }
+
+        if (stdinClosed)
+            throw new InvalidDataException("Input data followed the end-of-stdin frame.");
+        if (kind != AdminFrameKind.Stdin)
+            throw new InvalidDataException("Unexpected input frame.");
+
+        await input.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+        return false;
     }
 
     private static string Quote(string value)

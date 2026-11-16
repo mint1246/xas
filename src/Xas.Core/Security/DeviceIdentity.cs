@@ -26,29 +26,50 @@ public sealed class DeviceIdentity : IDisposable
         {
             var bytes = File.ReadAllBytes(path);
             if (OperatingSystem.IsWindows()) bytes = Dpapi.Unprotect(bytes);
-            var existing = X509CertificateLoader.LoadPkcs12(bytes, (string?)null, KeyStorageFlags);
+            var existing = X509CertificateLoader.LoadPkcs12(
+                bytes,
+                (string?)null,
+                KeyStorageFlags);
             CryptographicOperations.ZeroMemory(bytes);
             return FromCertificate(existing);
         }
 
         using var key = RSA.Create(3072);
-        var request = new CertificateRequest($"CN={SanitizeCommonName(displayName)}", key, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        var request = new CertificateRequest(
+            $"CN={SanitizeCommonName(displayName)}",
+            key,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1);
         request.CertificateExtensions.Add(new X509BasicConstraintsExtension(false, false, 0, true));
-        request.CertificateExtensions.Add(new X509KeyUsageExtension(X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment, true));
+        request.CertificateExtensions.Add(new X509KeyUsageExtension(
+            X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.KeyEncipherment,
+            true));
         request.CertificateExtensions.Add(new X509EnhancedKeyUsageExtension(
             new System.Security.Cryptography.OidCollection
             {
                 new("1.3.6.1.5.5.7.3.1"), // TLS server authentication
                 new("1.3.6.1.5.5.7.3.2")  // TLS client authentication
-            }, false));
+            },
+            false));
         var now = DateTimeOffset.UtcNow;
         using var cert = request.CreateSelfSigned(now.AddMinutes(-5), now.AddYears(10));
         var pfx = cert.Export(X509ContentType.Pfx);
-        var stored = OperatingSystem.IsWindows() ? Dpapi.Protect(pfx) : pfx;
+        var stored = OperatingSystem.IsWindows()
+            ? Dpapi.Protect(pfx)
+            : pfx;
         WritePrivateFile(path, stored);
-        if (!ReferenceEquals(pfx, stored)) CryptographicOperations.ZeroMemory(pfx);
-        if (OperatingSystem.IsLinux()) File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        return FromCertificate(X509CertificateLoader.LoadPkcs12(cert.Export(X509ContentType.Pfx), (string?)null, KeyStorageFlags));
+        if (!ReferenceEquals(pfx, stored))
+            CryptographicOperations.ZeroMemory(pfx);
+        if (OperatingSystem.IsLinux())
+            File.SetUnixFileMode(
+                path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite);
+
+        var runtimeCertificate = X509CertificateLoader.LoadPkcs12(
+            cert.Export(X509ContentType.Pfx),
+            (string?)null,
+            KeyStorageFlags);
+        return FromCertificate(runtimeCertificate);
     }
 
     // Schannel cannot use an ephemeral private key for TLS authentication on Windows. The encrypted
@@ -63,19 +84,33 @@ public sealed class DeviceIdentity : IDisposable
         var spki = cert.PublicKey.ExportSubjectPublicKeyInfo();
         var hash = SHA256.HashData(spki);
         var fingerprint = Convert.ToHexString(hash);
-        return new DeviceIdentity("xas-" + Convert.ToHexString(hash.AsSpan(0, 16)).ToLowerInvariant(), fingerprint, cert);
+        var deviceFingerprint = Convert.ToHexString(hash.AsSpan(0, 16))
+            .ToLowerInvariant();
+        var deviceId = "xas-" + deviceFingerprint;
+        return new DeviceIdentity(deviceId, fingerprint, cert);
     }
 
     private static string SanitizeCommonName(string name)
     {
-        var clean = new string(name.Where(c => char.IsLetterOrDigit(c) || c is ' ' or '-' or '_').Take(64).ToArray()).Trim();
+        var cleanCharacters = name
+            .Where(character => char.IsLetterOrDigit(character)
+                || character is ' ' or '-' or '_')
+            .Take(64)
+            .ToArray();
+        var clean = new string(cleanCharacters).Trim();
         return string.IsNullOrEmpty(clean) ? "Xas device" : clean;
     }
 
     private static void WritePrivateFile(string path, byte[] bytes)
     {
-        var options = new FileStreamOptions { Mode = FileMode.CreateNew, Access = FileAccess.Write, Share = FileShare.None };
-        if (OperatingSystem.IsLinux()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.CreateNew,
+            Access = FileAccess.Write,
+            Share = FileShare.None
+        };
+        if (OperatingSystem.IsLinux())
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
         using var stream = new FileStream(path, options);
         stream.Write(bytes);
         stream.Flush(true);
@@ -90,8 +125,13 @@ public static class PairingFingerprint
     public static string Format(string fingerprint)
     {
         var hex = new string(fingerprint.Where(Uri.IsHexDigit).Select(char.ToUpperInvariant).ToArray());
-        if (hex.Length != 64) throw new ArgumentException("Expected a SHA-256 fingerprint.", nameof(fingerprint));
-        return string.Join(" ", Enumerable.Range(0, 8).Select(i => hex.Substring(i * 8, 8)));
+        if (hex.Length != 64)
+            throw new ArgumentException(
+                "Expected a SHA-256 fingerprint.",
+                nameof(fingerprint));
+        return string.Join(
+            " ",
+            Enumerable.Range(0, 8).Select(index => hex.Substring(index * 8, 8)));
     }
 
     /// <summary>A short confirmation code derived from both identities; compare out of band.</summary>
@@ -126,7 +166,14 @@ public sealed class PeerTrustStore
         _peers = Load(_path);
     }
 
-    public IReadOnlyList<TrustedPeer> List() { lock (_gate) { Refresh(); return _peers.Values.OrderBy(p => p.DeviceId).ToArray(); } }
+    public IReadOnlyList<TrustedPeer> List()
+    {
+        lock (_gate)
+        {
+            Refresh();
+            return _peers.Values.OrderBy(peer => peer.DeviceId).ToArray();
+        }
+    }
 
     public void Approve(string deviceId, string fingerprint, string displayName)
     {
@@ -134,46 +181,95 @@ public sealed class PeerTrustStore
         var normalized = NormalizeFingerprint(fingerprint);
         var expectedId = "xas-" + normalized[..32].ToLowerInvariant();
         if (!string.Equals(deviceId, expectedId, StringComparison.Ordinal))
-            throw new ArgumentException("Device ID does not match the approved public-key fingerprint.", nameof(deviceId));
+            throw new ArgumentException(
+                "Device ID does not match the approved public-key fingerprint.",
+                nameof(deviceId));
         lock (_gate)
         {
             Refresh();
-            _peers[deviceId] = new TrustedPeer(deviceId, normalized, displayName, DateTimeOffset.UtcNow);
+            _peers[deviceId] = new TrustedPeer(
+                deviceId,
+                normalized,
+                displayName,
+                DateTimeOffset.UtcNow);
             Save();
         }
     }
 
     public bool Revoke(string deviceId)
     {
-        lock (_gate) { Refresh(); var removed = _peers.Remove(deviceId); if (removed) Save(); return removed; }
+        lock (_gate)
+        {
+            Refresh();
+            var removed = _peers.Remove(deviceId);
+            if (removed)
+                Save();
+            return removed;
+        }
     }
 
     public bool IsTrusted(X509Certificate? certificate)
     {
-        if (certificate is null) return false;
-        using var cert = certificate as X509Certificate2 is { } x ? new X509Certificate2(x) : new X509Certificate2(certificate);
+        if (certificate is null)
+            return false;
+
+        using var cert = certificate is X509Certificate2 certificate2
+            ? new X509Certificate2(certificate2)
+            : new X509Certificate2(certificate);
         var now = DateTime.UtcNow;
-        if (now < cert.NotBefore.ToUniversalTime() || now > cert.NotAfter.ToUniversalTime()) return false;
-        var fp = Convert.ToHexString(SHA256.HashData(cert.PublicKey.ExportSubjectPublicKeyInfo()));
-        var id = "xas-" + fp[..32].ToLowerInvariant();
-        lock (_gate) { Refresh(); return _peers.TryGetValue(id, out var peer) && CryptographicOperations.FixedTimeEquals(Convert.FromHexString(peer.Fingerprint), Convert.FromHexString(fp)); }
+        if (now < cert.NotBefore.ToUniversalTime()
+            || now > cert.NotAfter.ToUniversalTime())
+            return false;
+
+        var publicKey = cert.PublicKey.ExportSubjectPublicKeyInfo();
+        var fingerprint = Convert.ToHexString(SHA256.HashData(publicKey));
+        var deviceId = "xas-" + fingerprint[..32].ToLowerInvariant();
+        lock (_gate)
+        {
+            Refresh();
+            if (!_peers.TryGetValue(deviceId, out var peer))
+                return false;
+
+            var trustedFingerprint = Convert.FromHexString(peer.Fingerprint);
+            var presentedFingerprint = Convert.FromHexString(fingerprint);
+            return CryptographicOperations.FixedTimeEquals(
+                trustedFingerprint,
+                presentedFingerprint);
+        }
     }
 
     /// <summary>Use for SslClientAuthenticationOptions.RemoteCertificateValidationCallback.</summary>
-    public RemoteCertificateValidationCallback ValidationCallback => (_, certificate, _, _) => IsTrusted(certificate);
+    public RemoteCertificateValidationCallback ValidationCallback =>
+        (_, certificate, _, _) => IsTrusted(certificate);
 
     private static string NormalizeFingerprint(string value)
     {
         var hex = new string(value.Where(Uri.IsHexDigit).Select(char.ToUpperInvariant).ToArray());
-        if (hex.Length != 64) throw new ArgumentException("Expected a SHA-256 fingerprint.", nameof(value));
+        if (hex.Length != 64)
+            throw new ArgumentException(
+                "Expected a SHA-256 fingerprint.",
+                nameof(value));
         return hex;
     }
 
     private static Dictionary<string, TrustedPeer> Load(string path)
     {
-        if (!File.Exists(path)) return new(StringComparer.Ordinal);
-        try { return System.Text.Json.JsonSerializer.Deserialize<Dictionary<string, TrustedPeer>>(File.ReadAllBytes(path)) ?? new(StringComparer.Ordinal); }
-        catch (System.Text.Json.JsonException ex) { throw new InvalidDataException("The peer trust store is invalid; refusing to trust peers.", ex); }
+        if (!File.Exists(path))
+            return new Dictionary<string, TrustedPeer>(StringComparer.Ordinal);
+
+        try
+        {
+            var contents = File.ReadAllBytes(path);
+            return System.Text.Json.JsonSerializer
+                .Deserialize<Dictionary<string, TrustedPeer>>(contents)
+                ?? new Dictionary<string, TrustedPeer>(StringComparer.Ordinal);
+        }
+        catch (System.Text.Json.JsonException ex)
+        {
+            throw new InvalidDataException(
+                "The peer trust store is invalid; refusing to trust peers.",
+                ex);
+        }
     }
 
     private void Refresh() => _peers = Load(_path);
@@ -182,22 +278,62 @@ public sealed class PeerTrustStore
     {
         var temp = _path + ".tmp";
         var bytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(_peers);
-        var options = new FileStreamOptions { Mode = FileMode.Create, Access = FileAccess.Write, Share = FileShare.None };
-        if (OperatingSystem.IsLinux()) options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
-        using (var stream = new FileStream(temp, options)) { stream.Write(bytes); stream.Flush(true); }
+        var options = new FileStreamOptions
+        {
+            Mode = FileMode.Create,
+            Access = FileAccess.Write,
+            Share = FileShare.None
+        };
+        if (OperatingSystem.IsLinux())
+            options.UnixCreateMode = UnixFileMode.UserRead | UnixFileMode.UserWrite;
+
+        using (var stream = new FileStream(temp, options))
+        {
+            stream.Write(bytes);
+            stream.Flush(true);
+        }
         File.Move(temp, _path, true);
     }
 }
 
-public sealed record TrustedPeer(string DeviceId, string Fingerprint, string DisplayName, DateTimeOffset ApprovedAtUtc);
+public sealed record TrustedPeer(
+    string DeviceId,
+    string Fingerprint,
+    string DisplayName,
+    DateTimeOffset ApprovedAtUtc);
 
 internal static class Dpapi
 {
     private const int UiForbidden = 0x1;
-    [StructLayout(LayoutKind.Sequential)] private struct Blob { public int Size; public IntPtr Data; }
-    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool CryptProtectData(ref Blob input, string? description, IntPtr entropy, IntPtr reserved, IntPtr prompt, int flags, out Blob output);
-    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)] private static extern bool CryptUnprotectData(ref Blob input, IntPtr description, IntPtr entropy, IntPtr reserved, IntPtr prompt, int flags, out Blob output);
-    [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr memory);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Blob
+    {
+        public int Size;
+        public IntPtr Data;
+    }
+
+    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CryptProtectData(
+        ref Blob input,
+        string? description,
+        IntPtr entropy,
+        IntPtr reserved,
+        IntPtr prompt,
+        int flags,
+        out Blob output);
+
+    [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool CryptUnprotectData(
+        ref Blob input,
+        IntPtr description,
+        IntPtr entropy,
+        IntPtr reserved,
+        IntPtr prompt,
+        int flags,
+        out Blob output);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
 
     public static byte[] Protect(byte[] data) => Transform(data, true);
     public static byte[] Unprotect(byte[] data) => Transform(data, false);
@@ -208,12 +344,50 @@ internal static class Dpapi
         var input = new Blob { Size = data.Length, Data = inputPtr };
         try
         {
-            var ok = protect ? CryptProtectData(ref input, "Xas device identity", IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, UiForbidden, out var output)
-                : CryptUnprotectData(ref input, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, UiForbidden, out output);
-            if (!ok) throw new CryptographicException(Marshal.GetLastWin32Error());
-            try { var result = new byte[output.Size]; Marshal.Copy(output.Data, result, 0, result.Length); return result; }
-            finally { _ = LocalFree(output.Data); }
+            Blob output;
+            bool succeeded;
+            if (protect)
+                succeeded = ProtectBlob(ref input, out output);
+            else
+                succeeded = UnprotectBlob(ref input, out output);
+            if (!succeeded)
+                throw new CryptographicException(Marshal.GetLastWin32Error());
+
+            try
+            {
+                var result = new byte[output.Size];
+                Marshal.Copy(output.Data, result, 0, result.Length);
+                return result;
+            }
+            finally
+            {
+                _ = LocalFree(output.Data);
+            }
         }
         finally { Marshal.FreeHGlobal(inputPtr); }
+    }
+
+    private static bool ProtectBlob(ref Blob input, out Blob output)
+    {
+        return CryptProtectData(
+            ref input,
+            "Xas device identity",
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            UiForbidden,
+            out output);
+    }
+
+    private static bool UnprotectBlob(ref Blob input, out Blob output)
+    {
+        return CryptUnprotectData(
+            ref input,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            UiForbidden,
+            out output);
     }
 }

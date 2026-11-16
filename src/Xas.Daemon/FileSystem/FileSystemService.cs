@@ -17,79 +17,122 @@ public sealed class FileSystemService(PeerPermissionStore permissions, LocalConf
 
     public ValueTask<ProtocolMessage> HandleAsync(string peerId, ProtocolMessage request,
         CancellationToken cancellationToken) => new(Task.Run(
-            async () => await HandleCoreAsync(peerId, request, cancellationToken).ConfigureAwait(false), cancellationToken));
+            async () => await HandleCoreAsync(peerId, request, cancellationToken).ConfigureAwait(false),
+            cancellationToken));
 
     // Native filesystem calls may block. Do not hold up the protocol reader that
     // delivers other requests, responses, or cancellation messages on the bulk lane.
-    private async ValueTask<ProtocolMessage> HandleCoreAsync(string peerId, ProtocolMessage request,
+    private async ValueTask<ProtocolMessage> HandleCoreAsync(
+        string peerId,
+        ProtocolMessage request,
         CancellationToken cancellationToken)
     {
         if (!permissions.IsAllowed(peerId, Capability.FileSystem))
-            throw new UnauthorizedAccessException("Filesystem access is not granted on this device for this peer.");
+        {
+            throw new UnauthorizedAccessException(
+                "Filesystem access is not granted on this device for this peer.");
+        }
+
         try
         {
-            switch (request.Method)
+            return request.Method switch
             {
-                case "fs.volumes":
-                    RequireEmpty(request.Payload);
-                    return Reply(request, RemoteFileSystemWire.Encode(_backend.GetVolumes()));
-                case "fs.stat":
-                    {
-                        var arg = Decode<RemotePath>(request.Payload);
-                        return Reply(request, RemoteFileSystemWire.Encode(_backend.Stat(arg)));
-                    }
-                case "fs.list":
-                    {
-                        var arg = Decode<RemoteListPath>(request.Payload);
-                        return Reply(request, RemoteFileSystemWire.Encode(_backend.List(arg)));
-                    }
-                case "fs.read":
-                    {
-                        var arg = Decode<RemoteReadRange>(request.Payload);
-                        if (arg.Length < 0 || arg.Length > RemoteFileSystemWire.MaxChunkBytes) throw new InvalidDataException("Read length exceeds the filesystem transfer limit.");
-                        return Reply(request, _backend.Read(arg, cancellationToken));
-                    }
-                case "fs.write":
-                    {
-                        var arg = Decode<RemoteWriteRange>(request.Payload);
-                        if (arg.Data.Length > RemoteFileSystemWire.LegacyMaxChunkBytes) throw new InvalidDataException("Legacy filesystem write length exceeds 64 KiB.");
-                        var written = await _backend.WriteAsync(arg, cancellationToken).ConfigureAwait(false);
-                        return Reply(request, RemoteFileSystemWire.Encode(new RemoteWriteResult(written)));
-                    }
-                case "fs.write.v2":
-                    {
-                        var arg = RemoteFileSystemWire.DecodeWriteV2(request.Payload);
-                        var written = await _backend.WriteAsync(arg, cancellationToken).ConfigureAwait(false);
-                        return Reply(request, RemoteFileSystemWire.Encode(new RemoteWriteResult(written)));
-                    }
-                case "fs.create":
-                    _backend.Create(Decode<RemoteCreatePath>(request.Payload));
-                    return Reply(request, []);
-                case "fs.delete":
-                    _backend.Delete(Decode<RemoteDeletePath>(request.Payload));
-                    return Reply(request, []);
-                case "fs.rename":
-                    _backend.Rename(Decode<RemoteRenamePath>(request.Payload));
-                    return Reply(request, []);
-                case "fs.truncate":
-                    _backend.SetLength(Decode<RemoteSetLength>(request.Payload));
-                    return Reply(request, []);
-                case "fs.setinfo":
-                    _backend.SetInfo(Decode<RemoteSetInfo>(request.Payload));
-                    return Reply(request, []);
-                case "fs.flush":
-                    {
-                        var arg = Decode<RemoteFlushPath>(request.Payload);
-                        _backend.Flush(arg);
-                        return Reply(request, []);
-                    }
-                case "fs.eject":
-                    await _backend.EjectAsync(Decode<RemoteVolumeRequest>(request.Payload), cancellationToken).ConfigureAwait(false);
-                    return Reply(request, []);
-                default: throw new NotSupportedException($"Unknown filesystem method: {request.Method}");
-            }
+                "fs.volumes" => HandleVolumes(request),
+                "fs.stat" => HandleStat(request),
+                "fs.list" => HandleList(request),
+                "fs.read" => HandleRead(request, cancellationToken),
+                "fs.write" => await HandleLegacyWriteAsync(request, cancellationToken)
+                    .ConfigureAwait(false),
+                "fs.write.v2" => await HandleWriteV2Async(request, cancellationToken)
+                    .ConfigureAwait(false),
+                "fs.create" => HandleMutation(request, Decode<RemoteCreatePath>, _backend.Create),
+                "fs.delete" => HandleMutation(request, Decode<RemoteDeletePath>, _backend.Delete),
+                "fs.rename" => HandleMutation(request, Decode<RemoteRenamePath>, _backend.Rename),
+                "fs.truncate" => HandleMutation(request, Decode<RemoteSetLength>, _backend.SetLength),
+                "fs.setinfo" => HandleMutation(request, Decode<RemoteSetInfo>, _backend.SetInfo),
+                "fs.flush" => HandleMutation(request, Decode<RemoteFlushPath>, _backend.Flush),
+                "fs.eject" => await HandleEjectAsync(request, cancellationToken)
+                    .ConfigureAwait(false),
+                _ => throw new NotSupportedException($"Unknown filesystem method: {request.Method}")
+            };
         }
-        catch (JsonException ex) { throw new InvalidDataException("Invalid filesystem request payload.", ex); }
+        catch (JsonException exception)
+        {
+            throw new InvalidDataException("Invalid filesystem request payload.", exception);
+        }
+    }
+
+    private ProtocolMessage HandleVolumes(ProtocolMessage request)
+    {
+        RequireEmpty(request.Payload);
+        return Reply(request, RemoteFileSystemWire.Encode(_backend.GetVolumes()));
+    }
+
+    private ProtocolMessage HandleStat(ProtocolMessage request)
+    {
+        var path = Decode<RemotePath>(request.Payload);
+        return Reply(request, RemoteFileSystemWire.Encode(_backend.Stat(path)));
+    }
+
+    private ProtocolMessage HandleList(ProtocolMessage request)
+    {
+        var path = Decode<RemoteListPath>(request.Payload);
+        return Reply(request, RemoteFileSystemWire.Encode(_backend.List(path)));
+    }
+
+    private ProtocolMessage HandleRead(ProtocolMessage request, CancellationToken token)
+    {
+        var range = Decode<RemoteReadRange>(request.Payload);
+        if (range.Length < 0 || range.Length > RemoteFileSystemWire.MaxChunkBytes)
+        {
+            throw new InvalidDataException("Read length exceeds the filesystem transfer limit.");
+        }
+
+        return Reply(request, _backend.Read(range, token));
+    }
+
+    private async ValueTask<ProtocolMessage> HandleLegacyWriteAsync(
+        ProtocolMessage request,
+        CancellationToken token)
+    {
+        var range = Decode<RemoteWriteRange>(request.Payload);
+        if (range.Data.Length > RemoteFileSystemWire.LegacyMaxChunkBytes)
+        {
+            throw new InvalidDataException("Legacy filesystem write length exceeds 64 KiB.");
+        }
+
+        var bytesWritten = await _backend.WriteAsync(range, token).ConfigureAwait(false);
+        return CreateWriteReply(request, bytesWritten);
+    }
+
+    private async ValueTask<ProtocolMessage> HandleWriteV2Async(
+        ProtocolMessage request,
+        CancellationToken token)
+    {
+        var range = RemoteFileSystemWire.DecodeWriteV2(request.Payload);
+        var bytesWritten = await _backend.WriteAsync(range, token).ConfigureAwait(false);
+        return CreateWriteReply(request, bytesWritten);
+    }
+
+    private static ProtocolMessage CreateWriteReply(ProtocolMessage request, long bytesWritten) =>
+        Reply(request, RemoteFileSystemWire.Encode(new RemoteWriteResult(bytesWritten)));
+
+    private ProtocolMessage HandleMutation<T>(
+        ProtocolMessage request,
+        Func<byte[], T> decode,
+        Action<T> mutate)
+    {
+        mutate(decode(request.Payload));
+        return Reply(request, []);
+    }
+
+    private async ValueTask<ProtocolMessage> HandleEjectAsync(
+        ProtocolMessage request,
+        CancellationToken token)
+    {
+        var volume = Decode<RemoteVolumeRequest>(request.Payload);
+        await _backend.EjectAsync(volume, token).ConfigureAwait(false);
+        return Reply(request, []);
     }
 
     private static T Decode<T>(byte[] payload) => RemoteFileSystemWire.Decode<T>(payload);

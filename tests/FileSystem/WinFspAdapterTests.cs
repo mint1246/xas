@@ -39,7 +39,8 @@ public static class WinFspAdapterTests
                 out var written, out var afterWrite);
             Equal(0, status, "Write failed.");
             Equal<uint>((uint)suffix.Length, written, "Write returned the wrong byte count.");
-            Equal("hello world", Encoding.UTF8.GetString(remote.GetFile("hello.txt")), "Write did not reach the remote backend.");
+            Equal("hello world", Encoding.UTF8.GetString(remote.GetFile("hello.txt")),
+                "Write did not reach the remote backend.");
             Equal<ulong>(11, afterWrite.FileSize, "Write returned stale file metadata.");
         }
         finally { Marshal.FreeHGlobal(buffer); }
@@ -47,15 +48,18 @@ public static class WinFspAdapterTests
         status = fs.SetFileSize(null!, helloHandle, 5, false, out var truncated);
         Equal(0, status, "SetFileSize failed.");
         Equal<ulong>(5, truncated.FileSize, "SetFileSize returned stale metadata.");
-        Equal("hello", Encoding.UTF8.GetString(remote.GetFile("hello.txt")), "Truncate did not reach the remote backend.");
+        Equal("hello", Encoding.UTF8.GetString(remote.GetFile("hello.txt")),
+            "Truncate did not reach the remote backend.");
 
         status = fs.Flush(null!, helloHandle, out _);
         Equal(0, status, "Flush failed.");
-        Assert(remote.Flushes.Contains(("hello.txt", false)), "WinFsp Flush did not request a durable file flush.");
+        Assert(remote.Flushes.Contains(("hello.txt", false)),
+            "WinFsp Flush did not request a durable file flush.");
 
         status = fs.Rename(null!, helloHandle, "\\hello.txt", "\\renamed.txt", false);
         Equal(0, status, "Rename failed.");
-        Assert(!remote.Exists("hello.txt") && remote.Exists("renamed.txt"), "Rename did not update the remote backend.");
+        Assert(!remote.Exists("hello.txt") && remote.Exists("renamed.txt"),
+            "Rename did not update the remote backend.");
 
         status = fs.Create("\\new.txt", 0, 0, 0, [], 0,
             out _, out var newHandle, out _, out _);
@@ -64,23 +68,33 @@ public static class WinFspAdapterTests
         status = fs.SetDelete(null!, newHandle, "\\new.txt", true);
         Equal(0, status, "SetDelete failed.");
         fs.Cleanup(null!, newHandle, "\\new.txt", 0);
-        Assert(!remote.Exists("new.txt"), "Delete-on-cleanup did not reach the remote backend.");
+        Assert(!remote.Exists("new.txt"),
+            "Delete-on-cleanup did not reach the remote backend.");
 
         status = fs.Create("\\created-dir", 1 /* FILE_DIRECTORY_FILE */, 0, 0, [], 0,
             out _, out var dirHandle, out var dirInfo, out _);
         Equal(0, status, "Directory create failed.");
-        Assert(remote.IsDirectory("created-dir"), "Directory create did not reach the remote backend.");
+        Assert(remote.IsDirectory("created-dir"),
+            "Directory create did not reach the remote backend.");
         Assert((((FileAttributes)dirInfo.FileAttributes) & FileAttributes.Directory) != 0,
             "Directory create did not report the directory attribute.");
 
-        status = fs.Open("\\", 1 /* FILE_DIRECTORY_FILE */, 0, out _, out var rootHandle, out _, out _);
+        status = fs.Open("\\", 1 /* FILE_DIRECTORY_FILE */, 0,
+            out _, out var rootHandle, out _, out _);
         Equal(0, status, "Root directory open failed.");
         object context = null!;
         var names = new List<string>();
-        while (fs.ReadDirectoryEntry(null!, rootHandle, "*", null!, ref context, out var name, out _)) names.Add(name);
-        Assert(names.Contains("renamed.txt", StringComparer.OrdinalIgnoreCase), "Directory enumeration missed renamed.txt.");
-        Assert(names.Contains("folder", StringComparer.OrdinalIgnoreCase), "Directory enumeration missed folder.");
-        Assert(names.Contains("created-dir", StringComparer.OrdinalIgnoreCase), "Directory enumeration missed created-dir.");
+        while (fs.ReadDirectoryEntry(
+            null!, rootHandle, "*", null!, ref context, out var name, out _))
+        {
+            names.Add(name);
+        }
+        Assert(names.Contains("renamed.txt", StringComparer.OrdinalIgnoreCase),
+            "Directory enumeration missed renamed.txt.");
+        Assert(names.Contains("folder", StringComparer.OrdinalIgnoreCase),
+            "Directory enumeration missed folder.");
+        Assert(names.Contains("created-dir", StringComparer.OrdinalIgnoreCase),
+            "Directory enumeration missed created-dir.");
 
         status = fs.CanDelete(null!, dirHandle, "\\created-dir");
         Equal(0, status, "Empty directory should be deletable.");
@@ -127,62 +141,105 @@ public static class WinFspAdapterTests
             lock (_gate) return _entries[Normalize(path)].Data.ToArray();
         }
 
-        public bool Exists(string path) { lock (_gate) return _entries.ContainsKey(Normalize(path)); }
-        public bool IsDirectory(string path) { lock (_gate) return _entries[Normalize(path)].Directory; }
+        public bool Exists(string path)
+        {
+            lock (_gate)
+            {
+                return _entries.ContainsKey(Normalize(path));
+            }
+        }
 
-        public ValueTask<RemoteFileStat> StatAsync(string path, CancellationToken cancellationToken)
+        public bool IsDirectory(string path)
+        {
+            lock (_gate)
+            {
+                return _entries[Normalize(path)].Directory;
+            }
+        }
+
+        public ValueTask<RemoteFileStat> StatAsync(
+            string path, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
                 var normalized = Normalize(path);
-                if (!_entries.TryGetValue(normalized, out var entry)) throw new FileNotFoundException(normalized);
-                return ValueTask.FromResult(new RemoteFileStat(Path.GetFileName(normalized), entry.Directory,
-                    entry.Directory ? 0 : entry.Data.LongLength, entry.LastWriteUnixMs, entry.ReadOnly));
+                if (!_entries.TryGetValue(normalized, out var entry))
+                {
+                    throw new FileNotFoundException(normalized);
+                }
+
+                var stat = new RemoteFileStat(
+                    Path.GetFileName(normalized), entry.Directory,
+                    entry.Directory ? 0 : entry.Data.LongLength,
+                    entry.LastWriteUnixMs, entry.ReadOnly);
+                return ValueTask.FromResult(stat);
             }
         }
 
-        public ValueTask<RemoteDirectoryPage> ListAsync(string path, int offset, CancellationToken cancellationToken)
+        public ValueTask<RemoteDirectoryPage> ListAsync(
+            string path, int offset, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
                 var parent = Normalize(path);
                 if (!_entries.TryGetValue(parent, out var parentEntry) || !parentEntry.Directory)
+                {
                     throw new DirectoryNotFoundException(parent);
+                }
                 var prefix = parent.Length == 0 ? "" : parent + "/";
-                var children = _entries.Where(pair => pair.Key.Length > prefix.Length && pair.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                var children = _entries.Where(pair =>
+                        pair.Key.Length > prefix.Length &&
+                        pair.Key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
                     .Where(pair => !pair.Key[prefix.Length..].Contains('/'))
                     .OrderBy(pair => pair.Key, StringComparer.OrdinalIgnoreCase)
-                    .Select(pair => new RemoteFileEntry(pair.Key[prefix.Length..], pair.Value.Directory,
-                        pair.Value.Directory ? 0 : pair.Value.Data.LongLength, pair.Value.LastWriteUnixMs))
+                    .Select(pair => new RemoteFileEntry(
+                        pair.Key[prefix.Length..], pair.Value.Directory,
+                        pair.Value.Directory ? 0 : pair.Value.Data.LongLength,
+                        pair.Value.LastWriteUnixMs))
                     .Skip(offset).Take(512).ToArray();
                 return ValueTask.FromResult(new RemoteDirectoryPage(children, false));
             }
         }
 
-        public ValueTask<byte[]> ReadAsync(string path, long offset, int length, CancellationToken cancellationToken)
+        public ValueTask<byte[]> ReadAsync(
+            string path, long offset, int length, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
                 var entry = File(path);
-                if (offset >= entry.Data.LongLength) return ValueTask.FromResult(Array.Empty<byte>());
+                if (offset >= entry.Data.LongLength)
+                {
+                    return ValueTask.FromResult(Array.Empty<byte>());
+                }
                 var count = checked((int)Math.Min(length, entry.Data.LongLength - offset));
-                return ValueTask.FromResult(entry.Data.AsSpan(checked((int)offset), count).ToArray());
+                var data = entry.Data.AsSpan(checked((int)offset), count).ToArray();
+                return ValueTask.FromResult(data);
             }
         }
 
-        public ValueTask<int> WriteAsync(string path, long offset, ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
+        public ValueTask<int> WriteAsync(
+            string path,
+            long offset,
+            ReadOnlyMemory<byte> data,
+            CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
                 var key = Normalize(path);
                 var entry = File(key);
-                if (entry.ReadOnly) throw new UnauthorizedAccessException();
+                if (entry.ReadOnly)
+                {
+                    throw new UnauthorizedAccessException();
+                }
                 var required = checked((int)(offset + data.Length));
-                if (entry.Data.Length < required) Array.Resize(ref entry.Data, required);
+                if (entry.Data.Length < required)
+                {
+                    Array.Resize(ref entry.Data, required);
+                }
                 data.Span.CopyTo(entry.Data.AsSpan(checked((int)offset)));
                 entry.LastWriteUnixMs = Now();
                 _entries[key] = entry;
@@ -190,61 +247,77 @@ public static class WinFspAdapterTests
             }
         }
 
-        public ValueTask CreateAsync(string path, bool directory, bool replace, CancellationToken cancellationToken)
+        public ValueTask CreateAsync(
+            string path, bool directory, bool replace, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
                 var key = Normalize(path);
-                if (_entries.ContainsKey(key) && !replace) throw new IOException("Destination exists.");
+                if (_entries.ContainsKey(key) && !replace)
+                {
+                    throw new IOException("Destination exists.");
+                }
                 RequireParent(key);
                 _entries[key] = new Entry(directory, [], false, Now());
                 return ValueTask.CompletedTask;
             }
         }
 
-        public ValueTask DeleteAsync(string path, bool directory, CancellationToken cancellationToken)
+        public ValueTask DeleteAsync(
+            string path, bool directory, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
                 var key = Normalize(path);
-                if (!_entries.TryGetValue(key, out var entry)) throw new FileNotFoundException(key);
-                if (entry.Directory != directory) throw new IOException("Type mismatch.");
-                var prefix = key + "/";
-                if (directory && _entries.Keys.Any(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)))
-                    throw new IOException("Directory not empty.");
+                if (!_entries.TryGetValue(key, out var entry))
+                {
+                    throw new FileNotFoundException(key);
+                }
+                if (entry.Directory != directory)
+                {
+                    throw new IOException("Type mismatch.");
+                }
+                if (directory)
+                {
+                    EnsureDirectoryIsEmpty(key);
+                }
                 _entries.Remove(key);
                 return ValueTask.CompletedTask;
             }
         }
 
-        public ValueTask RenameAsync(string path, string newPath, bool replace, CancellationToken cancellationToken)
+        public ValueTask RenameAsync(
+            string path, string newPath, bool replace, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
                 var source = Normalize(path);
                 var destination = Normalize(newPath);
-                if (!_entries.TryGetValue(source, out var entry)) throw new FileNotFoundException(source);
-                if (_entries.ContainsKey(destination) && !replace) throw new IOException("Destination exists.");
+                if (!_entries.TryGetValue(source, out var entry))
+                {
+                    throw new FileNotFoundException(source);
+                }
+                if (_entries.ContainsKey(destination) && !replace)
+                {
+                    throw new IOException("Destination exists.");
+                }
                 RequireParent(destination);
                 _entries.Remove(destination);
                 _entries.Remove(source);
                 _entries[destination] = entry;
                 if (entry.Directory)
                 {
-                    foreach (var child in _entries.Where(p => p.Key.StartsWith(source + "/", StringComparison.OrdinalIgnoreCase)).ToArray())
-                    {
-                        _entries.Remove(child.Key);
-                        _entries[destination + child.Key[source.Length..]] = child.Value;
-                    }
+                    MoveDirectoryChildren(source, destination);
                 }
                 return ValueTask.CompletedTask;
             }
         }
 
-        public ValueTask SetLengthAsync(string path, long length, CancellationToken cancellationToken)
+        public ValueTask SetLengthAsync(
+            string path, long length, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
@@ -258,14 +331,22 @@ public static class WinFspAdapterTests
             }
         }
 
-        public ValueTask SetInfoAsync(string path, long? creationUnixMs, long? lastAccessUnixMs,
-            long? lastWriteUnixMs, bool? readOnly, CancellationToken cancellationToken)
+        public ValueTask SetInfoAsync(
+            string path,
+            long? creationUnixMs,
+            long? lastAccessUnixMs,
+            long? lastWriteUnixMs,
+            bool? readOnly,
+            CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
             lock (_gate)
             {
                 var key = Normalize(path);
-                if (!_entries.TryGetValue(key, out var entry)) throw new FileNotFoundException(key);
+                if (!_entries.TryGetValue(key, out var entry))
+                {
+                    throw new FileNotFoundException(key);
+                }
                 if (lastWriteUnixMs is not null) entry.LastWriteUnixMs = lastWriteUnixMs.Value;
                 if (readOnly is not null) entry.ReadOnly = readOnly.Value;
                 _entries[key] = entry;
@@ -278,6 +359,30 @@ public static class WinFspAdapterTests
             cancellationToken.ThrowIfCancellationRequested();
             Flushes.Add((Normalize(path), directory));
             return ValueTask.CompletedTask;
+        }
+
+        private void EnsureDirectoryIsEmpty(string path)
+        {
+            var prefix = path + "/";
+            var hasChildren = _entries.Keys.Any(
+                entryPath => entryPath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+            if (hasChildren)
+            {
+                throw new IOException("Directory not empty.");
+            }
+        }
+
+        private void MoveDirectoryChildren(string source, string destination)
+        {
+            var children = _entries
+                .Where(entry => entry.Key.StartsWith(
+                    source + "/", StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            foreach (var child in children)
+            {
+                _entries.Remove(child.Key);
+                _entries[destination + child.Key[source.Length..]] = child.Value;
+            }
         }
 
         private Entry File(string path)

@@ -32,15 +32,22 @@ internal sealed class DaemonWebHost : IAsyncDisposable
     private readonly WebSessionStore _webSessions = new();
     private Task? _acceptLoop;
 
-    public DaemonWebHost(PeerSessionManager sessions, PeerTrustStore trust, PeerPermissionStore permissions,
-        LocalConfiguration configuration, PeerAdministrationService peerAdministration,
-        PairingService? pairing = null, RemoteMountManager? remoteMounts = null, int port = 47832)
+    public DaemonWebHost(
+        PeerSessionManager sessions,
+        PeerTrustStore trust,
+        PeerPermissionStore permissions,
+        LocalConfiguration configuration,
+        PeerAdministrationService peerAdministration,
+        PairingService? pairing = null,
+        RemoteMountManager? remoteMounts = null,
+        int port = 47832)
     {
         _sessions = sessions ?? throw new ArgumentNullException(nameof(sessions));
         _trust = trust ?? throw new ArgumentNullException(nameof(trust));
         _permissions = permissions ?? throw new ArgumentNullException(nameof(permissions));
         _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-        _peerAdministration = peerAdministration ?? throw new ArgumentNullException(nameof(peerAdministration));
+        _peerAdministration = peerAdministration
+            ?? throw new ArgumentNullException(nameof(peerAdministration));
         _pairing = pairing;
         _remoteMounts = remoteMounts;
         if (port is < 0 or > 65535) throw new ArgumentOutOfRangeException(nameof(port));
@@ -72,14 +79,26 @@ internal sealed class DaemonWebHost : IAsyncDisposable
 
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
     {
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
-        while (!linked.IsCancellationRequested)
+        using var serverShutdown =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
+        while (!serverShutdown.IsCancellationRequested)
         {
             TcpClient client;
-            try { client = await _listener.AcceptTcpClientAsync(linked.Token).ConfigureAwait(false); }
-            catch (OperationCanceledException) when (linked.IsCancellationRequested) { break; }
-            catch (ObjectDisposedException) when (linked.IsCancellationRequested) { break; }
-            _ = HandleClientAsync(client, linked.Token);
+            try
+            {
+                client = await _listener.AcceptTcpClientAsync(serverShutdown.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (serverShutdown.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (ObjectDisposedException) when (serverShutdown.IsCancellationRequested)
+            {
+                break;
+            }
+
+            _ = HandleClientAsync(client, serverShutdown.Token);
         }
     }
 
@@ -93,175 +112,327 @@ internal sealed class DaemonWebHost : IAsyncDisposable
             {
                 var stream = client.GetStream();
                 var request = await ReadRequestAsync(stream, token).ConfigureAwait(false);
-                if (request is null) return;
-                var localOrigin = $"http://127.0.0.1:{Port}";
-                if (!string.Equals(request.Host, $"127.0.0.1:{Port}", StringComparison.OrdinalIgnoreCase))
-                { await RespondAsync(stream, 403, "text/plain", "Forbidden", null, token); return; }
-                if (request.Method == "GET" && request.Path == "/")
+                if (request is null)
                 {
-                    var sid = GetSessionId(request);
-                    var csrf = _webSessions.GetOrCreate(sid);
-                    var headers = new Dictionary<string, string> { ["Set-Cookie"] = $"{CookieName}={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800" };
-                    await RespondAsync(stream, 200, "text/html; charset=utf-8", RenderPage(csrf), headers, token);
                     return;
                 }
-                if (!TryAuthorize(request, localOrigin))
-                { await RespondAsync(stream, 403, "application/json", "{\"error\":\"forbidden\"}", null, token); return; }
 
-                if (request.Method == "GET" && request.Path == "/api/state")
-                {
-                    var trusted = _trust.List().ToDictionary(p => p.DeviceId, StringComparer.Ordinal);
-                    var snapshots = _sessions.GetSnapshots().ToDictionary(s => s.DeviceId, StringComparer.Ordinal);
-                    var peers = snapshots.Keys.Concat(trusted.Keys).Distinct(StringComparer.Ordinal).Select(id =>
-                    {
-                        snapshots.TryGetValue(id, out var s);
-                        trusted.TryGetValue(id, out var t);
-                        return new
-                        {
-                            DeviceId = id,
-                            Name = s?.Name ?? t?.DisplayName ?? id,
-                            Online = s?.Online ?? false,
-                            RealtimeReady = s?.RealtimeReady ?? false,
-                            Endpoint = s?.Endpoint,
-                            LastSeen = s?.LastSeen,
-                            Paired = t is not null,
-                            Permissions = Enum.GetValues<Capability>().ToDictionary(c => c.ToString(), c => _permissions.IsAllowed(id, c))
-                        };
-                    });
-                    var pending = _pairing?.ListPending() ?? [];
-                    var capabilities = Enum.GetValues<Capability>()
-                        .Where(c => c != Capability.PrivilegedShell || OperatingSystem.IsWindows())
-                        .Select(c => c.ToString()).ToArray();
-                    var storage = new
-                    {
-                        NativeMountsAvailable = _remoteMounts?.NativeMountsAvailable ?? false,
-                        AutoExposeRemovable = _configuration.AutoExposeRemovable,
-                        AutoMountRemoteRemovable = _configuration.AutoMountRemoteRemovable,
-                        AutoExposeMainDrive = _configuration.AutoExposeMainDrive,
-                        AutoMountRemoteMainDrive = _configuration.AutoMountRemoteMainDrive,
-                        Exports = _configuration.FileSystemExports,
-                        Mounts = _remoteMounts?.GetSnapshots() ?? []
-                    };
-                    await RespondJsonAsync(stream, 200, new { peers, pending, capabilities, storage }, token);
-                    return;
-                }
-                if (request.Method == "POST" && request.Path == "/api/permission")
-                {
-                    var body = JsonSerializer.Deserialize<PermissionRequest>(request.Body, RequestJson) ?? throw new InvalidDataException();
-                    if (string.IsNullOrWhiteSpace(body.DeviceId) || !Enum.TryParse<Capability>(body.Capability, out var cap) || !Enum.IsDefined(cap))
-                    { await RespondAsync(stream, 400, "application/json", "{\"error\":\"invalid request\"}", null, token); return; }
-                    _permissions.SetAllowed(body.DeviceId, cap, body.Allowed);
-                    await RespondAsync(stream, 200, "application/json", "{\"ok\":true}", null, token);
-                    return;
-                }
-                if (request.Method == "POST" && request.Path == "/api/pairing/decision" && _pairing is not null)
-                {
-                    var body = JsonSerializer.Deserialize<PairingDecisionRequest>(request.Body, RequestJson) ?? throw new InvalidDataException();
-                    var pending = _pairing.ListPending().FirstOrDefault(p => p.PairingId == body.PairingId)
-                        ?? throw new InvalidDataException("Pairing request not found or expired.");
-                    var preset = body.Preset?.ToLowerInvariant() switch
-                    {
-                        null or "personal" => PairPermissionPreset.Personal,
-                        "kvm" => PairPermissionPreset.Kvm,
-                        "none" or "trust-only" => PairPermissionPreset.None,
-                        _ => throw new InvalidDataException("Unknown pairing permission preset.")
-                    };
-                    var paired = await _pairing.ApproveAsync(body.PairingId, body.Approve, token).ConfigureAwait(false);
-                    if (body.Approve && !paired)
-                    {
-                        await RespondAsync(stream, 409, "application/json", "{\"error\":\"remote rejected pairing\"}", null, token);
-                        return;
-                    }
-                    if (paired)
-                    {
-                        _configuration.UpsertPeer(new ConfiguredPeer(pending.DeviceId, pending.DisplayName, pending.Address, pending.ControlPort));
-                        PairPermissionPresets.Apply(_permissions, pending.DeviceId, preset);
-                        _sessions.UpdateConfiguredPeers(_configuration.Peers);
-                    }
-                    await RespondAsync(stream, 200, "application/json", "{\"ok\":true}", null, token);
-                    return;
-                }
-                if (request.Method == "POST" && request.Path == "/api/revoke")
-                {
-                    var body = JsonSerializer.Deserialize<DeviceRequest>(request.Body, RequestJson) ?? throw new InvalidDataException();
-                    _ = await _peerAdministration.RevokeAsync(body.DeviceId).ConfigureAwait(false);
-                    await RespondAsync(stream, 200, "application/json", "{\"ok\":true}", null, token);
-                    return;
-                }
-                if (request.Method == "POST" && request.Path == "/api/storage/settings")
-                {
-                    var body = JsonSerializer.Deserialize<StorageSettingsRequest>(request.Body, RequestJson) ?? throw new InvalidDataException();
-                    _configuration.SetAutoExposeRemovable(body.AutoExposeRemovable);
-                    _configuration.SetAutoMountRemoteRemovable(body.AutoMountRemoteRemovable);
-                    if (body.AutoExposeMainDrive is { } exposeMain) _configuration.SetAutoExposeMainDrive(exposeMain);
-                    if (body.AutoMountRemoteMainDrive is { } mountMain) _configuration.SetAutoMountRemoteMainDrive(mountMain);
-                    await RespondAsync(stream, 200, "application/json", "{\"ok\":true}", null, token);
-                    return;
-                }
-                if (request.Method == "POST" && request.Path == "/api/storage/volumes")
-                {
-                    try
-                    {
-                        var manager = RequireRemoteMounts();
-                        var body = JsonSerializer.Deserialize<DeviceRequest>(request.Body, RequestJson) ?? throw new InvalidDataException();
-                        var volumes = await manager.GetRemoteVolumesAsync(body.DeviceId, token).ConfigureAwait(false);
-                        await RespondJsonAsync(stream, 200, volumes, token);
-                    }
-                    catch (Exception ex) when (IsStorageUserError(ex))
-                    { await RespondJsonAsync(stream, 400, new { error = ex.Message }, token); }
-                    return;
-                }
-                if (request.Method == "POST" && request.Path is "/api/storage/mount" or "/api/storage/unmount" or "/api/storage/eject")
-                {
-                    try
-                    {
-                        var manager = RequireRemoteMounts();
-                        var body = JsonSerializer.Deserialize<StorageVolumeRequest>(request.Body, RequestJson) ?? throw new InvalidDataException();
-                        if (request.Path == "/api/storage/mount")
-                        {
-                            var mounted = await manager.MountVolumeAsync(body.DeviceId, body.Volume, token).ConfigureAwait(false);
-                            await RespondJsonAsync(stream, 200, mounted, token);
-                        }
-                        else if (request.Path == "/api/storage/unmount")
-                        {
-                            var unmounted = await manager.UnmountVolumeAsync(body.DeviceId, body.Volume, token).ConfigureAwait(false);
-                            await RespondJsonAsync(stream, 200, new { ok = true, wasMounted = unmounted }, token);
-                        }
-                        else
-                        {
-                            await manager.EjectVolumeAsync(body.DeviceId, body.Volume, token).ConfigureAwait(false);
-                            await RespondAsync(stream, 200, "application/json", "{\"ok\":true}", null, token);
-                        }
-                    }
-                    catch (Exception ex) when (IsStorageUserError(ex))
-                    { await RespondJsonAsync(stream, 400, new { error = ex.Message }, token); }
-                    return;
-                }
-                if (request.Method == "POST" && request.Path == "/api/storage/export")
-                {
-                    var body = JsonSerializer.Deserialize<StorageExportRequest>(request.Body, RequestJson) ?? throw new InvalidDataException();
-                    try
-                    {
-                        _configuration.UpsertFileSystemExport(new FileSystemExport(body.Id, body.Path, body.Name, body.ReadOnly));
-                        await RespondAsync(stream, 200, "application/json", "{\"ok\":true}", null, token);
-                    }
-                    catch (Exception ex) when (ex is ArgumentException or IOException or UnauthorizedAccessException)
-                    { await RespondJsonAsync(stream, 400, new { error = ex.Message }, token); }
-                    return;
-                }
-                if (request.Method == "POST" && request.Path == "/api/storage/export/remove")
-                {
-                    var body = JsonSerializer.Deserialize<StorageExportRemoveRequest>(request.Body, RequestJson) ?? throw new InvalidDataException();
-                    var removed = _configuration.RemoveFileSystemExport(body.Id);
-                    await RespondJsonAsync(stream, 200, new { ok = true, removed }, token);
-                    return;
-                }
-                await RespondAsync(stream, 404, "application/json", "{\"error\":\"not found\"}", null, token);
+                await RespondToRequestAsync(stream, request, token).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is IOException or SocketException or OperationCanceledException or JsonException or InvalidDataException)
-            { }
+            catch (Exception ex) when (IsConnectionError(ex))
+            {
+            }
         }
     }
+
+    private async Task RespondToRequestAsync(
+        NetworkStream stream,
+        Request request,
+        CancellationToken token)
+    {
+        var localOrigin = $"http://127.0.0.1:{Port}";
+        if (!string.Equals(request.Host, $"127.0.0.1:{Port}", StringComparison.OrdinalIgnoreCase))
+        {
+            await RespondAsync(stream, 403, "text/plain", "Forbidden", null, token);
+            return;
+        }
+        if (request.Method == "GET" && request.Path == "/")
+        {
+            await RespondHomeAsync(stream, request, token).ConfigureAwait(false);
+            return;
+        }
+        if (!TryAuthorize(request, localOrigin))
+        {
+            await RespondAsync(stream, 403, "application/json", "{\"error\":\"forbidden\"}", null, token);
+            return;
+        }
+
+        if (request.Method == "GET" && request.Path == "/api/state")
+        {
+            await RespondStateAsync(stream, token).ConfigureAwait(false);
+            return;
+        }
+        if (await TryHandleSettingsRequestAsync(stream, request, token).ConfigureAwait(false)) return;
+        if (await TryHandlePairingRequestAsync(stream, request, token).ConfigureAwait(false)) return;
+        if (await TryHandleStorageRequestAsync(stream, request, token).ConfigureAwait(false)) return;
+
+        await RespondAsync(stream, 404, "application/json", "{\"error\":\"not found\"}", null, token);
+    }
+
+    private async Task RespondHomeAsync(NetworkStream stream, Request request, CancellationToken token)
+    {
+        var sessionId = GetSessionId(request);
+        var csrf = _webSessions.GetOrCreate(sessionId);
+        var headers = new Dictionary<string, string>
+        {
+            ["Set-Cookie"] = $"{CookieName}={sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800"
+        };
+        await RespondAsync(stream, 200, "text/html; charset=utf-8", RenderPage(csrf), headers, token);
+    }
+
+    private async Task RespondStateAsync(NetworkStream stream, CancellationToken token)
+    {
+        var trusted = _trust.List().ToDictionary(peer => peer.DeviceId, StringComparer.Ordinal);
+        var snapshots = _sessions.GetSnapshots()
+            .ToDictionary(snapshot => snapshot.DeviceId, StringComparer.Ordinal);
+        var peers = snapshots.Keys.Concat(trusted.Keys)
+            .Distinct(StringComparer.Ordinal)
+            .Select(id => CreatePeerState(id, snapshots, trusted));
+        var pending = _pairing?.ListPending() ?? [];
+        var capabilities = Enum.GetValues<Capability>()
+            .Where(capability => capability != Capability.PrivilegedShell || OperatingSystem.IsWindows())
+            .Select(capability => capability.ToString())
+            .ToArray();
+        var storage = new
+        {
+            NativeMountsAvailable = _remoteMounts?.NativeMountsAvailable ?? false,
+            AutoExposeRemovable = _configuration.AutoExposeRemovable,
+            AutoMountRemoteRemovable = _configuration.AutoMountRemoteRemovable,
+            AutoExposeMainDrive = _configuration.AutoExposeMainDrive,
+            AutoMountRemoteMainDrive = _configuration.AutoMountRemoteMainDrive,
+            Exports = _configuration.FileSystemExports,
+            Mounts = _remoteMounts?.GetSnapshots() ?? []
+        };
+        await RespondJsonAsync(stream, 200, new { peers, pending, capabilities, storage }, token);
+    }
+
+    private object CreatePeerState(
+        string deviceId,
+        IReadOnlyDictionary<string, PeerSessionSnapshot> snapshots,
+        IReadOnlyDictionary<string, TrustedPeer> trusted)
+    {
+        snapshots.TryGetValue(deviceId, out var snapshot);
+        trusted.TryGetValue(deviceId, out var trustedPeer);
+        return new
+        {
+            DeviceId = deviceId,
+            Name = snapshot?.Name ?? trustedPeer?.DisplayName ?? deviceId,
+            Online = snapshot?.Online ?? false,
+            RealtimeReady = snapshot?.RealtimeReady ?? false,
+            Endpoint = snapshot?.Endpoint,
+            LastSeen = snapshot?.LastSeen,
+            Paired = trustedPeer is not null,
+            Permissions = Enum.GetValues<Capability>()
+                .ToDictionary(capability => capability.ToString(),
+                    capability => _permissions.IsAllowed(deviceId, capability))
+        };
+    }
+
+    private async Task<bool> TryHandleSettingsRequestAsync(
+        NetworkStream stream,
+        Request request,
+        CancellationToken token)
+    {
+        if (request.Method == "POST" && request.Path == "/api/permission")
+        {
+            var body = DeserializeRequest<PermissionRequest>(request.Body);
+            if (string.IsNullOrWhiteSpace(body.DeviceId)
+                || !Enum.TryParse<Capability>(body.Capability, out var capability)
+                || !Enum.IsDefined(capability))
+            {
+                await RespondAsync(
+                    stream,
+                    400,
+                    "application/json",
+                    "{\"error\":\"invalid request\"}",
+                    null,
+                    token);
+                return true;
+            }
+
+            _permissions.SetAllowed(body.DeviceId, capability, body.Allowed);
+            await RespondOkAsync(stream, token);
+            return true;
+        }
+        if (request.Method == "POST" && request.Path == "/api/revoke")
+        {
+            var body = DeserializeRequest<DeviceRequest>(request.Body);
+            _ = await _peerAdministration.RevokeAsync(body.DeviceId).ConfigureAwait(false);
+            await RespondOkAsync(stream, token);
+            return true;
+        }
+        if (request.Method != "POST" || request.Path != "/api/storage/settings") return false;
+
+        var settings = DeserializeRequest<StorageSettingsRequest>(request.Body);
+        _configuration.SetAutoExposeRemovable(settings.AutoExposeRemovable);
+        _configuration.SetAutoMountRemoteRemovable(settings.AutoMountRemoteRemovable);
+        if (settings.AutoExposeMainDrive is { } exposeMain)
+            _configuration.SetAutoExposeMainDrive(exposeMain);
+        if (settings.AutoMountRemoteMainDrive is { } mountMain)
+            _configuration.SetAutoMountRemoteMainDrive(mountMain);
+        await RespondOkAsync(stream, token);
+        return true;
+    }
+
+    private async Task<bool> TryHandlePairingRequestAsync(
+        NetworkStream stream,
+        Request request,
+        CancellationToken token)
+    {
+        if (request.Method != "POST" || request.Path != "/api/pairing/decision" || _pairing is null)
+            return false;
+
+        var body = DeserializeRequest<PairingDecisionRequest>(request.Body);
+        var pending = _pairing.ListPending()
+            .FirstOrDefault(item => item.PairingId == body.PairingId)
+            ?? throw new InvalidDataException("Pairing request not found or expired.");
+        var preset = ParsePairingPreset(body.Preset);
+        var paired = await _pairing.ApproveAsync(body.PairingId, body.Approve, token)
+            .ConfigureAwait(false);
+        if (body.Approve && !paired)
+        {
+            await RespondAsync(
+                stream,
+                409,
+                "application/json",
+                "{\"error\":\"remote rejected pairing\"}",
+                null,
+                token);
+            return true;
+        }
+        if (paired)
+        {
+            var configuredPeer = new ConfiguredPeer(
+                pending.DeviceId,
+                pending.DisplayName,
+                pending.Address,
+                pending.ControlPort);
+            _configuration.UpsertPeer(configuredPeer);
+            PairPermissionPresets.Apply(_permissions, pending.DeviceId, preset);
+            _sessions.UpdateConfiguredPeers(_configuration.Peers);
+        }
+        await RespondOkAsync(stream, token);
+        return true;
+    }
+
+    private async Task<bool> TryHandleStorageRequestAsync(
+        NetworkStream stream,
+        Request request,
+        CancellationToken token)
+    {
+        if (request.Method == "POST" && request.Path == "/api/storage/volumes")
+        {
+            await HandleStorageVolumesAsync(stream, request.Body, token).ConfigureAwait(false);
+            return true;
+        }
+        if (request.Method == "POST"
+            && request.Path is "/api/storage/mount" or "/api/storage/unmount" or "/api/storage/eject")
+        {
+            await HandleStorageActionAsync(stream, request, token).ConfigureAwait(false);
+            return true;
+        }
+        if (request.Method == "POST" && request.Path == "/api/storage/export")
+        {
+            await HandleStorageExportAsync(stream, request.Body, token).ConfigureAwait(false);
+            return true;
+        }
+        if (request.Method == "POST" && request.Path == "/api/storage/export/remove")
+        {
+            var body = DeserializeRequest<StorageExportRemoveRequest>(request.Body);
+            var removed = _configuration.RemoveFileSystemExport(body.Id);
+            await RespondJsonAsync(stream, 200, new { ok = true, removed }, token);
+            return true;
+        }
+        return false;
+    }
+
+    private async Task HandleStorageVolumesAsync(
+        NetworkStream stream,
+        string bodyText,
+        CancellationToken token)
+    {
+        try
+        {
+            var mounts = RequireRemoteMounts();
+            var body = DeserializeRequest<DeviceRequest>(bodyText);
+            var volumes = await mounts.GetRemoteVolumesAsync(body.DeviceId, token).ConfigureAwait(false);
+            await RespondJsonAsync(stream, 200, volumes, token);
+        }
+        catch (Exception exception) when (IsStorageUserError(exception))
+        {
+            await RespondJsonAsync(stream, 400, new { error = exception.Message }, token);
+        }
+    }
+
+    private async Task HandleStorageActionAsync(
+        NetworkStream stream,
+        Request request,
+        CancellationToken token)
+    {
+        try
+        {
+            var mounts = RequireRemoteMounts();
+            var body = DeserializeRequest<StorageVolumeRequest>(request.Body);
+            await RunStorageActionAsync(stream, request.Path, mounts, body, token)
+                .ConfigureAwait(false);
+        }
+        catch (Exception exception) when (IsStorageUserError(exception))
+        {
+            await RespondJsonAsync(stream, 400, new { error = exception.Message }, token);
+        }
+    }
+
+    private static async Task RunStorageActionAsync(
+        NetworkStream stream,
+        string path,
+        RemoteMountManager mounts,
+        StorageVolumeRequest request,
+        CancellationToken token)
+    {
+        if (path == "/api/storage/mount")
+        {
+            var mounted = await mounts.MountVolumeAsync(request.DeviceId, request.Volume, token)
+                .ConfigureAwait(false);
+            await RespondJsonAsync(stream, 200, mounted, token);
+            return;
+        }
+        if (path == "/api/storage/unmount")
+        {
+            var unmounted = await mounts.UnmountVolumeAsync(request.DeviceId, request.Volume, token)
+                .ConfigureAwait(false);
+            await RespondJsonAsync(stream, 200, new { ok = true, wasMounted = unmounted }, token);
+            return;
+        }
+
+        await mounts.EjectVolumeAsync(request.DeviceId, request.Volume, token).ConfigureAwait(false);
+        await RespondOkAsync(stream, token);
+    }
+
+    private async Task HandleStorageExportAsync(
+        NetworkStream stream,
+        string bodyText,
+        CancellationToken token)
+    {
+        var body = DeserializeRequest<StorageExportRequest>(bodyText);
+        try
+        {
+            var export = new FileSystemExport(body.Id, body.Path, body.Name, body.ReadOnly);
+            _configuration.UpsertFileSystemExport(export);
+            await RespondOkAsync(stream, token);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException or IOException or UnauthorizedAccessException)
+        {
+            await RespondJsonAsync(stream, 400, new { error = exception.Message }, token);
+        }
+    }
+
+    private static T DeserializeRequest<T>(string body) where T : class =>
+        JsonSerializer.Deserialize<T>(body, RequestJson) ?? throw new InvalidDataException();
+
+    private static Task RespondOkAsync(NetworkStream stream, CancellationToken token) =>
+        RespondAsync(stream, 200, "application/json", "{\"ok\":true}", null, token);
+
+    private static PairPermissionPreset ParsePairingPreset(string? preset) => preset?.ToLowerInvariant() switch
+    {
+        null or "personal" => PairPermissionPreset.Personal,
+        "kvm" => PairPermissionPreset.Kvm,
+        "none" or "trust-only" => PairPermissionPreset.None,
+        _ => throw new InvalidDataException("Unknown pairing permission preset.")
+    };
+
+    private static bool IsConnectionError(Exception exception) => exception is
+        IOException or SocketException or OperationCanceledException or JsonException or InvalidDataException;
 
     private bool TryAuthorize(Request request, string origin)
     {

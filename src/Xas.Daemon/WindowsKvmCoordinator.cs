@@ -8,12 +8,22 @@ namespace Xas.Daemon;
 /// <summary>Keeps automatic Windows handoff attached to the currently configured default peer.</summary>
 internal static class WindowsKvmCoordinator
 {
-    public static async Task RunAsync(LocalConfiguration configuration, PeerSessionManager sessions,
-        CancellationToken cancellationToken, Action<string>? log = null)
+    public static async Task RunAsync(
+        LocalConfiguration configuration,
+        PeerSessionManager sessions,
+        CancellationToken cancellationToken,
+        Action<string>? log = null)
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
         var wake = Channel.CreateBounded<byte>(new BoundedChannelOptions(1)
-        { SingleReader = true, SingleWriter = false, FullMode = BoundedChannelFullMode.DropWrite });
+        {
+            SingleReader = true,
+            SingleWriter = false,
+            FullMode = BoundedChannelFullMode.DropWrite
+        });
         void Signal() => wake.Writer.TryWrite(0);
         void SessionChanged(PeerSessionSnapshot _) => Signal();
         void SessionRemoved(string _) => Signal();
@@ -30,12 +40,13 @@ internal static class WindowsKvmCoordinator
             while (!cancellationToken.IsCancellationRequested)
             {
                 await wake.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false);
-                while (wake.Reader.TryRead(out _)) { }
+                DrainWakeSignals(wake.Reader);
 
                 var configured = configuration.Resolve(null);
                 var session = configured is null ? null : sessions.GetSession(configured.DeviceId);
                 var nextId = session?.DeviceId;
-                if (string.Equals(nextId, activeDeviceId, StringComparison.Ordinal) && !activeTask.IsCompleted)
+                if (string.Equals(nextId, activeDeviceId, StringComparison.Ordinal)
+                    && !activeTask.IsCompleted)
                     continue;
 
                 // A task that failed after an asynchronous attach attempt also arrives here through its
@@ -46,19 +57,20 @@ internal static class WindowsKvmCoordinator
 
                 if (activeStop is not null)
                 {
-                    activeStop.Cancel();
-                    try { await activeTask.ConfigureAwait(false); }
-                    catch (OperationCanceledException) when (activeStop.IsCancellationRequested) { }
-                    catch (Exception ex) { log?.Invoke($"KVM handoff stopped: {ex.Message}"); }
-                    activeStop.Dispose();
+                    await StopHandoffAsync(activeStop, activeTask, log).ConfigureAwait(false);
                     activeStop = null;
                     activeTask = Task.CompletedTask;
                     activeDeviceId = null;
                 }
 
-                if (session is null) continue;
+                if (session is null)
+                {
+                    continue;
+                }
                 if (retryingFailedHandoff)
+                {
                     await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
+                }
                 activeDeviceId = session.DeviceId;
                 activeStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 log?.Invoke($"KVM handoff targeting {configured!.Name} ({session.DeviceId}).");
@@ -67,7 +79,9 @@ internal static class WindowsKvmCoordinator
                     TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
         finally
         {
             configuration.Changed -= Signal;
@@ -76,12 +90,38 @@ internal static class WindowsKvmCoordinator
             wake.Writer.TryComplete();
             if (activeStop is not null)
             {
-                activeStop.Cancel();
-                try { await activeTask.ConfigureAwait(false); }
-                catch (OperationCanceledException) when (activeStop.IsCancellationRequested) { }
-                catch (Exception ex) { log?.Invoke($"KVM handoff stopped: {ex.Message}"); }
-                activeStop.Dispose();
+                await StopHandoffAsync(activeStop, activeTask, log).ConfigureAwait(false);
             }
+        }
+    }
+
+    private static void DrainWakeSignals(ChannelReader<byte> reader)
+    {
+        while (reader.TryRead(out _))
+        {
+        }
+    }
+
+    private static async Task StopHandoffAsync(
+        CancellationTokenSource stop,
+        Task handoff,
+        Action<string>? log)
+    {
+        stop.Cancel();
+        try
+        {
+            await handoff.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            log?.Invoke($"KVM handoff stopped: {exception.Message}");
+        }
+        finally
+        {
+            stop.Dispose();
         }
     }
 }

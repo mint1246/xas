@@ -95,19 +95,18 @@ internal sealed class ElevatedConPtySession : IAsyncDisposable
                 },
                 AttributeList = attributeList
             };
-            startupPointer = Marshal.AllocHGlobal(Marshal.SizeOf<StartupInfoEx>());
-            Marshal.StructureToPtr(startup, startupPointer, false);
+            startupPointer = WriteStartupInfo(startup);
+
             var commandLine = new StringBuilder($"\"{shell}\" /Q");
-            if (!CreateProcessAsUser(
-                    token, shell, commandLine, IntPtr.Zero, IntPtr.Zero, false,
-                    ExtendedStartupInfoPresent | 0x00000400, environment,
-                    env.TryGetValue("USERPROFILE", out var profile) ? profile : null,
-                    startupPointer, out var info))
-                ThrowLast("CreateProcessAsUser(ConPTY)");
+            var userProfile = env.TryGetValue("USERPROFILE", out var profile) ? profile : null;
+            var info = StartConPtyProcess(token, shell, commandLine, environment,
+                userProfile, startupPointer);
+
             process = new SafeFileHandle(info.Process, true);
             thread = new SafeFileHandle(info.Thread, true);
             var session = new ElevatedConPtySession(
                 process, thread, pseudoConsole, parentInput, parentOutput);
+
             process = null;
             thread = null;
             pseudoConsole = IntPtr.Zero;
@@ -186,33 +185,133 @@ internal sealed class ElevatedConPtySession : IAsyncDisposable
             handle?.Dispose();
     }
 
+    private static IntPtr WriteStartupInfo(StartupInfoEx startup)
+    {
+        var pointer = Marshal.AllocHGlobal(Marshal.SizeOf<StartupInfoEx>());
+        try
+        {
+            Marshal.StructureToPtr(startup, pointer, false);
+            return pointer;
+        }
+        catch
+        {
+            Marshal.FreeHGlobal(pointer);
+            throw;
+        }
+    }
+
+    private static ProcessInfo StartConPtyProcess(
+        Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token, string shell,
+        StringBuilder commandLine, IntPtr environment, string? userProfile,
+        IntPtr startupPointer)
+    {
+        if (!CreateProcessAsUser(token, shell, commandLine, IntPtr.Zero, IntPtr.Zero, false,
+                ExtendedStartupInfoPresent | 0x00000400, environment, userProfile,
+                startupPointer, out var info))
+            ThrowLast("CreateProcessAsUser(ConPTY)");
+
+        return info;
+    }
+
     [StructLayout(LayoutKind.Sequential)]
-    private struct Coord { public short X, Y; }
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] private struct StartupInfo { public int Size; public string? Reserved, Desktop, Title; public int X, Y, XSize, YSize, XCountChars, YCountChars, FillAttribute, Flags; public short ShowWindow, Reserved2; public IntPtr Reserved2Ptr, StdInput, StdOutput, StdError; }
-    [StructLayout(LayoutKind.Sequential)] private struct StartupInfoEx { public StartupInfo StartupInfo; public IntPtr AttributeList; }
-    [StructLayout(LayoutKind.Sequential)] private struct ProcessInfo { public IntPtr Process, Thread; public uint ProcessId, ThreadId; }
+    private struct Coord
+    {
+        public short X;
+        public short Y;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct StartupInfo
+    {
+        public int Size;
+        public string? Reserved;
+        public string? Desktop;
+        public string? Title;
+
+        public int X;
+        public int Y;
+
+        public int XSize;
+        public int YSize;
+
+        public int XCountChars;
+        public int YCountChars;
+
+        public int FillAttribute;
+        public int Flags;
+
+        public short ShowWindow;
+        public short Reserved2;
+
+        public IntPtr Reserved2Ptr;
+        public IntPtr StdInput;
+        public IntPtr StdOutput;
+        public IntPtr StdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct StartupInfoEx
+    {
+        public StartupInfo StartupInfo;
+        public IntPtr AttributeList;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct ProcessInfo
+    {
+        public IntPtr Process;
+        public IntPtr Thread;
+        public uint ProcessId;
+        public uint ThreadId;
+    }
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CreatePipe(
         out SafeFileHandle read, out SafeFileHandle write, IntPtr attributes, uint size);
+
     [DllImport("kernel32.dll")]
     private static extern int CreatePseudoConsole(
         Coord size, SafeFileHandle input, SafeFileHandle output, uint flags, out IntPtr console);
+
     [DllImport("kernel32.dll")]
     private static extern int ResizePseudoConsole(IntPtr console, Coord size);
-    [DllImport("kernel32.dll")] private static extern void ClosePseudoConsole(IntPtr console);
+
+    [DllImport("kernel32.dll")]
+    private static extern void ClosePseudoConsole(IntPtr console);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool InitializeProcThreadAttributeList(
         IntPtr list, int count, int flags, ref IntPtr size);
+
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool UpdateProcThreadAttribute(
         IntPtr list, uint flags, IntPtr attribute, IntPtr value, IntPtr size,
         IntPtr previous, IntPtr returned);
-    [DllImport("kernel32.dll")] private static extern void DeleteProcThreadAttributeList(IntPtr list);
-    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool CreateProcessAsUser(Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token, string app, StringBuilder command, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string? currentDirectory, IntPtr startup, out ProcessInfo info);
-    [DllImport("userenv.dll", SetLastError = true)] private static extern bool CreateEnvironmentBlock(out IntPtr environment, Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token, bool inherit);
-    [DllImport("userenv.dll")] private static extern bool DestroyEnvironmentBlock(IntPtr environment);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern uint WaitForSingleObject(SafeFileHandle handle, uint milliseconds);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetExitCodeProcess(SafeFileHandle process, out uint code);
-    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool TerminateProcess(SafeFileHandle process, uint exitCode);
+
+    [DllImport("kernel32.dll")]
+    private static extern void DeleteProcThreadAttributeList(IntPtr list);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool CreateProcessAsUser(
+        Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token,
+        string application, StringBuilder command,
+        IntPtr processAttributes, IntPtr threadAttributes,
+        bool inheritHandles, uint flags, IntPtr environment,
+        string? currentDirectory, IntPtr startup, out ProcessInfo info);
+
+    [DllImport("userenv.dll", SetLastError = true)]
+    private static extern bool CreateEnvironmentBlock(
+        out IntPtr environment, Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token, bool inherit);
+
+    [DllImport("userenv.dll")]
+    private static extern bool DestroyEnvironmentBlock(IntPtr environment);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern uint WaitForSingleObject(SafeFileHandle handle, uint milliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetExitCodeProcess(SafeFileHandle process, out uint code);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool TerminateProcess(SafeFileHandle process, uint exitCode);
 }

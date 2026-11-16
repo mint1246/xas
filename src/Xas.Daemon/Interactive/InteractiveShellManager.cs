@@ -22,14 +22,17 @@ public sealed class InteractiveShellManager : IAsyncDisposable
     private int _opening;
     private bool _disposed;
 
-    public InteractiveShellManager(string peerId, PeerPermissionStore permissions,
+    public InteractiveShellManager(
+        string peerId,
+        PeerPermissionStore permissions,
         Func<ProtocolMessage, CancellationToken, ValueTask> send)
-        : this(peerId, permissions, send, OperatingSystem.IsWindows()
-            ? new WindowsConPtyBackend()
-            : new LinuxPtyBackend())
-    { }
+        : this(peerId, permissions, send, CreateDefaultBackend())
+    {
+    }
 
-    public InteractiveShellManager(string peerId, PeerPermissionStore permissions,
+    public InteractiveShellManager(
+        string peerId,
+        PeerPermissionStore permissions,
         Func<ProtocolMessage, CancellationToken, ValueTask> send, IInteractiveShellBackend backend)
     {
         _peerId = peerId ?? throw new ArgumentNullException(nameof(peerId));
@@ -39,7 +42,9 @@ public sealed class InteractiveShellManager : IAsyncDisposable
     }
 
     /// <summary>Handles shell.open, shell.resize, and shell.close RPC requests.</summary>
-    public async ValueTask<ProtocolMessage> HandleRequestAsync(ProtocolMessage request, CancellationToken cancellationToken)
+    public async ValueTask<ProtocolMessage> HandleRequestAsync(
+        ProtocolMessage request,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
         ThrowIfDisposed();
@@ -60,51 +65,70 @@ public sealed class InteractiveShellManager : IAsyncDisposable
         if (message.Method != "shell.input" || message.RequestId != 0 || message.StreamId == 0)
             throw new InvalidDataException("Invalid interactive shell stream message.");
         var session = GetSession(message.StreamId);
-        switch (message.Kind)
+        if (message.Kind == MessageKind.StreamData)
         {
-            case MessageKind.StreamData:
-                if (message.Payload.Length is 0 or > MaxInputFrameBytes)
-                    throw new InvalidDataException("Interactive shell input frames must contain 1 to 65536 bytes.");
-                await session.WriteInputAsync(message.Payload).ConfigureAwait(false);
-                break;
-            case MessageKind.StreamEnd:
-                if (message.Payload.Length != 0) throw new InvalidDataException("shell.input StreamEnd must have an empty payload.");
-                await session.EndInputAsync().ConfigureAwait(false);
-                break;
-            default:
-                throw new InvalidDataException("Expected shell.input StreamData or StreamEnd.");
+            await HandleInputDataAsync(session, message.Payload).ConfigureAwait(false);
+            return;
         }
+        if (message.Kind == MessageKind.StreamEnd)
+        {
+            await HandleInputEndAsync(session, message.Payload).ConfigureAwait(false);
+            return;
+        }
+
+        throw new InvalidDataException("Expected shell.input StreamData or StreamEnd.");
     }
 
-    private async ValueTask<ProtocolMessage> OpenAsync(ProtocolMessage request, CancellationToken cancellationToken)
+    private static async Task HandleInputDataAsync(Session session, byte[] payload)
     {
-        if (!_permissions.IsAllowed(_peerId, Capability.Shell))
-            throw new UnauthorizedAccessException("Shell access is not granted on this device for this peer.");
-        using var json = JsonDocument.Parse(request.Payload);
-        var root = json.RootElement;
-        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("columns", out var c) ||
-            !root.TryGetProperty("rows", out var r) || !root.TryGetProperty("elevated", out var e) ||
-            !c.TryGetInt32(out var columns) || !r.TryGetInt32(out var rows) || e.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-            throw new InvalidDataException("shell.open requires integer columns, integer rows, and boolean elevated fields.");
-        if (columns is < 1 or > short.MaxValue || rows is < 1 or > short.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), "Terminal dimensions must be from 1 through 32767.");
-        var elevated = e.GetBoolean();
-        if (elevated && OperatingSystem.IsWindows() && !_permissions.IsAllowed(_peerId, Capability.PrivilegedShell))
-            throw new UnauthorizedAccessException("Privileged shell access is not granted on this device for this peer.");
-        IInteractiveShellBackend backend = elevated && OperatingSystem.IsWindows()
-            ? new WindowsAdminBrokerInteractiveBackend() : _backend;
-        if (!backend.IsAvailable) throw new PlatformNotSupportedException("A real PTY/ConPTY backend is unavailable.");
-
-        lock (_gate)
+        if (payload.Length is 0 or > MaxInputFrameBytes)
         {
-            ThrowIfDisposedLocked();
-            if (_sessions.Count + _opening >= MaxSessions) throw new InvalidOperationException("The connection has reached its interactive shell session limit.");
-            if (_nextId > uint.MaxValue) throw new InvalidOperationException("No interactive shell session IDs remain for this connection.");
-            _opening++;
+            throw new InvalidDataException(
+                "Interactive shell input frames must contain 1 to 65536 bytes.");
         }
+
+        await session.WriteInputAsync(payload).ConfigureAwait(false);
+    }
+
+    private static async Task HandleInputEndAsync(Session session, byte[] payload)
+    {
+        if (payload.Length != 0)
+        {
+            throw new InvalidDataException("shell.input StreamEnd must have an empty payload.");
+        }
+
+        await session.EndInputAsync().ConfigureAwait(false);
+    }
+
+    private async ValueTask<ProtocolMessage> OpenAsync(
+        ProtocolMessage request,
+        CancellationToken cancellationToken)
+    {
+        EnsureShellPermission();
+        var openRequest = DecodeOpenRequest(request);
+        EnsurePrivilegedShellPermission(openRequest.Elevated);
+        var backend = ResolveBackend(openRequest.Elevated);
+        if (!backend.IsAvailable)
+        {
+            throw new PlatformNotSupportedException("A real PTY/ConPTY backend is unavailable.");
+        }
+
+        ReserveOpenSlot();
         IInteractiveShellSession pty;
-        try { pty = await backend.StartAsync(elevated, (short)columns, (short)rows, cancellationToken).ConfigureAwait(false); }
-        catch { lock (_gate) _opening--; throw; }
+        try
+        {
+            pty = await backend.StartAsync(
+                openRequest.Elevated,
+                (short)openRequest.Columns,
+                (short)openRequest.Rows,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            ReleaseOpenSlot();
+            throw;
+        }
+
         Session session;
         lock (_gate)
         {
@@ -125,28 +149,136 @@ public sealed class InteractiveShellManager : IAsyncDisposable
         {
             await pty.DisposeAsync().ConfigureAwait(false);
             ThrowIfDisposed();
-            throw new InvalidOperationException("The connection has reached its interactive shell session limit.");
+            throw new InvalidOperationException(
+                "The connection has reached its interactive shell session limit.");
         }
-        return new ProtocolMessage(MessageKind.Response, request.RequestId, request.StreamId, request.Method,
+        return new ProtocolMessage(
+            MessageKind.Response,
+            request.RequestId,
+            request.StreamId,
+            request.Method,
             UInt32Bytes(session.Id));
     }
 
-    private async ValueTask<ProtocolMessage> ResizeAsync(ProtocolMessage request, CancellationToken cancellationToken)
+    private static IInteractiveShellBackend CreateDefaultBackend() => OperatingSystem.IsWindows()
+        ? new WindowsConPtyBackend()
+        : new LinuxPtyBackend();
+
+    private void EnsureShellPermission()
     {
-        if (request.Payload.Length != 8) throw new InvalidDataException("shell.resize payload must be 8 bytes.");
+        if (!_permissions.IsAllowed(_peerId, Capability.Shell))
+        {
+            throw new UnauthorizedAccessException(
+                "Shell access is not granted on this device for this peer.");
+        }
+    }
+
+    private void EnsurePrivilegedShellPermission(bool elevated)
+    {
+        if (elevated && OperatingSystem.IsWindows()
+            && !_permissions.IsAllowed(_peerId, Capability.PrivilegedShell))
+        {
+            throw new UnauthorizedAccessException(
+                "Privileged shell access is not granted on this device for this peer.");
+        }
+    }
+
+    private IInteractiveShellBackend ResolveBackend(bool elevated) =>
+        elevated && OperatingSystem.IsWindows()
+            ? new WindowsAdminBrokerInteractiveBackend()
+            : _backend;
+
+    private static OpenRequest DecodeOpenRequest(ProtocolMessage request)
+    {
+        using var json = JsonDocument.Parse(request.Payload);
+        var root = json.RootElement;
+        if (root.ValueKind != JsonValueKind.Object
+            || !root.TryGetProperty("columns", out var columnsElement)
+            || !root.TryGetProperty("rows", out var rowsElement)
+            || !root.TryGetProperty("elevated", out var elevatedElement)
+            || !columnsElement.TryGetInt32(out var columns)
+            || !rowsElement.TryGetInt32(out var rows)
+            || elevatedElement.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            throw new InvalidDataException(
+                "shell.open requires integer columns, integer rows, and boolean elevated fields.");
+        }
+        if (columns is < 1 or > short.MaxValue || rows is < 1 or > short.MaxValue)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(request),
+                "Terminal dimensions must be from 1 through 32767.");
+        }
+
+        return new OpenRequest(columns, rows, elevatedElement.GetBoolean());
+    }
+
+    private void ReserveOpenSlot()
+    {
+        lock (_gate)
+        {
+            ThrowIfDisposedLocked();
+            if (_sessions.Count + _opening >= MaxSessions)
+            {
+                throw new InvalidOperationException(
+                    "The connection has reached its interactive shell session limit.");
+            }
+            EnsureSessionIdsRemain();
+            _opening++;
+        }
+    }
+
+    private void EnsureSessionIdsRemain()
+    {
+        if (_nextId > uint.MaxValue)
+        {
+            throw new InvalidOperationException(
+                "No interactive shell session IDs remain for this connection.");
+        }
+    }
+
+    private void ReleaseOpenSlot()
+    {
+        lock (_gate)
+        {
+            _opening--;
+        }
+    }
+
+    private sealed record OpenRequest(int Columns, int Rows, bool Elevated);
+
+    private async ValueTask<ProtocolMessage> ResizeAsync(
+        ProtocolMessage request,
+        CancellationToken cancellationToken)
+    {
+        if (request.Payload.Length != 8)
+        {
+            throw new InvalidDataException("shell.resize payload must be 8 bytes.");
+        }
         var id = BinaryPrimitives.ReadUInt32BigEndian(request.Payload.AsSpan(0, 4));
         var columns = BinaryPrimitives.ReadUInt16BigEndian(request.Payload.AsSpan(4, 2));
         var rows = BinaryPrimitives.ReadUInt16BigEndian(request.Payload.AsSpan(6, 2));
         if (id == 0 || columns == 0 || rows == 0 || columns > short.MaxValue || rows > short.MaxValue)
-            throw new ArgumentOutOfRangeException(nameof(request), "Unknown session ID or invalid terminal dimensions.");
-        await GetSession(id).ResizeAsync((short)columns, (short)rows, cancellationToken).ConfigureAwait(false);
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(request),
+                "Unknown session ID or invalid terminal dimensions.");
+        }
+
+        await GetSession(id).ResizeAsync((short)columns, (short)rows, cancellationToken)
+            .ConfigureAwait(false);
         return EmptyReply(request);
     }
 
-    private async ValueTask<ProtocolMessage> CloseAsync(ProtocolMessage request, CancellationToken cancellationToken)
+    private async ValueTask<ProtocolMessage> CloseAsync(
+        ProtocolMessage request,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (request.Payload.Length != 4) throw new InvalidDataException("shell.close payload must be 4 bytes.");
+        if (request.Payload.Length != 4)
+        {
+            throw new InvalidDataException("shell.close payload must be 4 bytes.");
+        }
         var id = BinaryPrimitives.ReadUInt32BigEndian(request.Payload);
         var session = RemoveSession(id);
         await session.DisposeAsync().ConfigureAwait(false);
@@ -219,7 +351,10 @@ public sealed class InteractiveShellManager : IAsyncDisposable
             await _inputLock.WaitAsync(_shutdown.Token).ConfigureAwait(false);
             try
             {
-                if (_inputEnded != 0) throw new InvalidOperationException("Interactive shell input has ended.");
+                if (_inputEnded != 0)
+                {
+                    throw new InvalidOperationException("Interactive shell input has ended.");
+                }
                 await pty.Input.WriteAsync(data, _shutdown.Token).ConfigureAwait(false);
                 await pty.Input.FlushAsync(_shutdown.Token).ConfigureAwait(false);
             }
@@ -246,19 +381,40 @@ public sealed class InteractiveShellManager : IAsyncDisposable
             var buffer = new byte[MaxInputFrameBytes];
             try
             {
-                while (true)
+                while (await SendNextOutputAsync(buffer).ConfigureAwait(false))
                 {
-                    var count = await pty.Output.ReadAsync(buffer, _shutdown.Token).ConfigureAwait(false);
-                    if (count == 0) break;
-                    await send(new ProtocolMessage(MessageKind.StreamData, 0, Id, "shell.output", buffer.AsSpan(0, count).ToArray()), _shutdown.Token).ConfigureAwait(false);
                 }
                 var exit = await pty.WaitForExitAsync(_shutdown.Token).ConfigureAwait(false);
                 var payload = new byte[4];
                 BinaryPrimitives.WriteInt32BigEndian(payload, exit);
-                await send(new ProtocolMessage(MessageKind.Event, 0, Id, "shell.exit", payload), _shutdown.Token).ConfigureAwait(false);
+                var exitMessage = new ProtocolMessage(MessageKind.Event, 0, Id, "shell.exit", payload);
+                await send(exitMessage, _shutdown.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (_shutdown.IsCancellationRequested) { }
             catch (ObjectDisposedException) when (_shutdown.IsCancellationRequested) { }
+        }
+
+        private async Task<bool> SendNextOutputAsync(byte[] buffer)
+        {
+            var count = await pty.Output.ReadAsync(buffer, _shutdown.Token).ConfigureAwait(false);
+            if (count == 0)
+            {
+                return false;
+            }
+
+            await SendOutputAsync(buffer, count).ConfigureAwait(false);
+            return true;
+        }
+
+        private ValueTask SendOutputAsync(byte[] buffer, int count)
+        {
+            var output = new ProtocolMessage(
+                MessageKind.StreamData,
+                0,
+                Id,
+                "shell.output",
+                buffer.AsSpan(0, count).ToArray());
+            return send(output, _shutdown.Token);
         }
 
         public async ValueTask DisposeAsync()

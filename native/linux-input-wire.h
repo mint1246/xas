@@ -32,9 +32,11 @@ static uint16_t xas_u16(const unsigned char *p) {
 }
 
 static int32_t xas_i32(const unsigned char *p) {
-  uint32_t u = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-               ((uint32_t)p[2] << 8) | p[3];
-  return (int32_t)u;
+  uint32_t value = (uint32_t)p[0] << 24;
+  value |= (uint32_t)p[1] << 16;
+  value |= (uint32_t)p[2] << 8;
+  value |= p[3];
+  return (int32_t)value;
 }
 
 /* Returns 0 on EOF, -1 on malformed input/error, 1 on a complete frame. */

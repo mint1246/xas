@@ -147,65 +147,104 @@ internal static class LocalSetupCommands
         string? query = null;
         foreach (var arg in args)
         {
-            switch (arg)
+            if (arg == "--kvm")
             {
-                case "--kvm": preset = PairPermissionPreset.Kvm; break;
-                case "--trust-only": preset = PairPermissionPreset.None; break;
-                default:
-                    if (arg.StartsWith("-", StringComparison.Ordinal))
-                        return Usage("Usage: xas pair [device-name|short-id] [--kvm|--trust-only]");
-                    if (query is not null)
-                        return Usage("Usage: xas pair [device-name|short-id] [--kvm|--trust-only]");
-                    query = arg;
-                    break;
+                preset = PairPermissionPreset.Kvm;
+                continue;
             }
+            if (arg == "--trust-only")
+            {
+                preset = PairPermissionPreset.None;
+                continue;
+            }
+            if (arg.StartsWith("-", StringComparison.Ordinal) || query is not null)
+                return Usage("Usage: xas pair [device-name|short-id] [--kvm|--trust-only]");
+            query = arg;
         }
 
         using var client = CreateClient();
         var pending = await client.ListPairingsAsync(CancellationToken.None);
-        var incoming = pending.Where(p => p.Incoming && (query is null || MatchesPairTarget(p.DeviceId, p.DisplayName, query))).ToArray();
-        if (incoming.Length > 1)
-        {
-            Console.WriteLine("Incoming pairing requests:");
-            for (var i = 0; i < incoming.Length; i++)
-                Console.WriteLine($"  {i + 1}. {incoming[i].DisplayName}  {ShortId(incoming[i].DeviceId)}  code {FormatCode(incoming[i].Code)}");
-            var selected = await ReadSelectionAsync(incoming.Length);
-            if (selected < 0) return 1;
-            return await ApprovePendingAsync(client, incoming[selected], preset);
-        }
-        if (incoming.Length == 1) return await ApprovePendingAsync(client, incoming[0], preset);
+        var incoming = pending
+            .Where(pairing => pairing.Incoming &&
+                (query is null || MatchesPairTarget(
+                    pairing.DeviceId, pairing.DisplayName, query)))
+            .ToArray();
+        var incomingResult = await HandleIncomingPairingsAsync(client, incoming, preset);
+        if (incomingResult.HasValue) return incomingResult.Value;
 
         var candidates = await client.ListPairingCandidatesAsync(CancellationToken.None);
-        LocalPairCandidate candidate;
-        if (query is not null)
+        var candidate = await SelectCandidateAsync(candidates, query);
+        if (candidate is null) return 1;
+
+        Console.WriteLine(
+            $"Starting pairing with {candidate.DisplayName} " +
+            $"({ShortId(candidate.DeviceId)})...");
+        var started = await client.BeginDiscoveredPairingAsync(
+            candidate.DeviceId, CancellationToken.None);
+        return await ApprovePendingAsync(client, started, preset);
+    }
+
+    private static async Task<int?> HandleIncomingPairingsAsync(
+        LocalDaemonClient client,
+        LocalPairPending[] incoming,
+        PairPermissionPreset preset)
+    {
+        if (incoming.Length == 0) return null;
+        if (incoming.Length == 1)
+            return await ApprovePendingAsync(client, incoming[0], preset);
+
+        Console.WriteLine("Incoming pairing requests:");
+        for (var index = 0; index < incoming.Length; index++)
         {
-            var matches = candidates.Where(c => MatchesPairTarget(c.DeviceId, c.DisplayName, query)).ToArray();
-            if (matches.Length == 0) throw new InvalidOperationException($"No unpaired discovered device matches '{query}'.");
-            if (matches.Length > 1) throw new InvalidOperationException($"Pairing target '{query}' is ambiguous.");
-            candidate = matches[0];
-        }
-        else
-        {
-            if (candidates.Count == 0)
-            {
-                Console.WriteLine("No unpaired XAS devices are currently discovered on the LAN.");
-                return 1;
-            }
-            if (candidates.Count == 1) candidate = candidates[0];
-            else
-            {
-                Console.WriteLine("Nearby unpaired XAS devices:");
-                for (var i = 0; i < candidates.Count; i++)
-                    Console.WriteLine($"  {i + 1}. {candidates[i].DisplayName}  {ShortId(candidates[i].DeviceId)}  {candidates[i].Address}");
-                var selected = await ReadSelectionAsync(candidates.Count);
-                if (selected < 0) return 1;
-                candidate = candidates[selected];
-            }
+            var pairing = incoming[index];
+            Console.WriteLine(
+                $"  {index + 1}. {pairing.DisplayName}  " +
+                $"{ShortId(pairing.DeviceId)}  code {FormatCode(pairing.Code)}");
         }
 
-        Console.WriteLine($"Starting pairing with {candidate.DisplayName} ({ShortId(candidate.DeviceId)})...");
-        var started = await client.BeginDiscoveredPairingAsync(candidate.DeviceId, CancellationToken.None);
-        return await ApprovePendingAsync(client, started, preset);
+        var selectedIndex = await ReadSelectionAsync(incoming.Length);
+        if (selectedIndex < 0) return 1;
+        return await ApprovePendingAsync(client, incoming[selectedIndex], preset);
+    }
+
+    private static async Task<LocalPairCandidate?> SelectCandidateAsync(
+        IReadOnlyList<LocalPairCandidate> candidates, string? query)
+    {
+        if (query is not null)
+            return FindCandidate(candidates, query);
+        if (candidates.Count == 0)
+        {
+            Console.WriteLine("No unpaired XAS devices are currently discovered on the LAN.");
+            return null;
+        }
+        if (candidates.Count == 1) return candidates[0];
+
+        Console.WriteLine("Nearby unpaired XAS devices:");
+        for (var index = 0; index < candidates.Count; index++)
+        {
+            var candidate = candidates[index];
+            Console.WriteLine(
+                $"  {index + 1}. {candidate.DisplayName}  " +
+                $"{ShortId(candidate.DeviceId)}  {candidate.Address}");
+        }
+
+        var selectedIndex = await ReadSelectionAsync(candidates.Count);
+        return selectedIndex < 0 ? null : candidates[selectedIndex];
+    }
+
+    private static LocalPairCandidate FindCandidate(
+        IReadOnlyList<LocalPairCandidate> candidates, string query)
+    {
+        var matches = candidates
+            .Where(candidate => MatchesPairTarget(
+                candidate.DeviceId, candidate.DisplayName, query))
+            .ToArray();
+        if (matches.Length == 0)
+            throw new InvalidOperationException(
+                $"No unpaired discovered device matches '{query}'.");
+        if (matches.Length > 1)
+            throw new InvalidOperationException($"Pairing target '{query}' is ambiguous.");
+        return matches[0];
     }
 
     private static async Task<int> ApprovePendingAsync(LocalDaemonClient client, LocalPairPending pending,
@@ -229,7 +268,9 @@ internal static class LocalSetupCommands
         }
         Console.WriteLine($"Waiting for approval on {pending.DisplayName}...");
         await client.ApprovePairingAsync(pending.PairingId, true, CancellationToken.None, preset);
-        Console.WriteLine($"Paired {pending.DisplayName} ({ShortId(pending.DeviceId)}). Permissions: {presetText}.");
+        Console.WriteLine(
+            $"Paired {pending.DisplayName} ({ShortId(pending.DeviceId)}). " +
+            $"Permissions: {presetText}.");
         return 0;
     }
 
@@ -237,7 +278,9 @@ internal static class LocalSetupCommands
     {
         if (Console.IsInputRedirected)
         {
-            Console.Error.WriteLine("Multiple devices are available; specify one with 'xas pair <name-or-short-id>'.");
+            Console.Error.WriteLine(
+                "Multiple devices are available; specify one with " +
+                "'xas pair <name-or-short-id>'.");
             return -1;
         }
         Console.Write($"Select device [1-{count}]: ");
@@ -255,7 +298,12 @@ internal static class LocalSetupCommands
 
     private static bool FingerprintsMatch(string left, string right)
     {
-        static string Normalize(string value) => new(value.Where(Uri.IsHexDigit).Select(char.ToUpperInvariant).ToArray());
+        static string Normalize(string value)
+        {
+            var hexCharacters = value.Where(Uri.IsHexDigit);
+            var uppercaseCharacters = hexCharacters.Select(char.ToUpperInvariant);
+            return new string(uppercaseCharacters.ToArray());
+        }
         var a = Normalize(left);
         var b = Normalize(right);
         return a.Length == 64 && b.Length == 64 && string.Equals(a, b, StringComparison.Ordinal);

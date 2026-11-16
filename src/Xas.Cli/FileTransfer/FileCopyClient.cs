@@ -112,49 +112,76 @@ public static class FileCopyClient
         TextWriter progress,
         CancellationToken token)
     {
-        var destinationIsDirectory = plan.Source.Remote
-            ? Directory.Exists(plan.LocalPath) || HasTrailingSeparator(plan.Destination.Path)
-            : await IsRemoteDirectoryAsync(
-                protocol,
-                plan.RemotePath,
-                HasTrailingSeparator(plan.Destination.Path),
-                token).ConfigureAwait(false);
         if (plan.Source.Remote)
         {
-            var stat = await StatAsync(protocol, plan.RemotePath, token).ConfigureAwait(false);
-            var localPath = destinationIsDirectory
-                ? Path.Combine(plan.LocalPath, plan.SourceName)
-                : plan.LocalPath;
-            if (stat.Kind == "directory")
-            {
-                if (!recursive) throw new IOException("Copying a directory requires recursive mode.");
-                await DownloadDirectoryAsync(
-                    protocol, plan.RemotePath, localPath, overwrite, progress, token)
-                    .ConfigureAwait(false);
-            }
-            else
-                await DownloadFileAsync(
-                    protocol, plan.RemotePath, localPath, overwrite, progress, token)
-                    .ConfigureAwait(false);
+            await DownloadResolvedAsync(protocol, plan, recursive, overwrite, progress, token)
+                .ConfigureAwait(false);
+            return;
         }
-        else
+
+        await UploadResolvedAsync(protocol, plan, recursive, overwrite, progress, token)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task DownloadResolvedAsync(
+        MultiplexedProtocolPeer protocol,
+        CopyPlan plan,
+        bool recursive,
+        bool overwrite,
+        TextWriter progress,
+        CancellationToken token)
+    {
+        var directoryDestination = Directory.Exists(plan.LocalPath) ||
+            HasTrailingSeparator(plan.Destination.Path);
+        var localPath = directoryDestination
+            ? Path.Combine(plan.LocalPath, plan.SourceName)
+            : plan.LocalPath;
+        var stat = await StatAsync(protocol, plan.RemotePath, token).ConfigureAwait(false);
+        if (stat.Kind == "directory")
         {
-            var attrs = File.GetAttributes(plan.LocalPath);
-            var remotePath = destinationIsDirectory
-                ? JoinRemote(plan.RemotePath, plan.SourceName)
-                : plan.RemotePath;
-            if ((attrs & FileAttributes.Directory) != 0)
-            {
-                if (!recursive) throw new IOException("Copying a directory requires recursive mode.");
-                await UploadDirectoryAsync(
-                    protocol, plan.LocalPath, remotePath, overwrite, progress, token)
-                    .ConfigureAwait(false);
-            }
-            else
-                await UploadFileAsync(
-                    protocol, plan.LocalPath, remotePath, overwrite, progress, token)
-                    .ConfigureAwait(false);
+            EnsureRecursiveCopy(recursive);
+            await DownloadDirectoryAsync(
+                protocol, plan.RemotePath, localPath, overwrite, progress, token)
+                .ConfigureAwait(false);
+            return;
         }
+        await DownloadFileAsync(protocol, plan.RemotePath, localPath, overwrite, progress, token)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task UploadResolvedAsync(
+        MultiplexedProtocolPeer protocol,
+        CopyPlan plan,
+        bool recursive,
+        bool overwrite,
+        TextWriter progress,
+        CancellationToken token)
+    {
+        var directoryDestination = await IsRemoteDirectoryAsync(
+            protocol,
+            plan.RemotePath,
+            HasTrailingSeparator(plan.Destination.Path),
+            token).ConfigureAwait(false);
+        var remotePath = directoryDestination
+            ? JoinRemote(plan.RemotePath, plan.SourceName)
+            : plan.RemotePath;
+        var attributes = File.GetAttributes(plan.LocalPath);
+        if ((attributes & FileAttributes.Directory) != 0)
+        {
+            EnsureRecursiveCopy(recursive);
+            await UploadDirectoryAsync(
+                protocol, plan.LocalPath, remotePath, overwrite, progress, token)
+                .ConfigureAwait(false);
+            return;
+        }
+        await UploadFileAsync(protocol, plan.LocalPath, remotePath, overwrite, progress, token)
+            .ConfigureAwait(false);
+    }
+
+    private static void EnsureRecursiveCopy(bool recursive)
+    {
+        if (!recursive)
+            throw new IOException("Copying a directory requires recursive mode.");
     }
 
     private sealed record CopyPlan(
@@ -221,13 +248,8 @@ public static class FileCopyClient
                 if (n == 0) break;
                 // BinaryFrameConnection copies the payload into its pooled wire buffer before SendAsync
                 // completes, so a full read can reuse this same file buffer without another 768 KiB allocation.
-                byte[] payload;
-                if (n == buffer.Length)
-                    payload = buffer;
-                else
-                    payload = buffer.AsSpan(0, n).ToArray();
-                var dataMessage = new ProtocolMessage(
-                    MessageKind.StreamData, 0, id, "file.put.data", payload);
+                var payload = GetUploadPayload(buffer, n);
+                var dataMessage = CreateUploadMessage(id, payload);
                 await peer.SendAsync(dataMessage, token).ConfigureAwait(false);
                 sent += n;
                 await reporter.UpdateAsync(sent, final: false).ConfigureAwait(false);
@@ -272,6 +294,14 @@ public static class FileCopyClient
         }
         return bytesRead;
     }
+
+    private static byte[] GetUploadPayload(byte[] buffer, int bytesRead) =>
+        bytesRead == buffer.Length
+            ? buffer
+            : buffer.AsSpan(0, bytesRead).ToArray();
+
+    private static ProtocolMessage CreateUploadMessage(uint transferId, byte[] payload) =>
+        new(MessageKind.StreamData, 0, transferId, "file.put.data", payload);
 
     private static async Task TrySendUploadEndAsync(
         MultiplexedProtocolPeer peer, uint transferId)
@@ -348,7 +378,8 @@ public static class FileCopyClient
         var parent = Path.GetDirectoryName(local)
             ?? throw new IOException("Destination has no parent directory.");
         Directory.CreateDirectory(parent);
-        if (File.Exists(local) && !overwrite) throw new IOException($"Destination already exists: {local}");
+        if (File.Exists(local) && !overwrite)
+            throw new IOException($"Destination already exists: {local}");
         var temp = Path.Combine(parent, ".xas-" + Guid.NewGuid().ToString("N") + ".tmp");
         var receive = new DownloadReceiver();
         peer.MessageReceived += receive.AcceptAsync;
@@ -371,90 +402,177 @@ public static class FileCopyClient
                 FileOptions.Asynchronous | FileOptions.SequentialScan))
             {
                 using var disconnected = CancellationTokenSource.CreateLinkedTokenSource(token);
-                _ = peer.Completion.ContinueWith(_ => CancelIfActive(disconnected),
-                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                _ = peer.Completion.ContinueWith(
+                    _ => CancelIfActive(disconnected),
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
                 await foreach (var data in receive.ReadAllAsync(disconnected.Token).ConfigureAwait(false))
                 {
-                    await output.WriteAsync(data, token).ConfigureAwait(false);
-                    count += data.Length;
-                    await reporter.UpdateAsync(count, final: false).ConfigureAwait(false);
+                    count = await WriteDownloadChunkAsync(
+                        output, reporter, data, count, token).ConfigureAwait(false);
                 }
                 await output.FlushAsync(token).ConfigureAwait(false);
             }
             if (count != length)
                 throw new InvalidDataException(
                     "Downloaded file length did not match the remote file.");
-            File.SetLastWriteTimeUtc(temp, DateTimeOffset.FromUnixTimeMilliseconds(lastWrite).UtcDateTime);
+            var modifiedAt = DateTimeOffset.FromUnixTimeMilliseconds(lastWrite).UtcDateTime;
+            File.SetLastWriteTimeUtc(temp, modifiedAt);
             File.Move(temp, local, overwrite);
             await reporter.UpdateAsync(count, final: true).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (!token.IsCancellationRequested && peer.Completion.IsCompleted)
+        catch (OperationCanceledException) when (
+            !token.IsCancellationRequested && peer.Completion.IsCompleted)
         {
-            if (id != 0) { try { await peer.RequestAsync("file.get.close", UInt32Payload(id), cancellationToken: CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { } }
-            try { File.Delete(temp); } catch { }
+            await CleanupDownloadAsync(peer, id, temp).ConfigureAwait(false);
             throw new IOException("The remote connection closed during the file download.");
         }
         catch
         {
-            if (id != 0) { try { await peer.RequestAsync("file.get.close", UInt32Payload(id), cancellationToken: CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false); } catch { } }
-            try { File.Delete(temp); } catch { }
+            await CleanupDownloadAsync(peer, id, temp).ConfigureAwait(false);
             throw;
         }
-            finally
-            {
-                peer.MessageReceived -= receive.AcceptAsync;
-                receive.Dispose();
-            }
+        finally
+        {
+            peer.MessageReceived -= receive.AcceptAsync;
+            receive.Dispose();
+        }
     }
 
-    private static async Task<FileStat> StatAsync(MultiplexedProtocolPeer peer, string path, CancellationToken token)
+    private static async Task<long> WriteDownloadChunkAsync(
+        Stream output,
+        TransferProgress reporter,
+        byte[] data,
+        long transferred,
+        CancellationToken token)
+    {
+        await output.WriteAsync(data, token).ConfigureAwait(false);
+        var updatedCount = transferred + data.Length;
+        await reporter.UpdateAsync(updatedCount, final: false).ConfigureAwait(false);
+        return updatedCount;
+    }
+
+    private static async Task CleanupDownloadAsync(
+        MultiplexedProtocolPeer peer, uint transferId, string temporaryPath)
+    {
+        if (transferId != 0)
+        {
+            try
+            {
+                await peer.RequestAsync(
+                    "file.get.close", UInt32Payload(transferId),
+                    cancellationToken: CancellationToken.None)
+                    .AsTask().WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Cleanup must not replace the original download failure.
+            }
+        }
+
+        try
+        {
+            File.Delete(temporaryPath);
+        }
+        catch (Exception)
+        {
+            // Cleanup must not replace the original download failure.
+        }
+    }
+
+    private static async Task<FileStat> StatAsync(
+        MultiplexedProtocolPeer peer, string path, CancellationToken token)
     {
         var message = await RequestAsync(peer, "file.stat", new { path }, token).ConfigureAwait(false);
-        return JsonSerializer.Deserialize<FileStat>(message.Payload, JsonOptions) ?? throw new InvalidDataException("Invalid file.stat response.");
+        return JsonSerializer.Deserialize<FileStat>(message.Payload, JsonOptions)
+            ?? throw new InvalidDataException("Invalid file.stat response.");
     }
 
-    private static async Task<bool> IsRemoteDirectoryAsync(MultiplexedProtocolPeer peer, string path, bool trailingSeparator, CancellationToken token)
+    private static async Task<bool> IsRemoteDirectoryAsync(
+        MultiplexedProtocolPeer peer,
+        string path,
+        bool trailingSeparator,
+        CancellationToken token)
     {
-        if (trailingSeparator) return true;
-        try { return (await StatAsync(peer, path, token).ConfigureAwait(false)).Kind == "directory"; }
+        if (trailingSeparator)
+            return true;
+        try
+        {
+            var stat = await StatAsync(peer, path, token).ConfigureAwait(false);
+            return stat.Kind == "directory";
+        }
         catch (RemoteProtocolException) { return false; }
     }
 
-    private static async Task<FileEntry[]> ListAsync(MultiplexedProtocolPeer peer, string path, CancellationToken token)
+    private static async Task<FileEntry[]> ListAsync(
+        MultiplexedProtocolPeer peer, string path, CancellationToken token)
     {
-        var all = new List<FileEntry>(); var offset = 0;
+        var entries = new List<FileEntry>();
+        var offset = 0;
         while (true)
         {
-            var message = await RequestAsync(peer, "file.list", new { path, offset }, token).ConfigureAwait(false);
-            var page = JsonSerializer.Deserialize<FilePage>(message.Payload, JsonOptions) ?? throw new InvalidDataException("Invalid file.list response.");
-            if (page.Entries.Length > 128) throw new InvalidDataException("Remote directory page exceeds its limit.");
-            all.AddRange(page.Entries); offset += page.Entries.Length;
-            if (!page.HasMore) return all.ToArray();
-            if (page.Entries.Length == 0 || all.Count > 1_000_000) throw new InvalidDataException("Invalid or excessive remote directory listing.");
+            var message = await RequestAsync(peer, "file.list", new { path, offset }, token)
+                .ConfigureAwait(false);
+            var page = JsonSerializer.Deserialize<FilePage>(message.Payload, JsonOptions)
+                ?? throw new InvalidDataException("Invalid file.list response.");
+            if (page.Entries.Length > 128)
+                throw new InvalidDataException("Remote directory page exceeds its limit.");
+            entries.AddRange(page.Entries);
+            offset += page.Entries.Length;
+            if (!page.HasMore)
+                return entries.ToArray();
+            if (page.Entries.Length == 0 || entries.Count > 1_000_000)
+                throw new InvalidDataException("Invalid or excessive remote directory listing.");
         }
     }
 
-    private static async Task<ProtocolMessage> RequestAsync(MultiplexedProtocolPeer peer, string method, object payload, CancellationToken token) =>
-        await peer.RequestAsync(method, JsonSerializer.SerializeToUtf8Bytes(payload), cancellationToken: token).ConfigureAwait(false);
+    private static Task<ProtocolMessage> RequestAsync(
+        MultiplexedProtocolPeer peer, string method, object payload, CancellationToken token) =>
+        peer.RequestAsync(
+            method,
+            JsonSerializer.SerializeToUtf8Bytes(payload),
+            cancellationToken: token).AsTask();
 
-    private static async Task<AuthenticatedPeerConnection> ConnectAsync(ConfiguredPeer peer, DeviceIdentity identity, PeerTrustStore trust, CancellationToken token)
+    private static async Task<AuthenticatedPeerConnection> ConnectAsync(
+        ConfiguredPeer peer,
+        DeviceIdentity identity,
+        PeerTrustStore trust,
+        CancellationToken token)
     {
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token); timeout.CancelAfter(TimeSpan.FromSeconds(10));
-        return await MutualTlsTransport.ConnectAsync(peer.Host, peer.Port, identity, trust, peer.DeviceId, TimeSpan.FromSeconds(10), timeout.Token).ConfigureAwait(false);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        timeout.CancelAfter(TimeSpan.FromSeconds(10));
+        return await MutualTlsTransport.ConnectAsync(
+            peer.Host, peer.Port, identity, trust, peer.DeviceId,
+            TimeSpan.FromSeconds(10), timeout.Token).ConfigureAwait(false);
     }
 
     private static uint ReadTransferId(byte[] data)
     {
         if (data.Length != 4) throw new InvalidDataException("Invalid transfer ID response.");
-        var id = BinaryPrimitives.ReadUInt32BigEndian(data); return id == 0 ? throw new InvalidDataException("Invalid transfer ID.") : id;
+        var id = BinaryPrimitives.ReadUInt32BigEndian(data);
+        if (id == 0)
+            throw new InvalidDataException("Invalid transfer ID.");
+        return id;
     }
-    private static byte[] UInt32Payload(uint id) { var bytes = new byte[4]; BinaryPrimitives.WriteUInt32BigEndian(bytes, id); return bytes; }
+
+    private static byte[] UInt32Payload(uint id)
+    {
+        var bytes = new byte[sizeof(uint)];
+        BinaryPrimitives.WriteUInt32BigEndian(bytes, id);
+        return bytes;
+    }
     private static string ValidateRemotePath(string path)
     {
-        if (string.IsNullOrWhiteSpace(path) || path.Length > MaxPathLength || path.IndexOf('\0') >= 0) throw new ArgumentException("Invalid remote path.");
+        if (string.IsNullOrWhiteSpace(path) ||
+            path.Length > MaxPathLength ||
+            path.IndexOf('\0') >= 0)
+            throw new ArgumentException("Invalid remote path.");
         return path;
     }
-    private static string JoinRemote(string root, string name) => ValidateRemotePath(root.TrimEnd('/', '\\') + "/" + name);
+
+    private static string JoinRemote(string root, string name) =>
+        ValidateRemotePath(root.TrimEnd('/', '\\') + "/" + name);
     private static bool HasTrailingSeparator(string path) => path.EndsWith('/') || path.EndsWith('\\');
     private static string SafeBaseName(string path)
     {
@@ -467,12 +585,24 @@ public static class FileCopyClient
     }
     private static void ValidateLocalPath(string path, bool allowMissing)
     {
-        var full = Path.GetFullPath(path); var root = Path.GetPathRoot(full)!; var current = root;
-        foreach (var segment in full[root.Length..].Split([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar], StringSplitOptions.RemoveEmptyEntries))
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath)!;
+        var current = root;
+        var pathSegments = fullPath[root.Length..].Split(
+            [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar],
+            StringSplitOptions.RemoveEmptyEntries);
+        foreach (var segment in pathSegments)
         {
             current = Path.Combine(current, segment);
-            if (!File.Exists(current) && !Directory.Exists(current)) { if (!allowMissing) throw new FileNotFoundException("Local copy source does not exist.", current); continue; }
-            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) throw new IOException($"Symbolic links and reparse points are not supported: {current}");
+            if (!File.Exists(current) && !Directory.Exists(current))
+            {
+                if (!allowMissing)
+                    throw new FileNotFoundException("Local copy source does not exist.", current);
+                continue;
+            }
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+                throw new IOException(
+                    $"Symbolic links and reparse points are not supported: {current}");
         }
     }
 
@@ -490,11 +620,15 @@ public static class FileCopyClient
         public async ValueTask UpdateAsync(long transferred, bool final)
         {
             var elapsed = _clock.Elapsed;
-            if (!final && (!_interactive || elapsed.Ticks - _lastReportTicks < TimeSpan.FromMilliseconds(250).Ticks)) return;
+            if (!final && (!_interactive ||
+                elapsed.Ticks - _lastReportTicks < TimeSpan.FromMilliseconds(250).Ticks))
+                return;
             _lastReportTicks = elapsed.Ticks;
             if (!_interactive)
             {
-                if (final) await writer.WriteLineAsync($"{source} -> {destination} ({transferred} bytes)").ConfigureAwait(false);
+                if (final)
+                    await writer.WriteLineAsync(
+                        $"{source} -> {destination} ({transferred} bytes)").ConfigureAwait(false);
                 return;
             }
 
@@ -503,7 +637,9 @@ public static class FileCopyClient
             var percent = total > 0 ? Math.Clamp(transferred * 100d / total, 0, 100) : 100;
             var remainingSeconds = rate > 0 && total > transferred ? (total - transferred) / rate : 0;
             var eta = remainingSeconds > 0 ? $"  ETA {FormatDuration(remainingSeconds)}" : string.Empty;
-            var line = $"{ShortName(source)} -> {ShortName(destination)}  {FormatBytes(transferred)} / {FormatBytes(total)}  {percent,5:0.0}%  {FormatBytes(rate)}/s{eta}";
+            var line = $"{ShortName(source)} -> {ShortName(destination)}  " +
+                $"{FormatBytes(transferred)} / {FormatBytes(total)}  {percent,5:0.0}%  " +
+                $"{FormatBytes(rate)}/s{eta}";
             if (line.Length < _lastWidth) line = line.PadRight(_lastWidth);
             _lastWidth = Math.Max(_lastWidth, line.Length);
             await writer.WriteAsync("\r" + line).ConfigureAwait(false);
@@ -620,7 +756,8 @@ public static class FileCopyClient
             }
         }
 
-        public async IAsyncEnumerable<byte[]> ReadAllAsync([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+        public async IAsyncEnumerable<byte[]> ReadAllAsync(
+            [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
         {
             await foreach (var chunk in _channel.Reader.ReadAllAsync(token).ConfigureAwait(false))
                 yield return chunk;
@@ -636,14 +773,23 @@ public static class FileCopyClient
             ArgumentException.ThrowIfNullOrWhiteSpace(value);
             if (value[0] == ':')
             {
-                if (value.Length == 1) throw new ArgumentException("Default-device copy operand requires a path after ':'.", nameof(value));
+                if (value.Length == 1)
+                    throw new ArgumentException(
+                        "Default-device copy operand requires a path after ':'.", nameof(value));
                 var defaultPeer = config.Resolve(null)
-                    ?? throw new InvalidOperationException("No default device is configured; use <device>:<path> or run 'xas default <device>'.");
+                    ?? throw new InvalidOperationException(
+                        "No default device is configured; use <device>:<path> or " +
+                        "run 'xas default <device>'.");
                 return new(true, value[1..], defaultPeer);
             }
             var colon = value.IndexOf(':');
-            if (colon <= 0 || (colon == 1 && char.IsLetter(value[0]) && value.Length > 2 && value[2] is '\\' or '/')) return new(false, value, null);
-            var peer = config.Resolve(value[..colon]) ?? throw new InvalidOperationException($"No configured peer matches '{value[..colon]}'.");
+            var isWindowsDrivePath = colon == 1 &&
+                char.IsLetter(value[0]) && value.Length > 2 && value[2] is '\\' or '/';
+            if (colon <= 0 || isWindowsDrivePath)
+                return new(false, value, null);
+            var peerId = value[..colon];
+            var peer = config.Resolve(peerId)
+                ?? throw new InvalidOperationException($"No configured peer matches '{peerId}'.");
             return new(true, value[(colon + 1)..], peer);
         }
     }

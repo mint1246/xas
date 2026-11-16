@@ -11,14 +11,18 @@ public static class FileSystemTests
 {
     public static async Task RunAsync()
     {
-        var original = new RemoteWriteRange("volume-1", "folder/file.bin", 12, [0, 1, 128, 255]);
+        var original = new RemoteWriteRange(
+            "volume-1", "folder/file.bin", 12, [0, 1, 128, 255]);
         var encoded = RemoteFileSystemWire.Encode(original);
         var decoded = RemoteFileSystemWire.Decode<RemoteWriteRange>(encoded);
-        Assert(decoded.VolumeId == original.VolumeId && decoded.Path == original.Path && decoded.Offset == original.Offset &&
+        Assert(decoded.VolumeId == original.VolumeId &&
+            decoded.Path == original.Path && decoded.Offset == original.Offset &&
             decoded.Data.SequenceEqual(original.Data), "Filesystem range request did not round-trip.");
 
-        var binaryData = Enumerable.Range(0, 100_000).Select(i => (byte)(i % 251)).ToArray();
-        var binary = RemoteFileSystemWire.EncodeWriteV2("volume-2", "תיקיה/file.bin", 123456789, binaryData);
+        var binaryData = Enumerable.Range(0, 100_000)
+            .Select(index => (byte)(index % 251)).ToArray();
+        var binary = RemoteFileSystemWire.EncodeWriteV2(
+            "volume-2", "תיקיה/file.bin", 123456789, binaryData);
         var decodedBinary = RemoteFileSystemWire.DecodeWriteV2(binary);
         Assert(decodedBinary.VolumeId == "volume-2" && decodedBinary.Path == "תיקיה/file.bin" &&
                decodedBinary.Offset == 123456789 && decodedBinary.Data.Span.SequenceEqual(binaryData),
@@ -26,10 +30,12 @@ public static class FileSystemTests
 
         var page = new RemoteDirectoryPage([new RemoteFileEntry("item", false, 5, 10)], true);
         var decodedPage = RemoteFileSystemWire.Decode<RemoteDirectoryPage>(RemoteFileSystemWire.Encode(page));
-        Assert(decodedPage.HasMore && decodedPage.Entries.Single().Length == 5, "Filesystem directory page did not round-trip.");
+        Assert(decodedPage.HasMore && decodedPage.Entries.Single().Length == 5,
+            "Filesystem directory page did not round-trip.");
         var volume = new RemoteVolume("vol", "SD", "removable", false, 1_000_000, 250_000, "exfat");
         var decodedVolume = RemoteFileSystemWire.Decode<RemoteVolume>(RemoteFileSystemWire.Encode(volume));
-        Assert(decodedVolume.TotalBytes == 1_000_000 && decodedVolume.FreeBytes == 250_000 && decodedVolume.FileSystem == "exfat",
+        Assert(decodedVolume.TotalBytes == 1_000_000 &&
+            decodedVolume.FreeBytes == 250_000 && decodedVolume.FileSystem == "exfat",
             "Filesystem volume capacity metadata did not round-trip.");
 
         try
@@ -37,7 +43,9 @@ public static class FileSystemTests
             RemoteFileSystemWire.Decode<RemotePath>(new byte[1024 * 1024 + 1]);
             throw new Exception("Oversized filesystem control payload was accepted.");
         }
-        catch (InvalidDataException) { }
+        catch (InvalidDataException)
+        {
+        }
         await RemoteClientUsesVolumeScopedRequests();
         await RemoteClientUsesBinaryWritesForVersion2();
         await RemoteErrorsRetainFilesystemSemantics();
@@ -47,7 +55,8 @@ public static class FileSystemTests
 
     private static async Task FileSystemExportsAreExplicitAndReadOnlyIsEnforced()
     {
-        var root = Path.Combine(Path.GetTempPath(), "xas-fs-policy-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(
+            Path.GetTempPath(), "xas-fs-policy-" + Guid.NewGuid().ToString("N"));
         var exportRoot = Path.Combine(root, "export");
         Directory.CreateDirectory(exportRoot);
         await File.WriteAllTextAsync(Path.Combine(exportRoot, "hello.txt"), "hello");
@@ -56,7 +65,8 @@ public static class FileSystemTests
             var configuration = new LocalConfiguration(Path.Combine(root, "config"));
             configuration.SetAutoExposeRemovable(false);
             configuration.SetAutoExposeMainDrive(false);
-            configuration.UpsertFileSystemExport(new FileSystemExport("docs", exportRoot, "Docs", ReadOnly: true));
+            configuration.UpsertFileSystemExport(
+                new FileSystemExport("docs", exportRoot, "Docs", ReadOnly: true));
             var permissions = new PeerPermissionStore(Path.Combine(root, "trust"));
             permissions.SetAllowed("peer", Capability.FileSystem, true);
             var service = new FileSystemService(permissions, configuration);
@@ -64,35 +74,61 @@ public static class FileSystemTests
             var volumesReply = await service.HandleAsync("peer",
                 new ProtocolMessage(MessageKind.Request, 1, 0, "fs.volumes", []), CancellationToken.None);
             var volumes = RemoteFileSystemWire.Decode<RemoteVolume[]>(volumesReply.Payload);
-            Assert(volumes.Length == 1 && volumes[0] is { Id: "export-docs", Name: "Docs", Kind: "export", ReadOnly: true },
+            Assert(volumes.Length == 1 && volumes[0] is
+            { Id: "export-docs", Name: "Docs", Kind: "export", ReadOnly: true },
                 "Filesystem service exposed storage outside the explicit export policy.");
 
-            var readReply = await service.HandleAsync("peer", new ProtocolMessage(MessageKind.Request, 2, 0, "fs.read",
-                RemoteFileSystemWire.Encode(new RemoteReadRange("export-docs", "hello.txt", 0, 5))), CancellationToken.None);
-            Assert(System.Text.Encoding.UTF8.GetString(readReply.Payload) == "hello", "Explicit filesystem export could not be read.");
-            var flushReply = await service.HandleAsync("peer", new ProtocolMessage(MessageKind.Request, 4, 0, "fs.flush",
-                RemoteFileSystemWire.Encode(new RemoteFlushPath("export-docs", "hello.txt", false))), CancellationToken.None);
-            Assert(flushReply.Payload.Length == 0, "Filesystem service returned an invalid durable flush response.");
+            var readReply = await service.HandleAsync(
+                "peer",
+                new ProtocolMessage(MessageKind.Request, 2, 0, "fs.read",
+                    RemoteFileSystemWire.Encode(
+                        new RemoteReadRange("export-docs", "hello.txt", 0, 5))),
+                CancellationToken.None);
+            Assert(System.Text.Encoding.UTF8.GetString(readReply.Payload) == "hello",
+                "Explicit filesystem export could not be read.");
+            var flushReply = await service.HandleAsync(
+                "peer",
+                new ProtocolMessage(MessageKind.Request, 4, 0, "fs.flush",
+                    RemoteFileSystemWire.Encode(
+                        new RemoteFlushPath("export-docs", "hello.txt", false))),
+                CancellationToken.None);
+            Assert(flushReply.Payload.Length == 0,
+                "Filesystem service returned an invalid durable flush response.");
             if (OperatingSystem.IsLinux())
             {
-                var directoryFlush = await service.HandleAsync("peer", new ProtocolMessage(MessageKind.Request, 5, 0, "fs.flush",
-                    RemoteFileSystemWire.Encode(new RemoteFlushPath("export-docs", "", true))), CancellationToken.None);
-                Assert(directoryFlush.Payload.Length == 0, "Filesystem service returned an invalid directory flush response.");
+                var directoryFlush = await service.HandleAsync(
+                    "peer",
+                    new ProtocolMessage(MessageKind.Request, 5, 0, "fs.flush",
+                        RemoteFileSystemWire.Encode(
+                            new RemoteFlushPath("export-docs", "", true))),
+                    CancellationToken.None);
+                Assert(directoryFlush.Payload.Length == 0,
+                    "Filesystem service returned an invalid directory flush response.");
             }
 
             try
             {
-                await service.HandleAsync("peer", new ProtocolMessage(MessageKind.Request, 3, 0, "fs.write",
-                    RemoteFileSystemWire.Encode(new RemoteWriteRange("export-docs", "hello.txt", 0, [1, 2, 3]))), CancellationToken.None);
+                await service.HandleAsync(
+                    "peer",
+                    new ProtocolMessage(MessageKind.Request, 3, 0, "fs.write",
+                        RemoteFileSystemWire.Encode(
+                            new RemoteWriteRange("export-docs", "hello.txt", 0, [1, 2, 3]))),
+                    CancellationToken.None);
                 throw new Exception("A read-only filesystem export accepted a write.");
             }
-            catch (UnauthorizedAccessException) { }
+            catch (UnauthorizedAccessException)
+            {
+            }
 
             var reloaded = new LocalConfiguration(Path.Combine(root, "config"));
-            Assert(!reloaded.AutoExposeRemovable && !reloaded.AutoExposeMainDrive && reloaded.FileSystemExports.Single().Id == "docs",
+            Assert(!reloaded.AutoExposeRemovable && !reloaded.AutoExposeMainDrive &&
+                reloaded.FileSystemExports.Single().Id == "docs",
                 "Filesystem export policy did not persist in local configuration.");
         }
-        finally { Directory.Delete(root, true); }
+        finally
+        {
+            Directory.Delete(root, true);
+        }
     }
 
     private static async Task MainDriveIsSharedByDefaultAndCanBeDisabled()

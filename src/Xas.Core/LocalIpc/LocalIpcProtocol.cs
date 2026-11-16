@@ -23,9 +23,11 @@ public static class LocalIpcProtocol
     public const string PairList = "local.pair.list";
     public const string PairApprove = "local.pair.approve";
     public const string PairPendingEvent = "local.pair.pending";
+
     public const string ClipboardPush = "local.clipboard.push";
     public const string ClipboardPull = "local.clipboard.pull";
     public const string ClipboardStatus = "local.clipboard.status";
+
     public const string StorageVolumes = "local.storage.volumes";
     public const string StorageMounts = "local.storage.mounts";
     public const string StorageMount = "local.storage.mount";
@@ -35,6 +37,7 @@ public static class LocalIpcProtocol
     public const string Revoke = "local.revoke";
     public const string Endpoint = "local.endpoint";
     public const string Bind = "local.bind";
+
     public const string ShellOpen = "local.shell.open";
     public const string ShellStdin = ShellExecWire.Stdin;
     public const string ShellStdout = ShellExecWire.Stdout;
@@ -53,9 +56,13 @@ public static class LocalIpcProtocol
 
     public static uint DecodeId(byte[] bytes)
     {
-        if (bytes.Length != 4) throw new InvalidDataException("Invalid shell session ID.");
+        if (bytes.Length != 4)
+            throw new InvalidDataException("Invalid shell session ID.");
         var id = BinaryPrimitives.ReadUInt32BigEndian(bytes);
-        return id == 0 ? throw new InvalidDataException("Invalid shell session ID.") : id;
+        if (id == 0)
+            throw new InvalidDataException("Invalid shell session ID.");
+
+        return id;
     }
 }
 
@@ -64,16 +71,45 @@ public sealed record LocalPeerRequest(string? DeviceId, string Method, byte[] Pa
 public sealed record LocalShellOpen(string? DeviceId, ShellRequest Request);
 public sealed record LocalPairBegin(string Host, int ControlPort, string? ExpectedDeviceId);
 public sealed record LocalPairTarget(string Query);
-public sealed record LocalPairCandidate(string DeviceId, string DisplayName, string Address, int ControlPort,
+public sealed record LocalPairCandidate(
+    string DeviceId,
+    string DisplayName,
+    string Address,
+    int ControlPort,
     DateTimeOffset LastSeen);
-public enum PairPermissionPreset { None = 0, Kvm = 1, Personal = 2 }
-public sealed record LocalPairDecision(string PairingId, bool Approve, PairPermissionPreset Preset = PairPermissionPreset.Personal);
-public sealed record LocalPairPending(string PairingId, string DeviceId, string DisplayName,
-    string Fingerprint, string Code, DateTimeOffset CreatedAtUtc, bool Incoming, string Address, int ControlPort);
+public enum PairPermissionPreset
+{
+    None = 0,
+    Kvm = 1,
+    Personal = 2
+}
+public sealed record LocalPairDecision(
+    string PairingId,
+    bool Approve,
+    PairPermissionPreset Preset = PairPermissionPreset.Personal);
+public sealed record LocalPairPending(
+    string PairingId,
+    string DeviceId,
+    string DisplayName,
+    string Fingerprint,
+    string Code,
+    DateTimeOffset CreatedAtUtc,
+    bool Incoming,
+    string Address,
+    int ControlPort);
 public sealed record LocalClipboardStatus(bool Active, string Message);
-public sealed record LocalRemoteVolumeInfo(string DeviceId, string DeviceName, string VolumeId, string Name,
-    string Kind, bool ReadOnly, long? TotalBytes, long? FreeBytes, string? FileSystem,
-    string? MountedAt, bool AutoMountSuppressed);
+public sealed record LocalRemoteVolumeInfo(
+    string DeviceId,
+    string DeviceName,
+    string VolumeId,
+    string Name,
+    string Kind,
+    bool ReadOnly,
+    long? TotalBytes,
+    long? FreeBytes,
+    string? FileSystem,
+    string? MountedAt,
+    bool AutoMountSuppressed);
 public sealed record LocalStorageVolumeTarget(string? DeviceId, string Volume);
 public sealed record LocalUiInfo(string Url);
 public sealed record LocalEndpointUpdate(string DeviceId, string Host, int Port);
@@ -86,7 +122,8 @@ public static class LocalIpcEndpoint
         get
         {
             var instance = Environment.GetEnvironmentVariable("XAS_LOCAL_IPC_INSTANCE");
-            if (string.IsNullOrWhiteSpace(instance)) return string.Empty;
+            if (string.IsNullOrWhiteSpace(instance))
+                return string.Empty;
             var digest = SHA256.HashData(Encoding.UTF8.GetBytes(instance));
             return "-" + Convert.ToHexString(digest.AsSpan(0, 8)).ToLowerInvariant();
         }
@@ -98,7 +135,9 @@ public static class LocalIpcEndpoint
         {
             var user = Environment.UserDomainName + "\\" + Environment.UserName;
             var digest = SHA256.HashData(Encoding.UTF8.GetBytes(user));
-            return "xas-" + Convert.ToHexString(digest.AsSpan(0, 12)).ToLowerInvariant() + InstanceSuffix;
+            return "xas-"
+                + Convert.ToHexString(digest.AsSpan(0, 12)).ToLowerInvariant()
+                + InstanceSuffix;
         }
     }
 
@@ -110,7 +149,8 @@ public static class LocalIpcEndpoint
             var directory = !string.IsNullOrWhiteSpace(runtime)
                 ? Path.Combine(runtime, "xas")
                 : Path.Combine(AppPaths.Root, "run");
-            return Path.Combine(directory, "daemon" + InstanceSuffix + ".sock");
+            var socketName = "daemon" + InstanceSuffix + ".sock";
+            return Path.Combine(directory, socketName);
         }
     }
 
@@ -119,27 +159,55 @@ public static class LocalIpcEndpoint
         try
         {
             if (OperatingSystem.IsWindows())
-            {
-                var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut,
-                    PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
-                try { await pipe.ConnectAsync(3000, token).ConfigureAwait(false); return pipe; }
-                catch { await pipe.DisposeAsync().ConfigureAwait(false); throw; }
-            }
+                return await ConnectWindowsAsync(token).ConfigureAwait(false);
             if (OperatingSystem.IsLinux())
-            {
-                var socket = new Socket(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified);
-                try
-                {
-                    await socket.ConnectAsync(new UnixDomainSocketEndPoint(SocketPath), token).ConfigureAwait(false);
-                    return new NetworkStream(socket, ownsSocket: true);
-                }
-                catch { socket.Dispose(); throw; }
-            }
+                return await ConnectLinuxAsync(token).ConfigureAwait(false);
             throw new PlatformNotSupportedException("Local daemon IPC requires Windows or Linux.");
         }
         catch (Exception ex) when (ex is IOException or SocketException or TimeoutException)
         {
-            throw new IOException("The local xas daemon is unavailable. Start the per-user daemon and try again.", ex);
+            throw new IOException(
+                "The local xas daemon is unavailable. Start the per-user daemon and try again.",
+                ex);
+        }
+    }
+
+    private static async Task<Stream> ConnectWindowsAsync(CancellationToken token)
+    {
+        var pipe = new NamedPipeClientStream(
+            ".",
+            PipeName,
+            PipeDirection.InOut,
+            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+        try
+        {
+            await pipe.ConnectAsync(3000, token).ConfigureAwait(false);
+            return pipe;
+        }
+        catch
+        {
+            await pipe.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    private static async Task<Stream> ConnectLinuxAsync(CancellationToken token)
+    {
+        var socket = new Socket(
+            AddressFamily.Unix,
+            SocketType.Stream,
+            ProtocolType.Unspecified);
+        try
+        {
+            await socket.ConnectAsync(
+                new UnixDomainSocketEndPoint(SocketPath),
+                token).ConfigureAwait(false);
+            return new NetworkStream(socket, ownsSocket: true);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
         }
     }
 }

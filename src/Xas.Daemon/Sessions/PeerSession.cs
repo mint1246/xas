@@ -25,10 +25,25 @@ public sealed class PeerSession(string deviceId, string name) : IHotInputPeer, I
     private string _name = name;
 
     public string DeviceId { get; } = deviceId;
-    public DisplayMetadata? Display { get { lock (_gate) return _display; } }
-    public bool RealtimeReady { get { lock (_gate) return _lanes.ContainsKey(PeerLane.Realtime); } }
-    public bool BulkReady { get { lock (_gate) return _lanes.ContainsKey(PeerLane.Bulk); } }
-    public bool Online { get { lock (_gate) return _lanes.ContainsKey(PeerLane.Control); } }
+    public DisplayMetadata? Display
+    {
+        get { lock (_gate) return _display; }
+    }
+
+    public bool RealtimeReady
+    {
+        get { lock (_gate) return _lanes.ContainsKey(PeerLane.Realtime); }
+    }
+
+    public bool BulkReady
+    {
+        get { lock (_gate) return _lanes.ContainsKey(PeerLane.Bulk); }
+    }
+
+    public bool Online
+    {
+        get { lock (_gate) return _lanes.ContainsKey(PeerLane.Control); }
+    }
     public event Action? Changed;
     public event Action? Disconnected;
     public event Func<PeerSession, PeerLane, ProtocolMessage, ValueTask>? MessageReceived;
@@ -37,10 +52,23 @@ public sealed class PeerSession(string deviceId, string name) : IHotInputPeer, I
     {
         get
         {
-            lock (_gate) return new(DeviceId, _device?.Name ?? _name, _lanes.ContainsKey(PeerLane.Control),
-                _lanes.ContainsKey(PeerLane.Realtime), _endpoint, _lastSeen, _roundTripTime, _device, _display);
+            lock (_gate)
+            {
+                return CreateSnapshotUnderLock();
+            }
         }
     }
+
+    private PeerSessionSnapshot CreateSnapshotUnderLock() => new(
+        DeviceId,
+        _device?.Name ?? _name,
+        _lanes.ContainsKey(PeerLane.Control),
+        _lanes.ContainsKey(PeerLane.Realtime),
+        _endpoint,
+        _lastSeen,
+        _roundTripTime,
+        _device,
+        _display);
 
     internal void UpdateEndpoint(string? endpoint, string? name = null, DateTimeOffset? lastSeen = null,
         bool clearEndpoint = false)
@@ -48,9 +76,21 @@ public sealed class PeerSession(string deviceId, string name) : IHotInputPeer, I
         var changed = false;
         lock (_gate)
         {
-            if (endpoint is not null && _endpoint != endpoint) { _endpoint = endpoint; changed = true; }
-            if (clearEndpoint && _endpoint is not null) { _endpoint = null; changed = true; }
-            if (!string.IsNullOrWhiteSpace(name) && _name != name) { _name = name; changed = true; }
+            if (endpoint is not null && _endpoint != endpoint)
+            {
+                _endpoint = endpoint;
+                changed = true;
+            }
+            if (clearEndpoint && _endpoint is not null)
+            {
+                _endpoint = null;
+                changed = true;
+            }
+            if (!string.IsNullOrWhiteSpace(name) && _name != name)
+            {
+                _name = name;
+                changed = true;
+            }
             if (lastSeen is not null) _lastSeen = lastSeen;
         }
         if (changed) Changed?.Invoke();
@@ -62,15 +102,34 @@ public sealed class PeerSession(string deviceId, string name) : IHotInputPeer, I
         var changed = false;
         lock (_gate)
         {
-            if (device is not null && !Equals(_device, device)) { _device = device; changed = true; }
-            if (clearDisplay && _display is not null) { _display = null; changed = true; }
-            if (display is not null && !Equals(_display, display)) { _display = display; changed = true; }
-            if (roundTripTime is not null) { _roundTripTime = roundTripTime; changed = true; }
+            if (device is not null && !Equals(_device, device))
+            {
+                _device = device;
+                changed = true;
+            }
+            if (clearDisplay && _display is not null)
+            {
+                _display = null;
+                changed = true;
+            }
+            if (display is not null && !Equals(_display, display))
+            {
+                _display = display;
+                changed = true;
+            }
+            if (roundTripTime is not null)
+            {
+                _roundTripTime = roundTripTime;
+                changed = true;
+            }
         }
         if (changed) Changed?.Invoke();
     }
 
-    internal async ValueTask<bool> AttachAsync(PeerLane lane, MultiplexedProtocolPeer peer, bool preferred = true)
+    internal async ValueTask<bool> AttachAsync(
+        PeerLane lane,
+        MultiplexedProtocolPeer peer,
+        bool preferred = true)
     {
         MultiplexedProtocolPeer? old;
         bool accepted;
@@ -92,7 +151,10 @@ public sealed class PeerSession(string deviceId, string name) : IHotInputPeer, I
             return false;
         }
         Changed?.Invoke();
-        if (old is not null && !ReferenceEquals(old, peer)) await old.DisposeAsync().ConfigureAwait(false);
+        if (old is not null && !ReferenceEquals(old, peer))
+        {
+            await old.DisposeAsync().ConfigureAwait(false);
+        }
         return true;
     }
 
@@ -116,31 +178,52 @@ public sealed class PeerSession(string deviceId, string name) : IHotInputPeer, I
             throw new IOException($"{lane} lane to {DeviceId} is offline.");
     }
 
-    public ValueTask<ProtocolMessage> RequestAsync(PeerLane lane, string method, byte[] payload,
+    public ValueTask<ProtocolMessage> RequestAsync(
+        PeerLane lane,
+        string method,
+        byte[] payload,
         CancellationToken cancellationToken = default) =>
         GetLane(lane).RequestAsync(method, payload, cancellationToken: cancellationToken);
 
-    public ValueTask SendAsync(PeerLane lane, ProtocolMessage message, CancellationToken cancellationToken = default) =>
+    public ValueTask SendAsync(
+        PeerLane lane,
+        ProtocolMessage message,
+        CancellationToken cancellationToken = default) =>
         GetLane(lane).SendAsync(message, cancellationToken);
 
-    public ValueTask<ProtocolMessage> RequestRealtimeAsync(string method, byte[] payload,
-        CancellationToken cancellationToken) => RequestAsync(PeerLane.Realtime, method, payload, cancellationToken);
+    public ValueTask<ProtocolMessage> RequestRealtimeAsync(
+        string method,
+        byte[] payload,
+        CancellationToken cancellationToken) =>
+        RequestAsync(PeerLane.Realtime, method, payload, cancellationToken);
 
     public ValueTask SendRealtimeAsync(ProtocolMessage message, CancellationToken cancellationToken) =>
         SendAsync(PeerLane.Realtime, message, cancellationToken);
 
     internal async ValueTask OnMessageAsync(PeerLane lane, ProtocolMessage message)
     {
-        if (MessageReceived is not { } handlers) return;
-        foreach (Func<PeerSession, PeerLane, ProtocolMessage, ValueTask> handler in handlers.GetInvocationList())
+        if (MessageReceived is not { } handlers)
+        {
+            return;
+        }
+        foreach (var registeredHandler in handlers.GetInvocationList())
+        {
+            var handler = (Func<PeerSession, PeerLane, ProtocolMessage, ValueTask>)registeredHandler;
             await handler(this, lane, message).ConfigureAwait(false);
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
         MultiplexedProtocolPeer[] lanes;
         bool wasRealtime;
-        lock (_gate) { lanes = _lanes.Values.ToArray(); wasRealtime = _lanes.ContainsKey(PeerLane.Realtime); _lanes.Clear(); _preferredLane.Clear(); }
+        lock (_gate)
+        {
+            lanes = _lanes.Values.ToArray();
+            wasRealtime = _lanes.ContainsKey(PeerLane.Realtime);
+            _lanes.Clear();
+            _preferredLane.Clear();
+        }
         foreach (var lane in lanes) await lane.DisposeAsync().ConfigureAwait(false);
         if (wasRealtime) Disconnected?.Invoke();
         Changed?.Invoke();

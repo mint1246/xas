@@ -262,9 +262,9 @@ static int handle_event(const unsigned char *event) {
       held_buttons[index] = 1;
       held_button_fd[index] = fd;
     } else {
-      fd = held_button_fd[index] >= 0
-               ? held_button_fd[index]
-               : (last_pointer_fd >= 0 ? last_pointer_fd : relative_fd);
+      fd = held_button_fd[index];
+      if (fd < 0)
+        fd = last_pointer_fd >= 0 ? last_pointer_fd : relative_fd;
       held_buttons[index] = 0;
       held_button_fd[index] = -1;
     }

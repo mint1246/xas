@@ -17,13 +17,15 @@ public sealed class WindowsTextClipboard : ITextClipboardBackend, IClipboardChan
     /// <summary>Whether this host supports the Windows clipboard APIs.</summary>
     public bool IsAvailable => OperatingSystem.IsWindows();
 
-    public IAsyncEnumerable<ClipboardTextSnapshot> WatchChangesAsync(CancellationToken cancellationToken) =>
+    public IAsyncEnumerable<ClipboardTextSnapshot> WatchChangesAsync(
+        CancellationToken cancellationToken) =>
         WindowsClipboardNotificationSource.WatchAsync(this, cancellationToken);
 
     /// <summary>Gets Unicode clipboard text and the observed system change sequence number.</summary>
     /// <exception cref="PlatformNotSupportedException">The host is not Windows.</exception>
     /// <exception cref="Win32Exception">Windows could not open or read the clipboard.</exception>
-    public ValueTask<ClipboardTextSnapshot> GetSnapshotAsync(CancellationToken cancellationToken = default)
+    public ValueTask<ClipboardTextSnapshot> GetSnapshotAsync(
+        CancellationToken cancellationToken = default)
     {
         EnsureAvailable();
         cancellationToken.ThrowIfCancellationRequested();
@@ -57,9 +59,17 @@ public sealed class WindowsTextClipboard : ITextClipboardBackend, IClipboardChan
             if (handle != IntPtr.Zero)
             {
                 var pointer = Native.GlobalLock(handle);
-                if (pointer == IntPtr.Zero) ThrowLast("GlobalLock(CF_UNICODETEXT)");
-                try { text = Marshal.PtrToStringUni(pointer); }
-                finally { Native.GlobalUnlock(handle); }
+                if (pointer == IntPtr.Zero)
+                    ThrowLast("GlobalLock(CF_UNICODETEXT)");
+
+                try
+                {
+                    text = Marshal.PtrToStringUni(pointer);
+                }
+                finally
+                {
+                    Native.GlobalUnlock(handle);
+                }
             }
 
             // Read while the clipboard remains open, so a writer cannot change the value between
@@ -89,7 +99,10 @@ public sealed class WindowsTextClipboard : ITextClipboardBackend, IClipboardChan
             {
                 Marshal.Copy((text + '\0').ToCharArray(), 0, pointer, text.Length + 1);
             }
-            finally { Native.GlobalUnlock(memory); }
+            finally
+            {
+                Native.GlobalUnlock(memory);
+            }
 
             var owner = CreateOwnerWindow();
             if (!Native.OpenClipboard(owner))
@@ -100,8 +113,10 @@ public sealed class WindowsTextClipboard : ITextClipboardBackend, IClipboardChan
             }
             try
             {
-                if (!Native.EmptyClipboard()) ThrowLast("EmptyClipboard");
-                if (Native.SetClipboardData(CfUnicodeText, memory) == IntPtr.Zero) ThrowLast("SetClipboardData");
+                if (!Native.EmptyClipboard())
+                    ThrowLast("EmptyClipboard");
+                if (Native.SetClipboardData(CfUnicodeText, memory) == IntPtr.Zero)
+                    ThrowLast("SetClipboardData");
                 clipboardOwnsMemory = true;
             }
             finally
@@ -112,13 +127,18 @@ public sealed class WindowsTextClipboard : ITextClipboardBackend, IClipboardChan
         }
         finally
         {
-            if (!clipboardOwnsMemory) Native.GlobalFree(memory);
+            if (!clipboardOwnsMemory)
+                Native.GlobalFree(memory);
         }
     }
 
     private void EnsureAvailable()
     {
-        if (!IsAvailable) throw new PlatformNotSupportedException("The system clipboard backend is available only on Windows.");
+        if (!IsAvailable)
+        {
+            throw new PlatformNotSupportedException(
+                "The system clipboard backend is available only on Windows.");
+        }
     }
 
     private static void ThrowLast(string operation) =>
@@ -131,41 +151,79 @@ public sealed class WindowsTextClipboard : ITextClipboardBackend, IClipboardChan
     {
         // A real owner HWND is required: EmptyClipboard assigns ownership to it, and Windows
         // rejects SetClipboardData when OpenClipboard was called with a null owner.
-        var owner = Native.CreateWindowEx(0, "STATIC", string.Empty, 0,
-            0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
-        if (owner == IntPtr.Zero) ThrowLast("CreateWindowEx(STATIC)");
+        var owner = Native.CreateWindowEx(
+            0,
+            "STATIC",
+            string.Empty,
+            0,
+            0,
+            0,
+            0,
+            0,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero,
+            IntPtr.Zero);
+        if (owner == IntPtr.Zero)
+            ThrowLast("CreateWindowEx(STATIC)");
         return owner;
     }
 
     private static class Native
     {
-        [DllImport("user32.dll", EntryPoint = "CreateWindowExW", CharSet = CharSet.Unicode, SetLastError = true)]
-        internal static extern IntPtr CreateWindowEx(uint extendedStyle, string className, string windowName,
-            uint style, int x, int y, int width, int height, IntPtr parent, IntPtr menu, IntPtr instance, IntPtr parameter);
+        [DllImport(
+            "user32.dll",
+            EntryPoint = "CreateWindowExW",
+            CharSet = CharSet.Unicode,
+            SetLastError = true)]
+        internal static extern IntPtr CreateWindowEx(
+            uint extendedStyle,
+            string className,
+            string windowName,
+            uint style,
+            int x,
+            int y,
+            int width,
+            int height,
+            IntPtr parent,
+            IntPtr menu,
+            IntPtr instance,
+            IntPtr parameter);
+
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool DestroyWindow(IntPtr window);
+
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool OpenClipboard(IntPtr owner);
+
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool CloseClipboard();
+
         [DllImport("user32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool EmptyClipboard();
+
         [DllImport("user32.dll", SetLastError = true)]
         internal static extern IntPtr GetClipboardData(uint format);
+
         [DllImport("user32.dll", SetLastError = true)]
         internal static extern IntPtr SetClipboardData(uint format, IntPtr memory);
+
         [DllImport("user32.dll")]
         internal static extern uint GetClipboardSequenceNumber();
+
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern IntPtr GlobalAlloc(uint flags, UIntPtr bytes);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern IntPtr GlobalFree(IntPtr memory);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         internal static extern IntPtr GlobalLock(IntPtr memory);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool GlobalUnlock(IntPtr memory);

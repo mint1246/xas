@@ -103,130 +103,32 @@ public static class IntegrationTests
                     "Input events or cleanup failed through the network protocol.");
 
                 var shellRequest = new ShellRequest(ShellMode.Exec, null, "dotnet",
-                    [typeof(IntegrationTests).Assembly.Location, "--echo-args", "hello world"]);
-                var reply = await peer.RequestAsync("shell.run", ShellWire.EncodeRequest(shellRequest));
+                    [typeof(IntegrationTests).Assembly.Location, "--echo-args",
+                        "hello world"]);
+                var shellPayload = ShellWire.EncodeRequest(shellRequest);
+                var reply = await peer.RequestAsync("shell.run", shellPayload);
                 var result = ShellWire.DecodeResult(reply.Payload);
-                Assert(result.ExitCode == 0 && Encoding.UTF8.GetString(result.StandardOutput) == "hello world",
+                var shellOutput = Encoding.UTF8.GetString(result.StandardOutput);
+                Assert(result.ExitCode == 0 && shellOutput == "hello world",
                     "The remote argv shell path failed.");
 
-                var config = new LocalConfiguration(Path.Combine(root, "client-config"));
-                config.UpsertPeer(new ConfiguredPeer(serverIdentity.DeviceId, "server", "127.0.0.1", port));
+                var config = new LocalConfiguration(
+                    Path.Combine(root, "client-config"));
+                config.UpsertPeer(new ConfiguredPeer(
+                    serverIdentity.DeviceId, "server", "127.0.0.1", port));
                 config.SetDefault(serverIdentity.DeviceId);
-                var localClipboard = new RecordingTextClipboard("local initial");
-                using (var syncStop = new CancellationTokenSource())
-                {
-                    var syncTask = ClipboardClient.SyncAsync(null, config, clientIdentity, clientTrust,
-                        localClipboard, TextWriter.Null, syncStop.Token);
-                    try
-                    {
-                        await WaitUntilAsync(() => localClipboard.ReadCount >= 2 && remoteClipboard.ReadCount >= 2);
-                        await localClipboard.SetTextAsync("from local", CancellationToken.None);
-                        await WaitUntilAsync(() => remoteClipboard.Text == "from local");
-                        await remoteClipboard.SetTextAsync("from remote", CancellationToken.None);
-                        await WaitUntilAsync(() => localClipboard.Text == "from remote");
-                        var remoteWrites = remoteClipboard.WriteCount;
-                        await Task.Delay(1600);
-                        Assert(remoteClipboard.WriteCount == remoteWrites,
-                            "Clipboard sync echoed an imported value back to its origin.");
-                    }
-                    finally
-                    {
-                        syncStop.Cancel();
-                        try { await syncTask; } catch (OperationCanceledException) { }
-                    }
-                }
-                using var output = new MemoryStream();
-                using var error = new MemoryStream();
-                using var cliClient = new RemoteXasClient(config, clientIdentity, clientTrust, output, error);
-                var largeRequest = new ShellRequest(ShellMode.Exec, null, "dotnet",
-                    [typeof(IntegrationTests).Assembly.Location, "--echo-output", "1500000"]);
-                var largeExit = await cliClient.RunShellAsync(largeRequest, null, CancellationToken.None);
-                Assert(largeExit == 0 && output.Length == 1_500_000 && error.Length == 0,
-                    "The CLI client did not receive the full binary output stream.");
+                await ExerciseClipboardSyncAsync(
+                    config, clientIdentity, clientTrust, remoteClipboard);
+                await ExerciseRemoteShellStreamsAsync(
+                    config, clientIdentity, clientTrust);
 
-                output.SetLength(0);
-                using var pipedInput = new MemoryStream(Encoding.UTF8.GetBytes("piped input\n"));
-                using var pipedClient = new RemoteXasClient(config, clientIdentity, clientTrust, output, error, pipedInput);
-                var inputRequest = new ShellRequest(ShellMode.Exec, null, "dotnet",
-                    [typeof(IntegrationTests).Assembly.Location, "--echo-stdin"]);
-                var inputExit = await pipedClient.RunShellAsync(inputRequest, null, CancellationToken.None);
-                Assert(inputExit == 0 && Encoding.UTF8.GetString(output.ToArray()) == "piped input\n",
-                    "The CLI client did not forward binary standard input.");
-
-                using var ipcOutputA = new MemoryStream();
-                using var ipcOutputB = new MemoryStream();
-                using var ipcClientA = new LocalDaemonClient(Stream.Null, ipcOutputA, Stream.Null);
-                using var ipcClientB = new LocalDaemonClient(Stream.Null, ipcOutputB, Stream.Null);
-                await using var ipcInteractiveTls = await MutualTlsTransport.ConnectAsync("127.0.0.1", port,
-                    clientIdentity, clientTrust, serverIdentity.DeviceId, TimeSpan.FromSeconds(10));
-                await using var ipcInteractiveFrames = new BinaryFrameConnection(ipcInteractiveTls.Stream, leaveOpen: true);
-                var clientPermissions = new PeerPermissionStore(Path.Combine(root, "client-trust"));
-                clientPermissions.SetAllowed(serverIdentity.DeviceId, Capability.Shell, true);
-                var ipcShellBackend = new GatedIpcShellBackend();
-                await using var remoteShell = new StreamingCommandManager(serverIdentity.DeviceId,
-                    clientPermissions, ipcInteractiveFrames.SendAsync, ipcShellBackend);
-                await using var ipcInteractivePeer = new MultiplexedProtocolPeer(ipcInteractiveFrames,
-                    (request, token) => request.Method is ShellExecWire.Open or ShellExecWire.Close
-                        ? remoteShell.HandleRequestAsync(request, token)
-                        : ValueTask.FromException<ProtocolMessage>(new NotSupportedException()));
-                ipcInteractivePeer.MessageReceived += message => remoteShell.HandleMessageAsync(message);
-                _ = await ipcInteractivePeer.RequestAsync("session.lane.open",
-                    Encoding.UTF8.GetBytes(PeerLane.Interactive.ToString()), cancellationToken: CancellationToken.None);
-                var ipcRequestA = new ShellRequest(ShellMode.Exec, null, "dotnet",
-                    ["ipc-alpha"]);
-                var ipcRequestB = new ShellRequest(ShellMode.Exec, null, "dotnet",
-                    ["ipc-beta"]);
-                var ipcRun = Task.WhenAll(
-                    ipcClientA.RunShellAsync(ipcRequestA, clientIdentity.DeviceId, CancellationToken.None),
-                    ipcClientB.RunShellAsync(ipcRequestB, clientIdentity.DeviceId, CancellationToken.None));
-                await ipcShellBackend.BothCommandsStarted.WaitAsync(TimeSpan.FromSeconds(5));
-                await ipcInteractivePeer.SendAsync(new ProtocolMessage(MessageKind.Event, 0, 0,
-                    "peer.notice", Encoding.UTF8.GetBytes("unrelated control event")));
-                ipcShellBackend.ReleaseCommands();
-                var ipcResults = await ipcRun.WaitAsync(TimeSpan.FromSeconds(10));
-                Assert(ipcResults.SequenceEqual([0, 0]) &&
-                    Encoding.UTF8.GetString(ipcOutputA.ToArray()) == "ipc-alpha" &&
-                    Encoding.UTF8.GetString(ipcOutputB.ToArray()) == "ipc-beta",
-                    $"Concurrent bound IPC shell commands received unexpected data (exit {string.Join(',', ipcResults)}, " +
-                    $"A='{Encoding.UTF8.GetString(ipcOutputA.ToArray())}', B='{Encoding.UTF8.GetString(ipcOutputB.ToArray())}').");
-
-                using var blockedInput = new SynchronousBlockingInputStream();
-                using var blockedOutput = new MemoryStream();
-                using var blockedClient = new LocalDaemonClient(blockedInput, blockedOutput, Stream.Null);
-                Task<int>? blockedRun = null;
-                try
-                {
-                    blockedRun = Task.Run(() => blockedClient.RunShellAsync(
-                        new ShellRequest(ShellMode.Exec, null, "fake", ["ipc-blocked"]),
-                        clientIdentity.DeviceId, CancellationToken.None));
-                    await blockedInput.ReadStarted.WaitAsync(TimeSpan.FromSeconds(5));
-                    await ipcShellBackend.BlockedCommandStarted.WaitAsync(TimeSpan.FromSeconds(5));
-                    ipcShellBackend.ReleaseBlockedCommand();
-                    var blockedExit = await blockedRun.WaitAsync(TimeSpan.FromSeconds(5));
-                    Assert(blockedExit == 0 && Encoding.UTF8.GetString(blockedOutput.ToArray()) == "ipc-blocked" &&
-                        !blockedInput.IsReleased,
-                        "Local IPC shell completion waited for a synchronous stdin read to return.");
-                }
-                finally
-                {
-                    ipcShellBackend.ReleaseBlockedCommand();
-                    blockedInput.Release();
-                    if (blockedRun is not null)
-                        try { await blockedRun.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
-                    await blockedInput.ReadFinished.WaitAsync(TimeSpan.FromSeconds(5));
-                }
+                await ExerciseLocalIpcShellAsync(
+                    root, port, clientIdentity, clientTrust, serverIdentity.DeviceId);
 
                 if (OperatingSystem.IsWindows())
                 {
-                    using var interactiveInput = new MemoryStream(Encoding.UTF8.GetBytes("echo XAS_INTERACTIVE_OK\r\nexit /b 7\r\n"));
-                    using var interactiveOutput = new MemoryStream();
-                    using var interactiveTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-                    var interactiveExit = await InteractiveShellClient.RunAsync(
-                        config.Resolve(null)!, clientIdentity, clientTrust, interactiveInput, interactiveOutput,
-                        80, 24, interactiveTimeout.Token);
-                    var interactiveText = Encoding.UTF8.GetString(interactiveOutput.ToArray());
-                    Assert(interactiveExit == 7 && interactiveText.Contains("XAS_INTERACTIVE_OK", StringComparison.Ordinal),
-                        $"Networked ConPTY shell failed: exit {interactiveExit}, output '{interactiveText}'.");
+                    await ExerciseInteractiveShellAsync(
+                        config, clientIdentity, clientTrust);
                 }
 
                 var uploadSource = Path.Combine(root, "source.bin");
@@ -422,6 +324,202 @@ public static class IntegrationTests
         }
 
         await ExerciseWebUiAsync(uiUri, configuration, permissions, peerId);
+    }
+
+    private static async Task ExerciseLocalIpcShellAsync(
+        string root,
+        int port,
+        DeviceIdentity clientIdentity,
+        PeerTrustStore clientTrust,
+        string serverDeviceId)
+    {
+        using var firstOutput = new MemoryStream();
+        using var secondOutput = new MemoryStream();
+        using var firstClient = new LocalDaemonClient(Stream.Null, firstOutput, Stream.Null);
+        using var secondClient = new LocalDaemonClient(Stream.Null, secondOutput, Stream.Null);
+        await using var tls = await MutualTlsTransport.ConnectAsync(
+            "127.0.0.1", port, clientIdentity, clientTrust,
+            serverDeviceId, TimeSpan.FromSeconds(10));
+        await using var frames = new BinaryFrameConnection(tls.Stream, leaveOpen: true);
+
+        var permissions = new PeerPermissionStore(Path.Combine(root, "client-trust"));
+        permissions.SetAllowed(serverDeviceId, Capability.Shell, true);
+        var backend = new GatedIpcShellBackend();
+        await using var shell = new StreamingCommandManager(
+            serverDeviceId, permissions, frames.SendAsync, backend);
+        await using var peer = new MultiplexedProtocolPeer(frames,
+            (request, token) => request.Method is ShellExecWire.Open or ShellExecWire.Close
+                ? shell.HandleRequestAsync(request, token)
+                : ValueTask.FromException<ProtocolMessage>(new NotSupportedException()));
+        peer.MessageReceived += message => shell.HandleMessageAsync(message);
+
+        var lane = Encoding.UTF8.GetBytes(PeerLane.Interactive.ToString());
+        _ = await peer.RequestAsync(
+            "session.lane.open", lane, cancellationToken: CancellationToken.None);
+
+        var firstRequest = new ShellRequest(ShellMode.Exec, null, "dotnet", ["ipc-alpha"]);
+        var secondRequest = new ShellRequest(ShellMode.Exec, null, "dotnet", ["ipc-beta"]);
+        var firstRun = firstClient.RunShellAsync(
+            firstRequest, clientIdentity.DeviceId, CancellationToken.None);
+        var secondRun = secondClient.RunShellAsync(
+            secondRequest, clientIdentity.DeviceId, CancellationToken.None);
+        var bothRuns = Task.WhenAll(firstRun, secondRun);
+        await backend.BothCommandsStarted.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var notice = new ProtocolMessage(
+            MessageKind.Event, 0, 0, "peer.notice",
+            Encoding.UTF8.GetBytes("unrelated control event"));
+        await peer.SendAsync(notice);
+        backend.ReleaseCommands();
+
+        var results = await bothRuns.WaitAsync(TimeSpan.FromSeconds(10));
+        var firstText = Encoding.UTF8.GetString(firstOutput.ToArray());
+        var secondText = Encoding.UTF8.GetString(secondOutput.ToArray());
+        var outputsMatch = results.SequenceEqual([0, 0]) &&
+            firstText == "ipc-alpha" && secondText == "ipc-beta";
+        Assert(outputsMatch,
+            $"Concurrent bound IPC shell commands received unexpected data " +
+            $"(exit {string.Join(',', results)}, A='{firstText}', B='{secondText}').");
+
+        await ExerciseBlockedIpcInputAsync(
+            backend, clientIdentity.DeviceId);
+    }
+
+    private static async Task ExerciseRemoteShellStreamsAsync(
+        LocalConfiguration configuration,
+        DeviceIdentity identity,
+        PeerTrustStore trust)
+    {
+        using var output = new MemoryStream();
+        using var error = new MemoryStream();
+        using var client = new RemoteXasClient(
+            configuration, identity, trust, output, error);
+        var outputRequest = new ShellRequest(ShellMode.Exec, null, "dotnet",
+            [typeof(IntegrationTests).Assembly.Location, "--echo-output", "1500000"]);
+        var outputExit = await client.RunShellAsync(
+            outputRequest, null, CancellationToken.None);
+        Assert(outputExit == 0 && output.Length == 1_500_000 && error.Length == 0,
+            "The CLI client did not receive the full binary output stream.");
+
+        output.SetLength(0);
+        using var input = new MemoryStream(Encoding.UTF8.GetBytes("piped input\n"));
+        using var inputClient = new RemoteXasClient(
+            configuration, identity, trust, output, error, input);
+        var inputRequest = new ShellRequest(ShellMode.Exec, null, "dotnet",
+            [typeof(IntegrationTests).Assembly.Location, "--echo-stdin"]);
+        var inputExit = await inputClient.RunShellAsync(
+            inputRequest, null, CancellationToken.None);
+        var outputText = Encoding.UTF8.GetString(output.ToArray());
+        Assert(inputExit == 0 && outputText == "piped input\n",
+            "The CLI client did not forward binary standard input.");
+    }
+
+    private static async Task ExerciseBlockedIpcInputAsync(
+        GatedIpcShellBackend backend,
+        string clientDeviceId)
+    {
+        using var blockedInput = new SynchronousBlockingInputStream();
+        using var blockedOutput = new MemoryStream();
+        using var blockedClient = new LocalDaemonClient(
+            blockedInput, blockedOutput, Stream.Null);
+        Task<int>? blockedRun = null;
+
+        try
+        {
+            var request = new ShellRequest(
+                ShellMode.Exec, null, "fake", ["ipc-blocked"]);
+            blockedRun = Task.Run(() => blockedClient.RunShellAsync(
+                request, clientDeviceId, CancellationToken.None));
+            await blockedInput.ReadStarted.WaitAsync(TimeSpan.FromSeconds(5));
+            await backend.BlockedCommandStarted.WaitAsync(TimeSpan.FromSeconds(5));
+            backend.ReleaseBlockedCommand();
+
+            var exitCode = await blockedRun.WaitAsync(TimeSpan.FromSeconds(5));
+            var outputText = Encoding.UTF8.GetString(blockedOutput.ToArray());
+            Assert(exitCode == 0 && outputText == "ipc-blocked" &&
+                !blockedInput.IsReleased,
+                "Local IPC shell completion waited for a synchronous stdin read to return.");
+        }
+        finally
+        {
+            backend.ReleaseBlockedCommand();
+            blockedInput.Release();
+            await WaitForBlockedRunAsync(blockedRun);
+            await blockedInput.ReadFinished.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private static async Task WaitForBlockedRunAsync(Task<int>? blockedRun)
+    {
+        if (blockedRun is null)
+        {
+            return;
+        }
+
+        await blockedRun.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    private static async Task ExerciseInteractiveShellAsync(
+        LocalConfiguration configuration,
+        DeviceIdentity clientIdentity,
+        PeerTrustStore clientTrust)
+    {
+        var inputText = "echo XAS_INTERACTIVE_OK\r\nexit /b 7\r\n";
+        using var interactiveInput = new MemoryStream(Encoding.UTF8.GetBytes(inputText));
+        using var interactiveOutput = new MemoryStream();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var exitCode = await InteractiveShellClient.RunAsync(
+            configuration.Resolve(null)!, clientIdentity, clientTrust,
+            interactiveInput, interactiveOutput, 80, 24, timeout.Token);
+        var outputText = Encoding.UTF8.GetString(interactiveOutput.ToArray());
+        var succeeded = exitCode == 7 &&
+            outputText.Contains("XAS_INTERACTIVE_OK", StringComparison.Ordinal);
+        Assert(succeeded,
+            $"Networked ConPTY shell failed: exit {exitCode}, output '{outputText}'.");
+    }
+
+    private static async Task ExerciseClipboardSyncAsync(
+        LocalConfiguration configuration,
+        DeviceIdentity identity,
+        PeerTrustStore trust,
+        RecordingTextClipboard remoteClipboard)
+    {
+        var localClipboard = new RecordingTextClipboard("local initial");
+        using var stop = new CancellationTokenSource();
+        var syncTask = ClipboardClient.SyncAsync(
+            null, configuration, identity, trust,
+            localClipboard, TextWriter.Null, stop.Token);
+
+        try
+        {
+            await WaitUntilAsync(
+                () => localClipboard.ReadCount >= 2 && remoteClipboard.ReadCount >= 2);
+            await localClipboard.SetTextAsync("from local", CancellationToken.None);
+            await WaitUntilAsync(() => remoteClipboard.Text == "from local");
+            await remoteClipboard.SetTextAsync("from remote", CancellationToken.None);
+            await WaitUntilAsync(() => localClipboard.Text == "from remote");
+
+            var remoteWrites = remoteClipboard.WriteCount;
+            await Task.Delay(1600);
+            Assert(remoteClipboard.WriteCount == remoteWrites,
+                "Clipboard sync echoed an imported value back to its origin.");
+        }
+        finally
+        {
+            stop.Cancel();
+            await IgnoreCancellationAsync(syncTask);
+        }
+    }
+
+    private static async Task IgnoreCancellationAsync(Task task)
+    {
+        try
+        {
+            await task;
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private static async Task ExerciseWebUiAsync(
